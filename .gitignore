@@ -1,0 +1,12 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+
+# Tauri generated files
+src-tauri/gen/
+
+# Editors and OS
+.DS_Store
+.idea/
+*.log

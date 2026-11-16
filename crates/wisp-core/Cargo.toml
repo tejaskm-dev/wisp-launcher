@@ -1,0 +1,30 @@
+[package]
+name = "wisp-core"
+description = "Wisp's launcher logic, kept independent of the UI"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+futures-core = "0.3"
+md-5 = "0.11.0"
+nostr-sdk = { version = "0.45", default-features = false, features = ["aws_lc_rs", "rustls-tls-webpki-roots"] }
+# Gift wraps (NIP-59) hide who's talking to whom; NIP-44 encrypts them.
+nostr = { version = "0.45", features = ["std", "nip44", "nip59", "os-rng"] }
+# Both TLS crypto backends end up compiled in (reqwest and the relay websockets differ), so the
+# relay connection picks aws-lc-rs explicitly.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "system-proxy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.11.0"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time", "macros"] }
+whoami = "2"
+zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

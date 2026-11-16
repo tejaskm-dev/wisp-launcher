@@ -1,0 +1,544 @@
+//! Friends inside the app: the relay connection while Friends is on, applying what arrives,
+//! telling friends what you're up to (every few minutes, and when a game starts or stops), and
+//! the commands the Friends page calls. The rules and the wire format live in
+//! wisp_core::social.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as SyncMutex};
+
+use serde::Serialize;
+use tauri::async_runtime::{JoinHandle, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
+use wisp_core::home::instance_label;
+use wisp_core::social::{
+    self, Applied, ClientNotification, Friend, FriendRequest, Message, Net, Party, PartyInvite, Profile, Received,
+    SocialData, SocialStore, Status, StreamExt,
+};
+
+use crate::{Launches, Paths, now_ms};
+
+/// Sent whenever friends change; the payload is a notice worth a toast, if there is one.
+pub const SOCIAL_EVENT: &str = "social";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    title: String,
+    body: Option<String>,
+}
+
+pub struct Social {
+    store: SocialStore,
+    data: SyncMutex<SocialData>,
+    net: Mutex<Option<Arc<Net>>>,
+    tasks: SyncMutex<Vec<JoinHandle<()>>>,
+    /// The latest status from each friend, with when they sent it.
+    presence: SyncMutex<HashMap<String, (Status, i64)>>,
+}
+
+impl Social {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        let store = SocialStore::new(dir);
+        let data = store.load();
+        Self { store, data: SyncMutex::new(data), net: Mutex::new(None), tasks: SyncMutex::new(Vec::new()), presence: SyncMutex::new(HashMap::new()) }
+    }
+
+    fn data(&self) -> std::sync::MutexGuard<'_, SocialData> {
+        self.data.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Changes the data and saves it.
+    fn change<T>(&self, change: impl FnOnce(&mut SocialData) -> T) -> T {
+        let mut data = self.data();
+        let result = change(&mut data);
+        let _ = self.store.save(&data);
+        result
+    }
+
+    fn my_code(&self) -> String {
+        self.change(|data| social::code_of(&data.keys().public_key()))
+    }
+}
+
+fn notify(app: &AppHandle, notice: Option<Notice>) {
+    let _ = app.emit(SOCIAL_EVENT, notice);
+}
+
+fn notice(title: impl Into<String>, body: Option<String>) -> Option<Notice> {
+    Some(Notice { title: title.into(), body })
+}
+
+/// The name friends see: the one set on the Friends page, else the Minecraft account's.
+fn profile(app: &AppHandle, data: &SocialData) -> Profile {
+    let mut profile = data.profile.clone();
+    if profile.name.trim().is_empty() {
+        profile.name = app
+            .try_state::<Paths>()
+            .and_then(|paths| paths.accounts().active())
+            .map_or_else(|| "Wisp player".to_string(), |account| account.name);
+    }
+    profile
+}
+
+async fn net(app: &AppHandle) -> Option<Arc<Net>> {
+    app.state::<Social>().net.lock().await.clone()
+}
+
+async fn send(app: &AppHandle, code: &str, message: &Message) -> Result<(), String> {
+    let net = net(app).await.ok_or("Friends is off.")?;
+    let to = social::parse_code(code).map_err(|error| error.to_string())?;
+    net.send(&to, message).await.map_err(|error| format!("Couldn't reach the relays: {error}"))
+}
+
+/// What we're doing right now, for presence.
+fn my_status(app: &AppHandle, share: bool) -> Status {
+    let Some(launches) = app.try_state::<Launches>() else {
+        return Status::Online;
+    };
+    let running = launches
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find_map(|(id, slot)| match slot.last {
+            wisp_core::launch::LaunchUpdate::Running { started_at } => Some((id.clone(), slot.world.clone(), started_at)),
+            _ => None,
+        });
+    let Some((id, world, since)) = running else {
+        return Status::Online;
+    };
+    if !share {
+        return Status::Playing { label: None, world: None, since };
+    }
+    let paths = app.try_state::<Paths>();
+    let instance = paths.as_ref().and_then(|paths| paths.instances().get(&id));
+    let world_name = match (&world, &paths) {
+        (Some(folder), Some(paths)) => paths
+            .instances()
+            .game_dir(&id)
+            .and_then(|game| wisp_core::worlds::world_dir(&game, folder))
+            .and_then(|dir| wisp_core::worlds::read_info(&dir))
+            .map(|info| info.name),
+        _ => None,
+    };
+    Status::Playing { label: instance.as_ref().map(instance_label), world: world_name, since }
+}
+
+/// Tells every friend what we're up to.
+pub async fn announce(app: &AppHandle) {
+    let Some(net) = net(app).await else {
+        return;
+    };
+    let (friends, message) = {
+        let social = app.state::<Social>();
+        let data = social.data();
+        let status = my_status(app, data.share_activity);
+        let friends: Vec<String> = data.friends.iter().map(|friend| friend.code.clone()).collect();
+        (friends, Message::Presence { profile: profile(app, &data), status })
+    };
+    for code in friends {
+        if let Ok(to) = social::parse_code(&code) {
+            let _ = net.send(&to, &message).await;
+        }
+    }
+}
+
+/// Presence soon, without holding up whoever asked (a game starting, say).
+pub fn announce_soon(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { announce(&app).await });
+}
+
+/// Sends the party's member list to everyone in it (we lead it).
+async fn share_party(app: &AppHandle) {
+    let (party, me) = {
+        let social = app.state::<Social>();
+        let party = social.data().party.clone();
+        (party, social.my_code())
+    };
+    let Some(party) = party else {
+        return;
+    };
+    for member in party.members.iter().filter(|member| **member != me) {
+        let _ = send(app, member, &Message::PartyUpdate { party: party.clone() }).await;
+    }
+}
+
+async fn handle(app: &AppHandle, received: Received) {
+    let social = app.state::<Social>();
+    let from = social::code_of(&received.from);
+    let now = now_ms();
+    // A message's own time, for presence; never in the future.
+    let at = received.at.min(now);
+    let is_presence = matches!(received.message, Message::Presence { .. });
+    let applied = {
+        let me = social.my_code();
+        social.change(|data| data.apply(&received.id, &from, &me, received.message, if is_presence { at } else { now }))
+    };
+    let name_of = |code: &str| {
+        social
+            .data()
+            .friends
+            .iter()
+            .find(|friend| friend.code == code)
+            .map_or_else(|| social::short_code(code), |friend| friend.profile.name.clone())
+    };
+    let shown = match applied {
+        Applied::Nothing => return,
+        Applied::NewRequest { name, .. } => notice(format!("{name} wants to be friends"), Some("Accept or decline on the Friends page.".into())),
+        Applied::BecameFriends { code, name, reply } => {
+            if reply {
+                let mine = profile(app, &social.data());
+                let _ = send(app, &code, &Message::Accept { profile: mine }).await;
+                announce_soon(app);
+            }
+            notice(format!("You and {name} are friends"), None)
+        }
+        Applied::Accepted { name, .. } => {
+            announce_soon(app);
+            notice(format!("{name} accepted your request"), Some("You'll see what they're playing on the Friends page.".into()))
+        }
+        Applied::Removed { code } => {
+            social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&code);
+            None
+        }
+        Applied::Presence { code, status } => {
+            // Old news (a message that sat on a relay) still updates "last seen", not the status.
+            if now - at < social::PRESENCE_TTL_MS {
+                social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code, (status, at));
+            }
+            None
+        }
+        Applied::Invited { from, party } => notice(format!("{} invited you to {party}", name_of(&from)), Some("Join it on the Friends page.".into())),
+        Applied::PartyChanged => {
+            share_party(app).await;
+            None
+        }
+        Applied::PartyUpdated => None,
+        Applied::PartyEnded => notice("The party ended", None),
+    };
+    notify(app, shown);
+}
+
+/// Connects and starts listening. Safe to call when already on.
+pub async fn start(app: &AppHandle) -> Result<(), String> {
+    let social = app.state::<Social>();
+    if social.net.lock().await.is_some() {
+        return Ok(());
+    }
+    let (keys, relays) = social.change(|data| (data.keys(), data.relays.clone()));
+    let (net, mut events) = Net::connect(keys.clone(), &relays).await.map_err(|error| error.to_string())?;
+    let net = Arc::new(net);
+    *social.net.lock().await = Some(net);
+
+    let listener = {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            while let Some(notification) = events.next().await {
+                match notification {
+                    ClientNotification::Event { event, .. } => {
+                        if let Some(received) = social::unwrap(&keys, &event) {
+                            handle(&app, received).await;
+                        }
+                    }
+                    ClientNotification::Shutdown => break,
+                    _ => {}
+                }
+            }
+        })
+    };
+    let heartbeat = {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            // Give the relays a moment to connect before the first hello.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            loop {
+                announce(&app).await;
+                notify(&app, None);
+                tokio::time::sleep(social::PRESENCE_EVERY).await;
+            }
+        })
+    };
+    social.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).extend([listener, heartbeat]);
+    Ok(())
+}
+
+/// Reconnects at startup if Friends was on when Wisp last closed.
+pub fn start_if_enabled(app: &AppHandle) {
+    if !app.state::<Social>().data().enabled {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if start(&app).await.is_ok() {
+            notify(&app, None);
+        }
+    });
+}
+
+/// Says goodbye (friends see you offline) and disconnects.
+pub async fn stop(app: &AppHandle) {
+    let social = app.state::<Social>();
+    let Some(net) = social.net.lock().await.take() else {
+        return;
+    };
+    let (friends, profile) = {
+        let data = social.data();
+        (data.friends.iter().map(|friend| friend.code.clone()).collect::<Vec<_>>(), profile(app, &data))
+    };
+    for code in friends {
+        if let Ok(to) = social::parse_code(&code) {
+            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: Status::Offline }).await;
+        }
+    }
+    for task in social.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain(..) {
+        task.abort();
+    }
+    net.shutdown().await;
+    social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+}
+
+// ── What the Friends page shows ──
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FriendView {
+    #[serde(flatten)]
+    friend: Friend,
+    status: Status,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberView {
+    code: String,
+    name: String,
+    face: Option<String>,
+    status: Status,
+    me: bool,
+    leader: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartyView {
+    #[serde(flatten)]
+    party: Party,
+    members_shown: Vec<MemberView>,
+    leading: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocialView {
+    enabled: bool,
+    /// Relays connected right now (0 while connecting).
+    relays_connected: usize,
+    relays: Vec<String>,
+    code: String,
+    profile: Profile,
+    share_activity: bool,
+    friends: Vec<FriendView>,
+    incoming: Vec<FriendRequest>,
+    outgoing: Vec<FriendRequest>,
+    party: Option<PartyView>,
+    invites: Vec<PartyInvite>,
+}
+
+fn status_of(social: &Social, code: &str, now: i64) -> Status {
+    match social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(code) {
+        Some((status, at)) if now - at < social::PRESENCE_TTL_MS => status.clone(),
+        _ => Status::Offline,
+    }
+}
+
+async fn view(app: &AppHandle) -> SocialView {
+    let social = app.state::<Social>();
+    let connected = match net(app).await {
+        Some(net) => net.connected().await,
+        None => 0,
+    };
+    let me = social.my_code();
+    let now = now_ms();
+    let data = social.data().clone();
+    let mine = profile(app, &data);
+    let my_status = my_status(app, data.share_activity);
+    let mut friends: Vec<FriendView> = data.friends.iter().map(|friend| FriendView { status: status_of(&social, &friend.code, now), friend: friend.clone() }).collect();
+    // Playing first, then online, then the rest by when they were last around.
+    friends.sort_by_key(|view| {
+        let rank = match view.status {
+            Status::Playing { .. } => 0,
+            Status::Online => 1,
+            Status::Offline => 2,
+        };
+        (rank, std::cmp::Reverse(view.friend.last_seen.unwrap_or(0)))
+    });
+    let party = data.party.clone().map(|party| {
+        let members_shown = party
+            .members
+            .iter()
+            .map(|code| {
+                if *code == me {
+                    return MemberView { code: code.clone(), name: mine.name.clone(), face: mine.face.clone(), status: my_status.clone(), me: true, leader: party.leader == me };
+                }
+                let known = data.friends.iter().find(|friend| friend.code == *code);
+                MemberView {
+                    code: code.clone(),
+                    name: known.map_or_else(|| social::short_code(code), |friend| friend.profile.name.clone()),
+                    face: known.and_then(|friend| friend.profile.face.clone()),
+                    status: status_of(&social, code, now),
+                    me: false,
+                    leader: party.leader == *code,
+                }
+            })
+            .collect();
+        PartyView { leading: party.leader == me, members_shown, party }
+    });
+    SocialView {
+        enabled: data.enabled,
+        relays_connected: connected,
+        relays: data.relays.clone(),
+        code: me,
+        profile: mine,
+        share_activity: data.share_activity,
+        friends,
+        incoming: data.incoming.clone(),
+        outgoing: data.outgoing.clone(),
+        party,
+        invites: data.invites.clone(),
+    }
+}
+
+// ── Commands ──
+
+#[tauri::command]
+pub async fn get_social(app: AppHandle) -> Result<SocialView, String> {
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn set_social_enabled(enabled: bool, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.enabled = enabled);
+    if enabled {
+        if let Err(error) = start(&app).await {
+            social.change(|data| data.enabled = false);
+            return Err(error);
+        }
+    } else {
+        stop(&app).await;
+    }
+    Ok(view(&app).await)
+}
+
+/// The name (and skin face) friends see.
+#[tauri::command]
+pub async fn set_social_profile(name: String, face: Option<String>, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| {
+        data.profile.name = name.trim().chars().filter(|c| !c.is_control()).take(32).collect();
+        data.profile.face = face.filter(|face| face.starts_with("data:image/png;base64,") && face.len() < 4096);
+    });
+    announce_soon(&app);
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn set_share_activity(share: bool, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.share_activity = share);
+    announce_soon(&app);
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn add_friend(code: String, note: Option<String>, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    let key = social::parse_code(&code).map_err(|error| error.to_string())?;
+    let code = social::code_of(&key);
+    let me = social.my_code();
+    social.change(|data| data.request(&code, &me, now_ms())).map_err(|error| error.to_string())?;
+    let mine = profile(&app, &social.data());
+    let note = note.map(|note| note.trim().chars().take(200).collect::<String>()).filter(|note| !note.is_empty());
+    send(&app, &code, &Message::Request { profile: mine, note }).await?;
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn accept_friend(code: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.accept(&code, now_ms())).ok_or("That request is gone.")?;
+    let mine = profile(&app, &social.data());
+    send(&app, &code, &Message::Accept { profile: mine }).await?;
+    announce_soon(&app);
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn decline_friend(code: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.decline(&code));
+    Ok(view(&app).await)
+}
+
+/// Removes a friend, or takes back a request we sent.
+#[tauri::command]
+pub async fn remove_friend(code: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.remove(&code));
+    social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&code);
+    let _ = send(&app, &code, &Message::Remove).await;
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn create_party(name: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    let me = social.my_code();
+    social.change(|data| data.create_party(&name, &me, now_ms()));
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn invite_to_party(code: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    let me = social.my_code();
+    let party = social.data().party.clone().ok_or("Start a party first.")?;
+    if party.leader != me {
+        return Err("Only the party's leader can invite people.".into());
+    }
+    send(&app, &code, &Message::PartyInvite { party }).await?;
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn join_party(party_id: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    let me = social.my_code();
+    // Joining one party leaves the one we're in.
+    if social.data().party.is_some() {
+        leave(&app).await;
+    }
+    let party = social.change(|data| data.join(&party_id, &me)).ok_or("That invite is gone.")?;
+    send(&app, &party.leader, &Message::PartyJoin { party_id }).await?;
+    Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn decline_party(party_id: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.invites.retain(|invite| invite.party.id != party_id));
+    Ok(view(&app).await)
+}
+
+async fn leave(app: &AppHandle) {
+    let social = app.state::<Social>();
+    let me = social.my_code();
+    let Some(party) = social.change(|data| data.party.take()) else {
+        return;
+    };
+    if party.leader == me {
+        // The leader leaving ends it for everyone.
+        let ended = Party { members: Vec::new(), ..party.clone() };
+        for member in party.members.iter().filter(|member| **member != me) {
+            let _ = send(app, member, &Message::PartyUpdate { party: ended.clone() }).await;
+        }
+    } else {
+        let _ = send(app, &party.leader, &Message::PartyLeave { party_id: party.id.clone() }).await;
+    }
+}
+
+#[tauri::command]
+pub async fn leave_party(app: AppHandle) -> Result<SocialView, String> {
+    leave(&app).await;
+    Ok(view(&app).await)
+}

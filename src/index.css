@@ -1,0 +1,344 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #0a0908;
+  --color-ink-900: #0e0d0c;
+  --color-ink-850: #141210;
+  --color-ink-800: #171513;
+  --color-ink-700: #1f1c19;
+  --color-cream: #f4eee4;
+  --color-cream-200: #e9e1d5;
+  --color-cream-300: #ddd3c5;
+  --color-cream-400: #c9bfb1;
+  --color-mute: #a89e90;
+  --color-mute-2: #8f867a;
+  --color-ember: #e5484d;
+  --color-ember-soft: #f2979a;
+  --color-moss: #4cc38a;
+  --color-moss-soft: #8fe0b6;
+  --color-amber: #f0a04b;
+  --color-amber-soft: #f4c890;
+  --color-sky: #9db8ff;
+  --color-coral: #f07a5a;
+
+  --font-sans: "Figtree Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --animate-ghost-float: ghost-float 4.2s ease-in-out infinite;
+  --animate-twinkle: twinkle 3.4s ease-in-out infinite;
+  --animate-drift-left: drift-left 10s linear infinite;
+  --animate-drift-right: drift-right 10s linear infinite;
+  --animate-stripes: stripes 0.8s linear infinite;
+  --animate-ping-soft: ping-soft 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  --animate-shimmer: shimmer 1.1s var(--ease-out-expo) both;
+  /* Loading placeholders fade in only if loading takes a moment, so fast loads never flash. */
+  --animate-skeleton-in: skeleton-in 0.35s ease-out 0.15s both;
+  /* A result card arriving; give each card its own animation-delay for a cascade. */
+  --animate-card-in: card-in 0.45s var(--ease-out-expo) both;
+  --animate-progress-slide: progress-slide 1.3s ease-in-out infinite;
+
+  @keyframes ghost-float {
+    0%, 100% { transform: translateY(0) rotate(-3deg); }
+    50% { transform: translateY(-6px) rotate(3deg); }
+  }
+  @keyframes twinkle {
+    0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+    50% { transform: scale(0.72) rotate(45deg); opacity: 0.7; }
+  }
+  @keyframes drift-left {
+    0% { transform: translate3d(0, 0, 0); opacity: 0; }
+    15%, 80% { opacity: 1; }
+    100% { transform: translate3d(-14px, -150px, 0); opacity: 0; }
+  }
+  @keyframes drift-right {
+    0% { transform: translate3d(0, 0, 0); opacity: 0; }
+    15%, 80% { opacity: 1; }
+    100% { transform: translate3d(16px, -150px, 0); opacity: 0; }
+  }
+  @keyframes stripes {
+    to { background-position: 16px 0; }
+  }
+  @keyframes ping-soft {
+    0% { transform: scale(1); opacity: 0.7; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
+  @keyframes shimmer {
+    from { transform: translateX(-140%) skewX(-18deg); }
+    to { transform: translateX(320%) skewX(-18deg); }
+  }
+  @keyframes skeleton-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes progress-slide {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(320%); }
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes skeleton-sweep {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(100%); }
+  }
+}
+
+/* A placeholder block with a soft light sweeping across it (transform only, so it stays on the GPU). */
+@utility skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgb(244 238 228 / 0.06);
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgb(244 238 228 / 0.07), transparent);
+    transform: translateX(-100%);
+    animation: skeleton-sweep 1.5s ease-in-out infinite;
+  }
+}
+
+@utility bg-stripes {
+  background-image: linear-gradient(
+    135deg,
+    rgb(255 255 255 / 0.22) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgb(255 255 255 / 0.22) 50%,
+    rgb(255 255 255 / 0.22) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 16px 16px;
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Range inputs: a cream fill up to the thumb (set --fill to the percentage), dim track after it. */
+@layer components {
+  .wisp-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(to right, var(--color-cream) var(--fill, 0%), rgb(244 238 228 / 0.12) var(--fill, 0%));
+    cursor: pointer;
+  }
+  .wisp-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--color-cream);
+    box-shadow:
+      0 0 0 5px var(--color-ink-800),
+      0 6px 16px rgb(0 0 0 / 0.55);
+    transition: transform 150ms ease-out;
+  }
+  .wisp-range::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 999px;
+    background: var(--color-cream);
+    box-shadow:
+      0 0 0 5px var(--color-ink-800),
+      0 6px 16px rgb(0 0 0 / 0.55);
+  }
+  .wisp-range:active::-webkit-slider-thumb {
+    transform: scale(1.12);
+  }
+  .wisp-range:focus-visible {
+    outline-offset: 8px;
+  }
+}
+
+/* Rendered project descriptions and changelogs (see lib/markdown.ts). */
+@layer components {
+  .prose-wisp {
+    color: var(--color-cream-300);
+    font-size: 15px;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .prose-wisp > * + * {
+    margin-top: 0.9em;
+  }
+  .prose-wisp :is(h1, h2, h3, h4) {
+    color: var(--color-cream);
+    font-family: var(--font-display);
+    font-weight: 700;
+    line-height: 1.25;
+    margin-top: 1.4em;
+  }
+  .prose-wisp h1 { font-size: 1.6em; }
+  .prose-wisp h2 { font-size: 1.35em; }
+  .prose-wisp h3 { font-size: 1.15em; }
+  .prose-wisp a {
+    color: var(--color-cream);
+    text-decoration: underline;
+    text-decoration-color: rgb(244 238 228 / 0.35);
+    text-underline-offset: 3px;
+  }
+  .prose-wisp a:hover {
+    text-decoration-color: var(--color-cream);
+  }
+  .prose-wisp :is(ul, ol) {
+    padding-left: 1.4em;
+  }
+  .prose-wisp ul { list-style: disc; }
+  .prose-wisp ol { list-style: decimal; }
+  .prose-wisp li + li { margin-top: 0.3em; }
+  .prose-wisp img {
+    display: inline-block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 12px;
+  }
+  .prose-wisp :is(code, kbd) {
+    border-radius: 6px;
+    background: rgb(244 238 228 / 0.08);
+    padding: 0.1em 0.4em;
+    font-size: 0.88em;
+  }
+  .prose-wisp pre {
+    overflow-x: auto;
+    border-radius: 14px;
+    background: var(--color-ink-900);
+    padding: 1em 1.2em;
+  }
+  .prose-wisp pre code {
+    background: none;
+    padding: 0;
+  }
+  .prose-wisp blockquote {
+    border-left: 3px solid rgb(244 238 228 / 0.2);
+    padding-left: 1em;
+    color: var(--color-mute);
+  }
+  .prose-wisp hr {
+    border: 0;
+    border-top: 1px solid rgb(244 238 228 / 0.1);
+  }
+  .prose-wisp table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92em;
+  }
+  .prose-wisp :is(th, td) {
+    border: 1px solid rgb(244 238 228 / 0.1);
+    padding: 0.45em 0.7em;
+    text-align: left;
+  }
+  .prose-wisp details summary {
+    cursor: pointer;
+    color: var(--color-cream);
+    font-weight: 600;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    color-scheme: dark;
+    background: var(--color-ink-900);
+  }
+
+  /* Desktop-app feel: no stray text selection or image dragging outside inputs. */
+  body {
+    overflow: hidden;
+    background: var(--color-ink-900);
+    color: var(--color-cream);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  img {
+    -webkit-user-drag: none;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-ember) 45%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-cream);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-thumb {
+    border: 4px solid transparent;
+    border-radius: 999px;
+    background: rgb(244 238 228 / 0.12) padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(244 238 228 / 0.22);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* While Wisp isn't the focused window, ambient motion stops so the compositor can idle. */
+[data-idle] .animate-ghost-float,
+[data-idle] .animate-twinkle,
+[data-idle] .animate-drift-left,
+[data-idle] .animate-drift-right,
+[data-idle] .animate-ping-soft,
+[data-idle] .animate-progress-slide,
+[data-idle] .skeleton::after {
+  animation-play-state: paused;
+}
+
+/* Images in descriptions from other websites, when Settings → Privacy hides them. */
+.prose-wisp img[data-blocked] {
+  display: none;
+}
+
+/* Settings → Appearance → Motion: "system" follows the OS, "reduced" always calms, "full" never does. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

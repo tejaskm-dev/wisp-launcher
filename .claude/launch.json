@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wisp-ui",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "port": 1420
+    },
+    {
+      "name": "wisp-ui-attach",
+      "url": "http://localhost:1420"
+    }
+  ]
+}

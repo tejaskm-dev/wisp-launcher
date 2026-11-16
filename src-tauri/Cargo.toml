@@ -1,0 +1,19 @@
+[package]
+name = "wisp"
+description = "Wisp, a fast Minecraft launcher with cloud sync"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tokio = { version = "1.54.1", features = ["sync", "macros", "time"] }
+trash = "5"
+wisp-core = { path = "../crates/wisp-core" }
