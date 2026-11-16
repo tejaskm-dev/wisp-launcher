@@ -6,6 +6,8 @@ import type {
   Account,
   Category,
   CurseForgeStatus,
+  FixedEvent,
+  FixOffer,
   HomeSnapshot,
   Instance,
   InstallEvent,
@@ -26,13 +28,17 @@ import type {
   ProjectSummary,
   ProjectType,
   ProjectVersion,
+  PublicServer,
   RestorePoint,
+  SavedServer,
   Screenshot,
   SearchQuery,
   SearchResults,
+  ServerStatus,
   Settings,
   Skin,
   SkinImport,
+  SkinLayerData,
   SkinLibrary,
   SkinModel,
   SocialNotice,
@@ -70,8 +76,9 @@ export const getDataFolder = () => call<string>("get_data_folder", undefined, (p
 export const openDataFolder = () => call<void>("open_data_folder", undefined, (p) => p.openFolder());
 export const getFeaturedModpacks = () => call<Project[]>("get_featured_modpacks", undefined, (p) => p.featuredModpacks());
 export const getJavaNews = () => call<PatchNote[]>("get_java_news", undefined, (p) => p.javaNews());
-/** With a world (its folder), the game opens straight into it on versions that can. */
-export const launchInstance = (id: string, world: string | null = null) => call<void>("launch_instance", { id, world }, (p) => p.launchInstance());
+/** With a world (its folder) or a server (its address), the game goes straight there. */
+export const launchInstance = (id: string, world: string | null = null, server: string | null = null) =>
+  call<void>("launch_instance", { id, world, server }, (p) => p.launchInstance());
 export const stopInstance = (id: string) => call<void>("stop_instance", { id }, () => Promise.resolve());
 export const getLaunches = () => call<LaunchEvent[]>("get_launches", undefined, () => Promise.resolve([]));
 export const getSystemMemory = () => call<number | null>("get_system_memory", undefined, () => Promise.resolve(16384));
@@ -165,6 +172,10 @@ export const deleteRestorePoint = (id: string) => call<number>("delete_restore_p
 
 export const getSkins = () => call<SkinLibrary>("get_skins", undefined, (p) => p.skins());
 /** A skin's PNG as a data URL (the viewer and editor read its pixels, so it can't come from another origin). */
+/** The editor's layers for a skin (each PNG as base64), if it was saved with them. */
+export const getSkinLayers = (id: string) => call<SkinLayerData[] | null>("get_skin_layers", { id }, (p) => p.skinLayers(id));
+/** Keeps the editor's layers beside a skin; an empty list forgets them. */
+export const setSkinLayers = (id: string, layers: SkinLayerData[]) => call<void>("set_skin_layers", { id, layers }, (p) => p.setSkinLayers(id, layers));
 export const getSkinDataUrl = (id: string) =>
   call<string>("get_skin_png", { id }, (p) => p.skinDataUrl(id)).then((png) => (png.startsWith("data:") ? png : `data:image/png;base64,${png}`));
 /** `png` is base64 (or a data URL). With no model, Wisp guesses it from the picture. */
@@ -252,6 +263,29 @@ export function onFileDrop(handler: (drop: FileDrop) => void): () => void {
 export function onInstallEvent(handler: (event: InstallEvent) => void): () => void {
   if (!isDesktop) return () => {};
   const stop = listen<InstallEvent>("install", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
+
+// ── Servers ──
+
+/** Each server's status, in the order asked (from memory if asked in the last minute, unless `refresh`). */
+export const getServerStatuses = (addresses: string[], refresh = false) =>
+  call<ServerStatus[]>("get_server_statuses", { addresses, refresh }, (p) => p.serverStatuses(addresses));
+export const getPublicServers = () => call<PublicServer[]>("get_public_servers", undefined, (p) => p.publicServers());
+export const addServer = (instanceId: string, name: string, address: string) =>
+  call<SavedServer>("add_server", { instanceId, name, address }, (p) => p.addServer(instanceId, name, address));
+export const removeServer = (instanceId: string, address: string) => call<void>("remove_server", { instanceId, address }, (p) => p.removeServer(instanceId, address));
+
+// ── Fixes ──
+
+export const undoFix = (entryId: string) => call<void>("undo_fix", { entryId }, (p) => p.needsDesktop("Undoing a fix"));
+/** Does a fix Wisp offered; returns its journal entry, for Undo. */
+export const applyFix = (instanceId: string, action: FixOffer["action"]) => call<string | null>("apply_fix", { instanceId, action }, (p) => p.needsDesktop("Fixing"));
+
+/** Calls `handler` when Wisp fixes (or finds) problems with an instance. */
+export function onFixed(handler: (event: FixedEvent) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<FixedEvent>("fixed", (event) => handler(event.payload));
   return () => void stop.then((unlisten) => unlisten());
 }
 

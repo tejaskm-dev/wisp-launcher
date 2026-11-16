@@ -180,6 +180,18 @@ impl RuntimePlan {
 }
 
 /// The Java major version of one of Mojang's runtime components.
+/// Mojang's Java runtime for a major version, for when a mod needs a newer one than Minecraft does.
+pub fn component_for(major: u32) -> Option<&'static str> {
+    Some(match major {
+        8 => "jre-legacy",
+        16 => "java-runtime-alpha",
+        17 => "java-runtime-gamma",
+        21 => "java-runtime-delta",
+        25 => "java-runtime-epsilon",
+        _ => return None,
+    })
+}
+
 pub fn major_version(component: &str) -> Option<u32> {
     Some(match component {
         "jre-legacy" => 8,

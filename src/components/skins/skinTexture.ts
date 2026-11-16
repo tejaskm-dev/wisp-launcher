@@ -4,10 +4,10 @@
 
 export const SIZE = 64;
 
-type FaceName = "top" | "bottom" | "right" | "front" | "left" | "back";
+export type FaceName = "top" | "bottom" | "right" | "front" | "left" | "back";
 export type PartName = "head" | "body" | "rightArm" | "leftArm" | "rightLeg" | "leftLeg";
 
-interface Box {
+export interface Box {
   part: PartName;
   overlay: boolean;
   u: number;
@@ -36,14 +36,14 @@ export function boxes(slim: boolean): Box[] {
   ];
 }
 
-interface Rect {
+export interface Rect {
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-function faces(box: Box): Record<FaceName, Rect> {
+export function faces(box: Box): Record<FaceName, Rect> {
   const { u, v, w, h, d } = box;
   return {
     top: { x: u + d, y: v, w, h: d },

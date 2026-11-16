@@ -8,6 +8,7 @@ import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageTabs } from "../components/ui/PageTabs";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { onFileDrop } from "../data/api";
 import type { WorldSummary } from "../data/types";
@@ -83,6 +84,14 @@ export function WorldsPage() {
             </Button>
           ) : undefined
         }
+      />
+      <PageTabs
+        label="Worlds and servers"
+        current="worlds"
+        tabs={[
+          { id: "worlds", label: "Worlds", count: worlds?.length },
+          { id: "servers", label: "Servers", count: home?.servers.length },
+        ]}
       />
 
       {worlds === null ? (

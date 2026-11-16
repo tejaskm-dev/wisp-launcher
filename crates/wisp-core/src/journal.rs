@@ -48,6 +48,9 @@ pub enum Event {
         new_worlds: Vec<String>,
         /// Screenshots taken during the session (files in the instance's screenshots folder).
         screenshots: Vec<String>,
+        /// Servers joined during the session, as addresses.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        servers: Vec<String>,
         /// The computer it was played on.
         device: String,
         /// The instance as people know it, e.g. "Fabric 26.3".
@@ -102,6 +105,23 @@ pub enum Event {
     WorldDeleted {
         name: String,
     },
+    /// Wisp fixed what stopped (or would have stopped) the game.
+    Fixed {
+        /// What went wrong, a sentence each.
+        found: Vec<String>,
+        /// What Wisp did about it, a sentence each.
+        fixed: Vec<String>,
+        /// The changes, for Undo.
+        changes: Vec<crate::doctor::Change>,
+        /// True when it happened after a crash (rather than before starting).
+        #[serde(default)]
+        after_crash: bool,
+    },
+    /// A fix was put back.
+    FixUndone {
+        /// The Fixed entry's id.
+        fix: String,
+    },
 }
 
 impl Event {
@@ -118,6 +138,8 @@ impl Event {
             Event::WorldImported { .. } => "world-imported",
             Event::WorldExported { .. } => "world-exported",
             Event::WorldDeleted { .. } => "world-deleted",
+            Event::Fixed { .. } => "fixed",
+            Event::FixUndone { .. } => "fix-undone",
         }
     }
 }
@@ -224,6 +246,11 @@ impl Journal {
         entries
     }
 
+    /// One entry by id.
+    pub fn get(&self, id: &str) -> Option<Entry> {
+        self.read_all().into_iter().find(|entry| entry.id == id)
+    }
+
     /// The newest note about a world, if there is one.
     pub fn latest_note(&self, instance_id: &str, world: &str) -> Option<Entry> {
         self.read_all()
@@ -289,6 +316,8 @@ pub struct SessionFacts {
     pub worlds: Vec<String>,
     pub new_worlds: Vec<String>,
     pub screenshots: Vec<String>,
+    /// Servers the game connected to, from this session's log.
+    pub servers: Vec<String>,
 }
 
 pub fn session_facts(game_dir: &Path, started_at: i64, ended_at: i64) -> SessionFacts {
@@ -308,7 +337,22 @@ pub fn session_facts(game_dir: &Path, started_at: i64, ended_at: i64) -> Session
             .map(|world| world.folder.clone())
             .collect(),
         screenshots: crate::screenshots::taken_between(game_dir, from, to),
+        servers: servers_in_log(game_dir, from),
     }
+}
+
+/// The servers in latest.log, if the game wrote it during this session.
+fn servers_in_log(game_dir: &Path, since: i64) -> Vec<String> {
+    let log = game_dir.join("logs").join("latest.log");
+    let written = std::fs::metadata(&log)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since_epoch| since_epoch.as_millis() as i64);
+    if written < since {
+        return Vec::new();
+    }
+    std::fs::read(&log).map(|bytes| crate::servers::joined_in_log(&String::from_utf8_lossy(&bytes))).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -326,6 +370,7 @@ mod tests {
             worlds: vec!["New World".into()],
             new_worlds: vec![],
             screenshots: vec!["a.png".into()],
+            servers: vec![],
             device: "Mac".into(),
             label: "Fabric 26.3".into(),
         };

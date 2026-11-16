@@ -26,6 +26,7 @@ export const EMPTY_HOME: HomeSnapshot = {
   account: null,
   device: { name: "This computer", os: "" },
   instances: [],
+  servers: [],
   worlds: [],
   sync: { state: "off" },
 };

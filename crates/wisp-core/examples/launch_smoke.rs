@@ -69,6 +69,8 @@ async fn main() {
             last_played: None,
             icon: None,
             modpack: None,
+            memory_mb: None,
+            java_major: None,
         },
         game_dir: std::env::temp_dir().join("wisp-smoke-test"),
         account: Account {
@@ -97,7 +99,7 @@ async fn main() {
             wrapper: launch::split_args(&env("WISP_WRAPPER").unwrap_or_default()),
             post_exit: env("WISP_POST"),
         },
-        quick_play: env("WISP_WORLD"),
+        quick_play: env("WISP_WORLD").map(wisp_core::launch::QuickPlay::World),
     };
 
     let started = Instant::now();

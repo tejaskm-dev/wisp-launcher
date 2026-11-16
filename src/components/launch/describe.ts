@@ -45,6 +45,8 @@ export function describeLaunch(update: LaunchUpdate | undefined, now: number): L
     }
     case "installing":
       return { kind: "busy", label: `Installing ${update.loader}…`, detail: `Running ${update.loader}'s installer. This happens once per version.`, progress: null };
+    case "fixing":
+      return { kind: "busy", label: "Fixing…", detail: update.message, progress: null };
     case "starting":
       return { kind: "busy", label: "Starting…", detail: "Opening Minecraft", progress: null };
     case "running":
@@ -56,7 +58,7 @@ export function describeLaunch(update: LaunchUpdate | undefined, now: number): L
         ? {
             kind: "problem",
             label: "Play again",
-            detail: crashReason(update.logTail) ?? `Minecraft closed unexpectedly (code ${update.code ?? "?"}).`,
+            detail: update.help?.found[0] ?? crashReason(update.logTail) ?? `Minecraft closed unexpectedly (code ${update.code ?? "?"}).`,
             progress: null,
           }
         : IDLE;

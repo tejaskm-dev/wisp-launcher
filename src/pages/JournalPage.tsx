@@ -9,6 +9,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageTabs } from "../components/ui/PageTabs";
 import { Select, type SelectOption } from "../components/ui/Select";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { playTime } from "../components/worlds/WorldArt";
@@ -19,13 +20,14 @@ import { formatBytes } from "../lib/format";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 
-type Filter = "all" | "sessions" | "notes" | "restore" | "content";
+type Filter = "all" | "sessions" | "notes" | "restore" | "content" | "fixes";
 const FILTERS: { value: Filter; label: string; kinds: JournalKind[] }[] = [
   { value: "all", label: "Everything", kinds: [] },
   { value: "sessions", label: "Sessions", kinds: ["session"] },
   { value: "notes", label: "Notes", kinds: ["note"] },
   { value: "restore", label: "Restore points", kinds: ["restore-point", "restored"] },
   { value: "content", label: "Mods & packs", kinds: ["content-added", "content-removed", "modpack-installed", "instance-created"] },
+  { value: "fixes", label: "Fixes", kinds: ["fixed", "fix-undone"] },
 ];
 const NO_WORLD = "none";
 const WEEK = 7 * 86_400_000;
@@ -104,7 +106,15 @@ export function JournalPage() {
     <Page className="max-w-[1100px]">
       <PageHeader
         title="Journal"
-        subtitle="Your game's history, like a git log you'd actually want to scroll: every session with its worlds and screenshots, your notes, restore points, and mods coming and going."
+        subtitle="Your game's history, like a git log you'd actually want to scroll: every session with its worlds and screenshots, your notes, restore points, mods coming and going, and what Wisp fixed."
+      />
+      <PageTabs
+        label="Journal"
+        current="journal"
+        tabs={[
+          { id: "journal", label: "Timeline" },
+          { id: "screenshots", label: "Screenshots" },
+        ]}
       />
 
       <m.dl variants={fadeUp} className="grid grid-cols-2 gap-3 md:grid-cols-4">

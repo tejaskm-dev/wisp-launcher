@@ -1,41 +1,86 @@
-import { ArrowLeft, Eraser, FlipHorizontal2, Grid3x3, Layers, PaintBucket, Pipette, Pencil, Redo2, Rotate3d, Undo2 } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  Brush,
+  Copy,
+  Eraser,
+  Eye,
+  EyeOff,
+  FlipHorizontal2,
+  Grid3x3,
+  Layers,
+  Merge,
+  Moon,
+  PaintBucket,
+  Pencil,
+  Pipette,
+  Plus,
+  Redo2,
+  Rotate3d,
+  Shirt,
+  Sparkles,
+  Sun,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { MOUSE, Raycaster, Vector2, type Object3D } from "three";
 import type { SkinViewer } from "skinview3d";
 import type { SkinModel } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
+import { MenuItem, Popover } from "../ui/Popover";
 import { Segmented } from "../ui/Segmented";
+import { PIECES, blankCanvas, composite, jitter, makeLayer, outlineLayer, pen, pieceLayer, saveLayers, shadingLayer, textureLayer, tint, type PaintLayer, type Piece, type SavedLayer } from "./layers";
 import { SkinStage } from "./SkinStage";
 import { PALETTE, SIZE, faceOutlines, floodFill, hexToRgba, isOverlay, makeDefaultSkin, mirrorPixel, rgbaToHex } from "./skinTexture";
 
-type Tool = "pencil" | "eraser" | "fill" | "picker" | "rotate";
-type Layer = "base" | "overlay";
+type Tool = "pencil" | "texture" | "darken" | "lighten" | "eraser" | "fill" | "picker" | "rotate";
+type Surface = "base" | "overlay";
 
 const ZOOM = 7;
-const HISTORY = 80;
+const HISTORY = 60;
+/** How much one pass of the darken or lighten brush changes a pixel. */
+const SHADE_STEP = 0.14;
+
+/** A layer to start from: one the skin was saved with, read back into a canvas. */
+export interface StartLayer {
+  name: string;
+  visible: boolean;
+  opacity: number;
+  canvas: HTMLCanvasElement;
+}
 
 interface SkinEditorProps {
   name: string;
   model: SkinModel;
   /** The picture to start from (copied, never changed). */
   source: HTMLCanvasElement;
+  /** The layers the skin was saved with, if any; otherwise the picture is the only layer. */
+  layers?: StartLayer[] | null;
   isNew: boolean;
-  onSave: (png: string, name: string, model: SkinModel, asNew: boolean) => Promise<void>;
+  /** `layers` is null when there's only one: then the skin is all there is to keep. */
+  onSave: (png: string, name: string, model: SkinModel, asNew: boolean, layers: SavedLayer[] | null) => Promise<void>;
   onCancel: () => void;
 }
 
-/** Paint a skin on the 3D model or on its flat texture. */
-export function SkinEditor({ name: initialName, model: initialModel, source, isNew, onSave, onCancel }: SkinEditorProps) {
-  // The picture being edited: one 64×64 canvas everything reads and writes.
-  const doc = useMemo(() => {
-    const canvas = document.createElement("canvas");
-    canvas.width = SIZE;
-    canvas.height = SIZE;
-    canvas.getContext("2d", { willReadFrequently: true })?.drawImage(source, 0, 0);
-    return canvas;
-  }, [source]);
-  const context = useMemo(() => doc.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D, [doc]);
+interface Snapshot {
+  layers: { id: string; name: string; visible: boolean; opacity: number; data: ImageData }[];
+  active: string;
+}
+
+/** Paint a skin on the 3D model or on its flat texture, in layers. */
+export function SkinEditor({ name: initialName, model: initialModel, source, layers: startLayers, isNew, onSave, onCancel }: SkinEditorProps) {
+  // The skin as everything shows it: the visible layers stacked.
+  const doc = useMemo(() => blankCanvas(), []);
+  const [layers, setLayerState] = useState<PaintLayer[]>(() =>
+    startLayers && startLayers.length > 0 ? startLayers.map((layer) => makeLayer(layer.name, layer.canvas, layer)) : [makeLayer("Skin", source)],
+  );
+  const layersRef = useRef(layers);
+  const [activeId, setActiveIdState] = useState(() => layers[layers.length - 1].id);
+  const activeRef = useRef(activeId);
+  const active = layers.find((layer) => layer.id === activeId) ?? layers[layers.length - 1];
 
   const [name, setName] = useState(initialName);
   const [model, setModel] = useState<SkinModel>(initialModel);
@@ -43,85 +88,134 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
   const [color, setColor] = useState("#e5484d");
   const [recent, setRecent] = useState<string[]>([]);
   const [mirror, setMirror] = useState(false);
-  const [layer, setLayer] = useState<Layer>("base");
+  const [surface, setSurface] = useState<Surface>("base");
   const [showOverlay, setShowOverlay] = useState(true);
   const [grid, setGrid] = useState(true);
   const [version, setVersion] = useState(0);
   const [saving, setSaving] = useState(false);
-  const history = useRef<ImageData[]>([]);
-  const future = useRef<ImageData[]>([]);
+  const history = useRef<Snapshot[]>([]);
+  const future = useRef<Snapshot[]>([]);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const viewer = useRef<SkinViewer | null>(null);
   const slim = model === "slim";
 
-  const changed = useCallback(() => setVersion((count) => count + 1), []);
+  /** Re-stacks the layers into the skin and redraws everything that shows it. */
+  const changed = useCallback(() => {
+    composite(layersRef.current, doc);
+    setVersion((count) => count + 1);
+  }, [doc]);
+  const setLayers = useCallback(
+    (next: PaintLayer[]) => {
+      layersRef.current = next;
+      setLayerState(next);
+      changed();
+    },
+    [changed],
+  );
+  const setActive = (id: string) => {
+    activeRef.current = id;
+    setActiveIdState(id);
+  };
+  useEffect(() => changed(), [changed]);
+
+  // ── History: every layer's pixels and settings ──
+  const capture = useCallback(
+    (): Snapshot => ({
+      layers: layersRef.current.map((layer) => ({ id: layer.id, name: layer.name, visible: layer.visible, opacity: layer.opacity, data: pen(layer.canvas).getImageData(0, 0, SIZE, SIZE) })),
+      active: activeRef.current,
+    }),
+    [],
+  );
+  const restore = useCallback(
+    (snapshot: Snapshot) => {
+      const known = new Map(layersRef.current.map((layer) => [layer.id, layer]));
+      const next = snapshot.layers.map((entry) => {
+        const canvas = known.get(entry.id)?.canvas ?? blankCanvas();
+        pen(canvas).putImageData(entry.data, 0, 0);
+        return { id: entry.id, name: entry.name, visible: entry.visible, opacity: entry.opacity, canvas };
+      });
+      setActive(snapshot.active);
+      setLayers(next);
+    },
+    [setLayers],
+  );
   const snapshot = useCallback(() => {
-    history.current.push(context.getImageData(0, 0, SIZE, SIZE));
+    history.current.push(capture());
     if (history.current.length > HISTORY) history.current.shift();
     future.current = [];
     setCanUndo(true);
     setCanRedo(false);
-  }, [context]);
+  }, [capture]);
   const undo = useCallback(() => {
     const previous = history.current.pop();
     if (!previous) return;
-    future.current.push(context.getImageData(0, 0, SIZE, SIZE));
-    context.putImageData(previous, 0, 0);
+    future.current.push(capture());
+    restore(previous);
     setCanUndo(history.current.length > 0);
     setCanRedo(true);
-    changed();
-  }, [context, changed]);
+  }, [capture, restore]);
   const redo = useCallback(() => {
     const next = future.current.pop();
     if (!next) return;
-    history.current.push(context.getImageData(0, 0, SIZE, SIZE));
-    context.putImageData(next, 0, 0);
+    history.current.push(capture());
+    restore(next);
     setCanUndo(true);
     setCanRedo(future.current.length > 0);
-    changed();
-  }, [context, changed]);
+  }, [capture, restore]);
 
   const remember = (hex: string) => setRecent((current) => [hex, ...current.filter((known) => known !== hex)].slice(0, 10));
 
-  /** Applies the current tool at one texture pixel (and its mirror). Returns false if nothing to do. */
-  const apply = useCallback(
-    (x: number, y: number) => {
-      if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
-      const targets: [number, number][] = [[x, y]];
-      if (mirror) {
-        const twin = mirrorPixel(x, y, slim);
-        if (twin && (twin[0] !== x || twin[1] !== y)) targets.push(twin);
-      }
-      if (tool === "picker") {
-        const pixel = context.getImageData(x, y, 1, 1).data;
-        if (pixel[3] > 0) {
-          const hex = rgbaToHex(pixel);
-          setColor(hex);
-          remember(hex);
-        }
-        setTool("pencil");
-        return;
-      }
-      if (tool === "fill") {
-        const image = context.getImageData(0, 0, SIZE, SIZE);
-        for (const [tx, ty] of targets) floodFill(image, tx, ty, hexToRgba(color), slim);
-        context.putImageData(image, 0, 0);
-        remember(color);
-        return;
-      }
-      for (const [tx, ty] of targets) {
-        if (tool === "eraser") context.clearRect(tx, ty, 1, 1);
-        else {
-          context.fillStyle = color;
-          context.fillRect(tx, ty, 1, 1);
-        }
-      }
-    },
-    [context, mirror, slim, tool, color],
-  );
+  /** The skin's colour at a pixel (what you see, all layers together), or null where it's clear. */
+  const seen = (x: number, y: number): string | null => {
+    const pixel = pen(doc).getImageData(x, y, 1, 1).data;
+    return pixel[3] > 0 ? rgbaToHex(pixel) : null;
+  };
 
-  // Copy the picture into the 3D model's texture whenever it changes.
+  /** Applies the current tool at one texture pixel (and its mirror), on the active layer. */
+  const apply = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
+    const context = pen(active.canvas);
+    const targets: [number, number][] = [[x, y]];
+    if (mirror) {
+      const twin = mirrorPixel(x, y, slim);
+      if (twin && (twin[0] !== x || twin[1] !== y)) targets.push(twin);
+    }
+    if (tool === "picker") {
+      const hex = seen(x, y);
+      if (hex) {
+        setColor(hex);
+        remember(hex);
+      }
+      setTool("pencil");
+      return;
+    }
+    if (tool === "fill") {
+      const image = context.getImageData(0, 0, SIZE, SIZE);
+      for (const [tx, ty] of targets) floodFill(image, tx, ty, hexToRgba(color), slim);
+      context.putImageData(image, 0, 0);
+      remember(color);
+      return;
+    }
+    for (const [tx, ty] of targets) {
+      if (tool === "eraser") {
+        context.clearRect(tx, ty, 1, 1);
+        continue;
+      }
+      let paint: string | null = color;
+      if (tool === "texture") paint = jitter(color);
+      else if (tool === "darken" || tool === "lighten") {
+        const under = seen(tx, ty);
+        paint = under && tint(under, tool === "darken" ? -SHADE_STEP : SHADE_STEP);
+      }
+      if (!paint) continue;
+      context.fillStyle = paint;
+      context.fillRect(tx, ty, 1, 1);
+    }
+  };
+  const paints = tool !== "picker" && tool !== "fill" && tool !== "rotate";
+
+  // Copy the skin into the 3D model's texture whenever it changes.
   useEffect(() => {
     const view = viewer.current;
     if (!view) return;
@@ -144,8 +238,8 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
   }, [slim]);
 
   useEffect(() => {
-    viewer.current?.playerObject.skin.setOuterLayerVisible(showOverlay || layer === "overlay");
-  }, [showOverlay, layer]);
+    viewer.current?.playerObject.skin.setOuterLayerVisible(showOverlay || surface === "overlay");
+  }, [showOverlay, surface]);
 
   // Left-drag paints; right-drag (or the rotate tool) turns the model.
   useEffect(() => {
@@ -183,13 +277,13 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
     raycaster.setFromCamera(pointer, view.camera);
     const skin = view.playerObject.skin;
     const parts = [skin.head, skin.body, skin.rightArm, skin.leftArm, skin.rightLeg, skin.leftLeg];
-    const targets: Object3D[] = parts.map((part) => (layer === "overlay" ? part.outerLayer : part.innerLayer));
+    const targets: Object3D[] = parts.map((part) => (surface === "overlay" ? part.outerLayer : part.innerLayer));
     const hit = raycaster.intersectObjects(targets, false)[0];
     if (!hit?.uv) return null;
     const x = Math.min(SIZE - 1, Math.floor(hit.uv.x * SIZE));
     const y = Math.min(SIZE - 1, Math.floor((1 - hit.uv.y) * SIZE));
-    // A stray hit on the wrong layer's pixels is ignored.
-    if (isOverlay(x, y, slim) !== (layer === "overlay")) return null;
+    // A stray hit on the other surface's pixels is ignored.
+    if (isOverlay(x, y, slim) !== (surface === "overlay")) return null;
     return [x, y];
   };
   const onModelDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -198,9 +292,9 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
     if (!pixel) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     if (tool !== "picker") snapshot();
-    stroke.current = { painting: tool === "pencil" || tool === "eraser", last: pixel.join() };
+    stroke.current = { painting: paints, last: pixel.join() };
     apply(pixel[0], pixel[1]);
-    if (tool === "pencil") remember(color);
+    if (tool === "pencil" || tool === "texture") remember(color);
     changed();
   };
   const onModelMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -232,7 +326,6 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
         g.fillRect(x * ZOOM, y * ZOOM, ZOOM, ZOOM);
       }
     }
-    // Areas that aren't part of the skin are dimmed.
     g.imageSmoothingEnabled = false;
     g.drawImage(doc, 0, 0, px, px);
     for (const face of faceOutlines(slim)) {
@@ -285,9 +378,9 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
     const pixel = flatPixel(event);
     event.currentTarget.setPointerCapture(event.pointerId);
     if (tool !== "picker") snapshot();
-    flatStroke.current = { painting: tool === "pencil" || tool === "eraser", last: pixel };
+    flatStroke.current = { painting: paints, last: pixel };
     apply(pixel[0], pixel[1]);
-    if (tool === "pencil") remember(color);
+    if (tool === "pencil" || tool === "texture") remember(color);
     changed();
   };
   const onFlatMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -301,7 +394,72 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
     changed();
   };
 
-  // Shortcuts: B E G I R tools, M mirror, ⌘Z undo, ⇧⌘Z redo.
+  // ── Layers ──
+  const indexOf = (id: string) => layersRef.current.findIndex((layer) => layer.id === id);
+  /** Puts a new layer just above the active one and makes it active. */
+  const addLayer = (layer: PaintLayer) => {
+    snapshot();
+    const next = [...layersRef.current];
+    next.splice(indexOf(activeRef.current) + 1, 0, layer);
+    setActive(layer.id);
+    setLayers(next);
+  };
+  const updateLayer = (id: string, patch: Partial<PaintLayer>, remembered = true) => {
+    if (remembered) snapshot();
+    setLayers(layersRef.current.map((layer) => (layer.id === id ? { ...layer, ...patch } : layer)));
+  };
+  const moveLayer = (id: string, by: number) => {
+    const from = indexOf(id);
+    const to = from + by;
+    if (from < 0 || to < 0 || to >= layersRef.current.length) return;
+    snapshot();
+    const next = [...layersRef.current];
+    [next[from], next[to]] = [next[to], next[from]];
+    setLayers(next);
+  };
+  const removeLayer = (id: string) => {
+    if (layersRef.current.length < 2) return;
+    snapshot();
+    const index = indexOf(id);
+    const next = layersRef.current.filter((layer) => layer.id !== id);
+    if (activeRef.current === id) setActive(next[Math.max(0, index - 1)].id);
+    setLayers(next);
+  };
+  const duplicateLayer = (id: string) => {
+    const layer = layersRef.current[indexOf(id)];
+    if (layer) addLayer(makeLayer(`${layer.name} copy`, layer.canvas, layer));
+  };
+  /** Paints a layer (as it shows) onto the one below, then drops it. */
+  const mergeDown = (id: string) => {
+    const index = indexOf(id);
+    if (index < 1) return;
+    snapshot();
+    const [below, above] = [layersRef.current[index - 1], layersRef.current[index]];
+    if (above.visible) {
+      const g = pen(below.canvas);
+      g.globalAlpha = above.opacity;
+      g.drawImage(above.canvas, 0, 0);
+      g.globalAlpha = 1;
+    }
+    setActive(below.id);
+    setLayers(layersRef.current.filter((layer) => layer.id !== id));
+  };
+  /** A layer made from the skin as it is now (shading, texture, outlines). */
+  const addEffect = (label: string, make: (skin: ImageData, slim: boolean) => HTMLCanvasElement, opacity = 1) => {
+    composite(layersRef.current, doc);
+    const skin = pen(doc).getImageData(0, 0, SIZE, SIZE);
+    const layer = makeLayer(label, make(skin, slim), { opacity });
+    snapshot();
+    const next = [...layersRef.current, layer];
+    setActive(layer.id);
+    setLayers(next);
+  };
+  const addPiece = (piece: Piece, label: string) => {
+    addLayer(makeLayer(label, pieceLayer(piece, color, slim)));
+    remember(color);
+  };
+
+  // Shortcuts: B T D L E G I R tools, M mirror, ⌘Z undo, ⇧⌘Z redo.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -319,7 +477,7 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
         return;
       }
       if (mod || event.altKey) return;
-      const keys: Record<string, Tool> = { b: "pencil", e: "eraser", g: "fill", i: "picker", r: "rotate" };
+      const keys: Record<string, Tool> = { b: "pencil", t: "texture", d: "darken", l: "lighten", e: "eraser", g: "fill", i: "picker", r: "rotate" };
       const next = keys[event.key.toLowerCase()];
       if (next) setTool(next);
       else if (event.key.toLowerCase() === "m") setMirror((on) => !on);
@@ -331,7 +489,9 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
   const save = async (asNew: boolean) => {
     setSaving(true);
     try {
-      await onSave(doc.toDataURL("image/png"), name.trim() || "Untitled skin", model, asNew);
+      composite(layersRef.current, doc);
+      const kept = layersRef.current.length > 1 ? saveLayers(layersRef.current) : null;
+      await onSave(doc.toDataURL("image/png"), name.trim() || "Untitled skin", model, asNew, kept);
     } finally {
       setSaving(false);
     }
@@ -339,9 +499,9 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
 
   const startOver = () => {
     snapshot();
-    context.clearRect(0, 0, SIZE, SIZE);
-    context.drawImage(makeDefaultSkin(slim), 0, 0);
-    changed();
+    const fresh = makeLayer("Skin", makeDefaultSkin(slim));
+    setActive(fresh.id);
+    setLayers([fresh]);
   };
 
   return (
@@ -386,19 +546,22 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
       </div>
 
       <div className="grid items-start gap-4 lg:grid-cols-[52px_minmax(0,1fr)_auto]">
-        <div role="toolbar" aria-label="Tools" aria-orientation="vertical" className="flex flex-row gap-1.5 rounded-2xl border border-cream/8 bg-ink-800 p-1.5 lg:flex-col">
+        <div role="toolbar" aria-label="Tools" aria-orientation="vertical" className="flex flex-row flex-wrap gap-1.5 rounded-2xl border border-cream/8 bg-ink-800 p-1.5 lg:flex-col">
           <ToolButton label="Pencil (B)" active={tool === "pencil"} onClick={() => setTool("pencil")} icon={<Pencil size={17} aria-hidden="true" />} />
+          <ToolButton label="Texture brush: your colour, each pixel a little lighter or darker (T)" active={tool === "texture"} onClick={() => setTool("texture")} icon={<Brush size={17} aria-hidden="true" />} />
+          <ToolButton label="Darken what's there (D)" active={tool === "darken"} onClick={() => setTool("darken")} icon={<Moon size={17} aria-hidden="true" />} />
+          <ToolButton label="Lighten what's there (L)" active={tool === "lighten"} onClick={() => setTool("lighten")} icon={<Sun size={17} aria-hidden="true" />} />
           <ToolButton label="Eraser (E)" active={tool === "eraser"} onClick={() => setTool("eraser")} icon={<Eraser size={17} aria-hidden="true" />} />
           <ToolButton label="Fill one face (G)" active={tool === "fill"} onClick={() => setTool("fill")} icon={<PaintBucket size={17} aria-hidden="true" />} />
           <ToolButton label="Pick a colour (I)" active={tool === "picker"} onClick={() => setTool("picker")} icon={<Pipette size={17} aria-hidden="true" />} />
           <ToolButton label="Turn the model (R, or right-drag)" active={tool === "rotate"} onClick={() => setTool("rotate")} icon={<Rotate3d size={17} aria-hidden="true" />} />
           <span className="mx-1 my-0.5 h-px bg-cream/10 lg:mx-1.5" aria-hidden="true" />
           <ToolButton label="Mirror left and right (M)" active={mirror} onClick={() => setMirror((on) => !on)} icon={<FlipHorizontal2 size={17} aria-hidden="true" />} />
-          <ToolButton label="Show the overlay layer" active={showOverlay} onClick={() => setShowOverlay((on) => !on)} icon={<Layers size={17} aria-hidden="true" />} />
+          <ToolButton label="Show the outer layer" active={showOverlay} onClick={() => setShowOverlay((on) => !on)} icon={<Layers size={17} aria-hidden="true" />} />
           <ToolButton label="Grid on the texture" active={grid} onClick={() => setGrid((on) => !on)} icon={<Grid3x3 size={17} aria-hidden="true" />} />
         </div>
 
-        <div className="relative h-[560px] overflow-hidden rounded-[22px] border border-cream/8 bg-[radial-gradient(circle_at_50%_38%,rgba(244,238,228,0.09),transparent_62%)] bg-ink-850">
+        <div className="relative h-[600px] overflow-hidden rounded-[22px] border border-cream/8 bg-[radial-gradient(circle_at_50%_38%,rgba(244,238,228,0.09),transparent_62%)] bg-ink-850">
           <div
             className={cn("absolute inset-0", tool === "rotate" ? "cursor-grab" : "cursor-crosshair")}
             onPointerDown={onModelDown}
@@ -412,17 +575,17 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
           <div className="pointer-events-none absolute left-4 top-4 flex flex-col gap-2">
             <Segmented
               label="Paint on"
-              value={layer}
+              value={surface}
               options={[
-                { value: "base", label: "Base" },
-                { value: "overlay", label: "Overlay" },
+                { value: "base", label: "Inner", hint: "The skin itself" },
+                { value: "overlay", label: "Outer", hint: "The layer just above it: hats, hoods, jackets" },
               ]}
-              onChange={setLayer}
+              onChange={setSurface}
               className="pointer-events-auto"
             />
           </div>
           <p className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-xs text-mute">
-            {tool === "rotate" ? "Drag to turn the model." : "Paint with a click or drag. Right-drag turns the model; scroll zooms."}
+            {tool === "rotate" ? "Drag to turn the model." : `Painting on "${active.name}". Right-drag turns the model; scroll zooms.`}
           </p>
         </div>
 
@@ -441,12 +604,31 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
             />
             <p className="mt-2 flex items-center justify-between text-xs text-mute">
               <span>
-                <span className="mr-1 inline-block size-2 rounded-sm border border-cream/50 align-middle" /> base
-                <span className="ml-3 mr-1 inline-block size-2 rounded-sm border border-sky/70 align-middle" /> overlay
+                <span className="mr-1 inline-block size-2 rounded-sm border border-cream/50 align-middle" /> inner
+                <span className="ml-3 mr-1 inline-block size-2 rounded-sm border border-sky/70 align-middle" /> outer
               </span>
               <span className="tabular-nums">{hover ?? "64 × 64"}</span>
             </p>
           </div>
+
+          <LayersPanel
+            layers={layers}
+            activeId={active.id}
+            version={version}
+            onSelect={setActive}
+            onAdd={() => addLayer(makeLayer(`Layer ${layers.length + 1}`))}
+            onEffect={addEffect}
+            onPiece={addPiece}
+            color={color}
+            onToggle={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
+            onRename={(layer, next) => updateLayer(layer.id, { name: next })}
+            onOpacityStart={snapshot}
+            onOpacity={(layer, opacity) => updateLayer(layer.id, { opacity }, false)}
+            onMove={moveLayer}
+            onDuplicate={duplicateLayer}
+            onMerge={mergeDown}
+            onRemove={removeLayer}
+          />
 
           <div className="flex flex-col gap-3 rounded-[22px] border border-cream/8 bg-ink-800 p-4">
             <div className="flex items-center gap-3">
@@ -471,6 +653,208 @@ export function SkinEditor({ name: initialName, model: initialModel, source, isN
         </div>
       </div>
     </div>
+  );
+}
+
+interface LayersPanelProps {
+  layers: PaintLayer[];
+  activeId: string;
+  version: number;
+  color: string;
+  onSelect: (id: string) => void;
+  onAdd: () => void;
+  onEffect: (label: string, make: (skin: ImageData, slim: boolean) => HTMLCanvasElement, opacity?: number) => void;
+  onPiece: (piece: Piece, label: string) => void;
+  onToggle: (layer: PaintLayer) => void;
+  onRename: (layer: PaintLayer, name: string) => void;
+  onOpacityStart: () => void;
+  onOpacity: (layer: PaintLayer, opacity: number) => void;
+  onMove: (id: string, by: number) => void;
+  onDuplicate: (id: string) => void;
+  onMerge: (id: string) => void;
+  onRemove: (id: string) => void;
+}
+
+/** The layer stack, top first, with what you can do to the selected one. */
+function LayersPanel(props: LayersPanelProps) {
+  const { layers, activeId, version, color, onSelect, onAdd, onEffect, onPiece } = props;
+  const [menu, setMenu] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const addRef = useRef<HTMLButtonElement>(null);
+  const index = layers.findIndex((layer) => layer.id === activeId);
+  const active = layers[index];
+  const top = [...layers].reverse();
+
+  return (
+    <section aria-label="Layers" className="flex flex-col gap-3 rounded-[22px] border border-cream/8 bg-ink-800 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">
+          <Layers size={13} aria-hidden="true" />
+          Layers
+        </h3>
+        <span className="text-xs tabular-nums text-mute-2">{layers.length}</span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            ref={addRef}
+            type="button"
+            aria-expanded={menu}
+            onClick={() => setMenu((open) => !open)}
+            className="flex h-8 items-center gap-1.5 rounded-full border border-cream/15 px-3 text-xs font-bold text-cream-300 transition-colors hover:border-cream/35 hover:text-cream"
+          >
+            <Sparkles size={12} aria-hidden="true" />
+            Add details
+          </button>
+          <button type="button" aria-label="New empty layer" title="New empty layer" onClick={onAdd} className="grid size-8 place-items-center rounded-full text-cream-300 transition-colors hover:bg-cream/8 hover:text-cream">
+            <Plus size={16} aria-hidden="true" />
+          </button>
+        </div>
+        <Popover open={menu} anchorRef={addRef} placement="bottom-end" onClose={() => setMenu(false)} label="Add details" className="w-[250px]">
+          <div role="menu" className="flex flex-col">
+            <p className="px-3 pb-1 pt-1.5 text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">Depth</p>
+            <MenuItem icon={<Moon size={15} aria-hidden="true" />} label="Shading" hint="Light from above, shade below" onSelect={() => (setMenu(false), onEffect("Shading", shadingLayer))} />
+            <MenuItem icon={<Brush size={15} aria-hidden="true" />} label="Texture" hint="Grain, so colours aren't flat" onSelect={() => (setMenu(false), onEffect("Texture", textureLayer))} />
+            <MenuItem icon={<Grid3x3 size={15} aria-hidden="true" />} label="Outlines" hint="A darker edge on every face" onSelect={() => (setMenu(false), onEffect("Outlines", outlineLayer, 0.8))} />
+            <div className="mx-2 my-1 h-px bg-cream/8" />
+            <p className="flex items-center gap-2 px-3 pb-1 pt-1 text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">
+              Clothes
+              <span className="inline-block size-3 rounded-sm ring-1 ring-cream/20" style={{ background: color }} aria-hidden="true" />
+            </p>
+            {PIECES.map((piece) => (
+              <MenuItem key={piece.id} icon={<Shirt size={15} aria-hidden="true" />} label={piece.label} onSelect={() => (setMenu(false), onPiece(piece.id, piece.label))} />
+            ))}
+          </div>
+        </Popover>
+      </div>
+
+      <ul className="flex flex-col gap-1">
+        {top.map((layer) => {
+          const selected = layer.id === activeId;
+          return (
+            <li key={layer.id}>
+              <div
+                className={cn(
+                  "group flex items-center gap-2 rounded-xl border px-1.5 py-1.5 transition-colors",
+                  selected ? "border-cream/35 bg-cream/8" : "border-transparent hover:bg-cream/5",
+                )}
+              >
+                <button
+                  type="button"
+                  aria-label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`}
+                  aria-pressed={layer.visible}
+                  onClick={() => props.onToggle(layer)}
+                  className="grid size-7 shrink-0 place-items-center rounded-lg text-cream-300 hover:bg-cream/8 hover:text-cream"
+                >
+                  {layer.visible ? <Eye size={14} aria-hidden="true" /> : <EyeOff size={14} className="text-mute" aria-hidden="true" />}
+                </button>
+                <LayerThumb canvas={layer.canvas} version={version} dim={!layer.visible} />
+                {renaming === layer.id ? (
+                  <input
+                    autoFocus
+                    defaultValue={layer.name}
+                    maxLength={40}
+                    onBlur={(event) => {
+                      setRenaming(null);
+                      const next = event.target.value.trim();
+                      if (next && next !== layer.name) props.onRename(layer, next);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                      if (event.key === "Escape") setRenaming(null);
+                    }}
+                    className="min-w-0 flex-1 rounded-md bg-ink-900 px-1.5 py-0.5 text-sm font-bold text-cream outline-none ring-1 ring-cream/30"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onSelect(layer.id)}
+                    onDoubleClick={() => setRenaming(layer.id)}
+                    title="Click to paint on it, double-click to rename"
+                    className={cn("min-w-0 flex-1 truncate text-left text-sm font-bold", !layer.visible && "text-mute")}
+                  >
+                    {layer.name}
+                  </button>
+                )}
+                {layer.opacity < 1 && <span className="text-[11px] tabular-nums text-mute-2">{Math.round(layer.opacity * 100)}%</span>}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+
+      {active && (
+        <div className="flex flex-col gap-2.5 border-t border-cream/8 pt-3">
+          <label className="flex items-center gap-3 text-xs font-bold text-cream-300">
+            Opacity
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(active.opacity * 100)}
+              onPointerDown={props.onOpacityStart}
+              onKeyDown={props.onOpacityStart}
+              onChange={(event) => props.onOpacity(active, Number(event.target.value) / 100)}
+              className="flex-1 accent-[#f4eee4]"
+            />
+            <span className="w-9 text-right tabular-nums text-mute">{Math.round(active.opacity * 100)}%</span>
+          </label>
+          <div className="flex flex-wrap gap-1">
+            <SmallButton label="Move up" disabled={index >= layers.length - 1} onClick={() => props.onMove(active.id, 1)}>
+              <ArrowUp size={13} aria-hidden="true" />
+            </SmallButton>
+            <SmallButton label="Move down" disabled={index <= 0} onClick={() => props.onMove(active.id, -1)}>
+              <ArrowDown size={13} aria-hidden="true" />
+            </SmallButton>
+            <SmallButton label="Duplicate" onClick={() => props.onDuplicate(active.id)}>
+              <Copy size={13} aria-hidden="true" />
+            </SmallButton>
+            <SmallButton label="Merge down" disabled={index <= 0} onClick={() => props.onMerge(active.id)}>
+              <Merge size={13} aria-hidden="true" />
+            </SmallButton>
+            <SmallButton label="Rename" onClick={() => setRenaming(active.id)}>
+              <Pencil size={13} aria-hidden="true" />
+            </SmallButton>
+            <SmallButton label="Delete" disabled={layers.length < 2} onClick={() => props.onRemove(active.id)}>
+              <Trash2 size={13} aria-hidden="true" />
+            </SmallButton>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** A layer's picture, small, redrawn when the skin changes. */
+function LayerThumb({ canvas, version, dim }: { canvas: HTMLCanvasElement; version: number; dim: boolean }) {
+  const thumb = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const g = thumb.current?.getContext("2d");
+    if (!g) return;
+    g.clearRect(0, 0, SIZE, SIZE);
+    g.drawImage(canvas, 0, 0);
+  }, [canvas, version]);
+  return (
+    <canvas
+      ref={thumb}
+      width={SIZE}
+      height={SIZE}
+      aria-hidden="true"
+      className={cn("size-9 shrink-0 rounded-md bg-[repeating-conic-gradient(#242120_0%_25%,#1c1a18_0%_50%)] bg-[length:8px_8px] [image-rendering:pixelated]", dim && "opacity-40")}
+    />
+  );
+}
+
+function SmallButton({ label, onClick, disabled = false, children }: { label: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="flex h-7 items-center gap-1 rounded-full border border-cream/12 px-2.5 text-[11px] font-bold text-cream-300 transition-colors enabled:hover:border-cream/35 enabled:hover:text-cream disabled:opacity-35"
+    >
+      {children}
+      {label}
+    </button>
   );
 }
 

@@ -35,7 +35,7 @@ pub fn note_event(app: &AppHandle, instance_id: Option<&str>, world: Option<&str
     }
 }
 
-fn busy(launches: &Launches, instance_id: &str) -> bool {
+pub fn busy(launches: &Launches, instance_id: &str) -> bool {
     launches
         .0
         .lock()
@@ -467,6 +467,7 @@ pub fn after_session(
     started_at: i64,
     ended_at: i64,
     crashed: bool,
+    server: Option<&str>,
     prefs: &JournalPrefs,
     report: &dyn Fn(LaunchUpdate),
 ) {
@@ -474,7 +475,13 @@ pub fn after_session(
         return;
     };
     let journal = paths.journal();
-    let facts = journal::session_facts(game_dir, started_at, ended_at);
+    let mut facts = journal::session_facts(game_dir, started_at, ended_at);
+    // A server joined by Quick Play goes in as saved (the log has where SRV pointed instead).
+    if let Some(address) = server
+        && !facts.servers.iter().any(|joined| wisp_core::servers::address_key(joined) == wisp_core::servers::address_key(address))
+    {
+        facts.servers.insert(0, address.to_string());
+    }
     let only_world = match facts.worlds.as_slice() {
         [world] => Some(world.clone()),
         _ => None,
@@ -486,6 +493,7 @@ pub fn after_session(
         worlds: facts.worlds.clone(),
         new_worlds: facts.new_worlds,
         screenshots: facts.screenshots,
+        servers: facts.servers,
         device: device::DeviceInfo::current().name,
         label: instance_label(instance),
     };

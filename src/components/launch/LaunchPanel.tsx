@@ -1,7 +1,8 @@
-import { Cpu, FolderOpen, LoaderCircle, Play, RotateCw, Square, X } from "lucide-react";
+import { Check, Cpu, FolderOpen, LoaderCircle, Play, RotateCw, Square, Undo2, Wrench, X } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useState } from "react";
-import { installRosetta, openInstanceFolder } from "../../data/api";
+import { applyFix, installRosetta, openInstanceFolder, undoFix } from "../../data/api";
+import type { FixOffer, FixReport } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { useApp } from "../../state/AppContext";
 import { Ghost } from "../brand/Ghost";
@@ -41,6 +42,87 @@ function InstallRosettaButton({ onInstalled }: { onInstalled: () => void }) {
       {busy ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> : <Cpu size={12} aria-hidden="true" />}
       {busy ? "Installing Rosetta…" : "Install Rosetta"}
     </button>
+  );
+}
+
+/** What Wisp worked out about a crash: what it fixed (with Undo), what it can do with a click, and what's left. */
+function CrashHelp({ instanceId, help }: { instanceId: string; help: FixReport }) {
+  const { notify } = useApp();
+  const [undone, setUndone] = useState(false);
+  const [applied, setApplied] = useState<string[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const fail = (title: string) => (failure: unknown) => notify({ tone: "info", title, body: failure instanceof Error ? failure.message : String(failure) });
+
+  const undo = () => {
+    if (!help.entry) return;
+    setBusy("undo");
+    undoFix(help.entry).then(() => setUndone(true), fail("Couldn't undo it")).finally(() => setBusy(null));
+  };
+  const take = (offer: FixOffer) => {
+    setBusy(offer.label);
+    applyFix(instanceId, offer.action)
+      .then(() => {
+        setApplied((current) => [...current, offer.label]);
+        notify({ tone: "success", title: "Done", body: `${offer.label.replace(/^Turn off/, "Turned off")}. Press Play again; it's in the journal if you want it back.` });
+      }, fail("Couldn't do that"))
+      .finally(() => setBusy(null));
+  };
+  const more = help.found.slice(1, 4);
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl bg-ink-900/55 p-3 text-xs leading-snug">
+      {more.length > 0 && (
+        <ul className="flex flex-col gap-1 text-cream-300">
+          {more.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+      {help.fixed.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <p className="flex items-center gap-1.5 font-bold text-moss-soft">
+            <Wrench size={12} aria-hidden="true" />
+            {undone ? "Undone" : "Wisp fixed it"}
+          </p>
+          <ul className={cn("flex flex-col gap-1", undone && "opacity-50")}>
+            {help.fixed.map((line) => (
+              <li key={line} className="flex gap-1.5 text-cream-300">
+                <Check size={12} className="mt-px shrink-0 text-moss-soft" aria-hidden="true" />
+                {line}
+              </li>
+            ))}
+          </ul>
+          {help.entry && !undone && (
+            <button type="button" disabled={busy !== null} onClick={undo} className="flex w-fit items-center gap-1 font-bold text-cream-300 transition-colors hover:text-cream disabled:opacity-50">
+              <Undo2 size={12} aria-hidden="true" />
+              Undo
+            </button>
+          )}
+        </div>
+      )}
+      {help.offers.map((offer) => {
+        const done = applied.includes(offer.label);
+        return (
+          <div key={offer.label} className="flex flex-col gap-1.5">
+            <p className="text-mute">{offer.detail}</p>
+            <button
+              type="button"
+              disabled={done || busy !== null}
+              onClick={() => take(offer)}
+              className="flex h-7 w-fit items-center gap-1.5 rounded-full border border-cream/20 px-3 font-bold text-cream-300 transition-colors enabled:hover:border-cream/45 enabled:hover:text-cream disabled:opacity-60"
+            >
+              {done ? <Check size={12} aria-hidden="true" /> : busy === offer.label ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> : null}
+              {done ? "Done" : offer.label}
+            </button>
+          </div>
+        );
+      })}
+      {help.unsolved.map((line) => (
+        <p key={line} className="text-mute">
+          {line}
+        </p>
+      ))}
+    </div>
   );
 }
 
@@ -105,6 +187,8 @@ export function LaunchPanel() {
             {view.kind === "busy" && update.phase === "downloading" && (
               <p className="-mt-1.5 text-[11px] text-mute-2">The first launch of a version downloads it. Later launches start straight away.</p>
             )}
+
+            {update.phase === "exited" && update.help && <CrashHelp instanceId={id} help={update.help} />}
 
             {view.kind === "problem" && (
               <div className="flex gap-2">

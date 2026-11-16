@@ -143,14 +143,14 @@ impl ContentIndex {
             .unwrap_or_default()
     }
 
-    fn save(&self, items: &[InstalledContent]) -> std::io::Result<()> {
+    pub(crate) fn save(&self, items: &[InstalledContent]) -> std::io::Result<()> {
         let json = serde_json::to_vec_pretty(items).map_err(std::io::Error::other)?;
         let partial = self.instance_dir.join("content.json.part");
         std::fs::write(&partial, json)?;
         std::fs::rename(partial, self.instance_dir.join(INDEX))
     }
 
-    fn game_dir(&self) -> PathBuf {
+    pub(crate) fn game_dir(&self) -> PathBuf {
         self.instance_dir.join(GAME_DIR)
     }
 

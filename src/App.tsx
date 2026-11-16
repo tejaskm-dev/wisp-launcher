@@ -25,10 +25,12 @@ import {
   launchInstance,
   onInstallEvent,
   onJournalChange,
+  onFixed,
   onLaunchEvent,
   onSocialChange,
   saveSettings,
   stopInstance,
+  undoFix,
 } from "./data/api";
 import { DEFAULT_SETTINGS, EMPTY_HOME } from "./data/defaults";
 import type { HomeSnapshot, InstallEvent, LaunchUpdate, PageId, Settings, StartPage } from "./data/types";
@@ -48,6 +50,7 @@ const ProjectPage = lazy(() => import("./pages/ProjectPage").then((module) => ({
 const WorldPage = lazy(() => import("./pages/WorldPage").then((module) => ({ default: module.WorldPage })));
 const JournalPage = lazy(() => import("./pages/JournalPage").then((module) => ({ default: module.JournalPage })));
 const SkinsPage = lazy(() => import("./pages/SkinsPage").then((module) => ({ default: module.SkinsPage })));
+const ServersPage = lazy(() => import("./pages/ServersPage").then((module) => ({ default: module.ServersPage })));
 const FriendsPage = lazy(() => import("./pages/FriendsPage").then((module) => ({ default: module.FriendsPage })));
 const ImportWorldDialog = lazy(() =>
   import("./components/worlds/ImportWorldDialog").then((module) => ({ default: module.ImportWorldDialog })),
@@ -72,7 +75,7 @@ function without<T>(record: Record<string, T>, key: string): Record<string, T> {
 const SAVE_DELAY_MS = 300;
 
 const LAST_PAGE_KEY = "wisp.lastPage";
-const RESTORABLE: PageId[] = ["home", "instances", "worlds", "discover", "screenshots", "journal", "skins", "friends", "sync", "settings"];
+const RESTORABLE: PageId[] = ["home", "instances", "worlds", "servers", "discover", "screenshots", "journal", "skins", "friends", "sync", "settings"];
 
 /** Where Wisp was when it last closed, read once before this run starts recording its own pages. */
 const LAST_PAGE: PageId = (() => {
@@ -286,6 +289,8 @@ export default function App() {
   const [launches, setLaunches] = useState<Record<string, LaunchUpdate>>({});
   /** The world each launch opens straight into (asked for here; the launcher confirms it). */
   const [launchWorlds, setLaunchWorlds] = useState<Record<string, string | null>>({});
+  /** The server each launch joins straight away. */
+  const [launchServers, setLaunchServers] = useState<Record<string, string | null>>({});
   const requestedWorlds = useRef<Record<string, string>>({});
   const homeNow = useLatest(home);
 
@@ -295,8 +300,9 @@ export default function App() {
       if (!active) return;
       setLaunches(Object.fromEntries(current.map((event) => [event.instanceId, event.update])));
       setLaunchWorlds(Object.fromEntries(current.map((event) => [event.instanceId, event.world])));
+      setLaunchServers(Object.fromEntries(current.map((event) => [event.instanceId, event.server ?? null])));
     }, () => {});
-    const stopListening = onLaunchEvent(({ instanceId, world, update }) => {
+    const stopListening = onLaunchEvent(({ instanceId, world, server, update }) => {
       // A normal quit clears the card; a crash or failure stays until dismissed.
       setLaunches((current) =>
         update.phase === "exited" && !update.crashed ? without(current, instanceId) : { ...current, [instanceId]: update },
@@ -304,6 +310,7 @@ export default function App() {
       if (update.phase === "running") {
         const asked = requestedWorlds.current[instanceId];
         setLaunchWorlds((current) => ({ ...current, [instanceId]: world }));
+        setLaunchServers((current) => ({ ...current, [instanceId]: server ?? null }));
         if (asked && !world) {
           const instance = homeNow.current?.instances.find((candidate) => candidate.id === instanceId);
           const name = homeNow.current?.worlds.find((candidate) => candidate.instanceId === instanceId && candidate.folder === asked)?.name ?? asked;
@@ -316,7 +323,10 @@ export default function App() {
       }
       if (update.phase === "exited" || update.phase === "failed") {
         delete requestedWorlds.current[instanceId];
-        if (update.phase === "exited" && !update.crashed) setLaunchWorlds((current) => without(current, instanceId));
+        if (update.phase === "exited" && !update.crashed) {
+          setLaunchWorlds((current) => without(current, instanceId));
+          setLaunchServers((current) => without(current, instanceId));
+        }
       }
       if (update.phase === "running" || update.phase === "exited") void refreshHome();
       // Offer a note about the world that was just played.
@@ -338,21 +348,53 @@ export default function App() {
 
   // The add-account dialog, and an instance waiting to play once an account exists.
   const [accountDialog, setAccountDialog] = useState({ open: false, session: 0 });
-  const playAfterAccount = useRef<{ instanceId: string; world: string | null } | null>(null);
+  const playAfterAccount = useRef<{ instanceId: string; world: string | null; server: string | null } | null>(null);
 
   const startLaunch = useCallback(
-    (instanceId: string, world: string | null = null) => {
+    (instanceId: string, world: string | null = null, server: string | null = null) => {
       setLaunches((current) => ({ ...current, [instanceId]: { phase: "checking" } }));
       setLaunchWorlds((current) => ({ ...current, [instanceId]: world }));
+      setLaunchServers((current) => ({ ...current, [instanceId]: server }));
       if (world) requestedWorlds.current[instanceId] = world;
       else delete requestedWorlds.current[instanceId];
-      launchInstance(instanceId, world).catch((failure: unknown) => {
+      launchInstance(instanceId, world, server).catch((failure: unknown) => {
         setLaunches((current) => without(current, instanceId));
         setLaunchWorlds((current) => without(current, instanceId));
+        setLaunchServers((current) => without(current, instanceId));
         notify({ tone: "info", title: "Couldn't start the game", body: message(failure) });
       });
     },
     [notify],
+  );
+
+  // What Wisp fixed before starting a game (or after a crash it restarted from).
+  useEffect(
+    () =>
+      onFixed(({ instanceId, report }) => {
+        const name = homeNow.current?.instances.find((candidate) => candidate.id === instanceId)?.name ?? "this instance";
+        const entry = report.entry;
+        if (report.fixed.length > 0) {
+          notify({
+            tone: "success",
+            title: report.fixed.length === 1 ? `Fixed a problem with ${name}` : `Fixed ${report.fixed.length} problems with ${name}`,
+            body: report.fixed.join("\n"),
+            lifetimeMs: 14_000,
+            action: entry
+              ? {
+                  label: "Undo",
+                  run: () =>
+                    void undoFix(entry).then(
+                      () => notify({ tone: "info", title: "Put back the way it was", body: "The fix is undone. You'll find it in the journal." }),
+                      (failure: unknown) => notify({ tone: "info", title: "Couldn't undo it", body: message(failure) }),
+                    ),
+                }
+              : undefined,
+          });
+        }
+        if (report.unsolved.length > 0) notify({ tone: "info", title: `Something may stop ${name}`, body: report.unsolved.join("\n"), lifetimeMs: 14_000 });
+        void refreshHome();
+      }),
+    [notify, homeNow, refreshHome],
   );
 
   const addAccount = useCallback(() => {
@@ -361,13 +403,13 @@ export default function App() {
   }, [notify]);
 
   const play = useCallback(
-    (instanceId: string, world: string | null = null) => {
+    (instanceId: string, world: string | null = null, server: string | null = null) => {
       if (!homeNow.current?.account) {
-        playAfterAccount.current = { instanceId, world };
+        playAfterAccount.current = { instanceId, world, server };
         addAccount();
         return;
       }
-      startLaunch(instanceId, world);
+      startLaunch(instanceId, world, server);
     },
     [homeNow, addAccount, startLaunch],
   );
@@ -386,7 +428,7 @@ export default function App() {
     const waiting = playAfterAccount.current;
     playAfterAccount.current = null;
     void refreshHome().then(() => {
-      if (waiting) startLaunch(waiting.instanceId, waiting.world);
+      if (waiting) startLaunch(waiting.instanceId, waiting.world, waiting.server);
     });
   }, [refreshHome, startLaunch]);
 
@@ -516,6 +558,7 @@ export default function App() {
       replayIntro: intro.replay,
       launches,
       launchWorlds,
+      launchServers,
       play,
       stop,
       dismissLaunch,
@@ -543,6 +586,7 @@ export default function App() {
       intro.replay,
       launches,
       launchWorlds,
+      launchServers,
       play,
       stop,
       dismissLaunch,
@@ -581,6 +625,7 @@ export default function App() {
                 {page === "worlds" && <Lazy key="worlds" page={<WorldsPage />} />}
                 {page === "discover" && <Lazy key="discover" page={<DiscoverPage query={query} onClearQuery={() => setQuery("")} />} />}
                 {page === "screenshots" && <Lazy key="screenshots" page={<ScreenshotsPage />} />}
+                {page === "servers" && <Lazy key="servers" page={<ServersPage />} />}
                 {page === "journal" && <Lazy key="journal" page={<JournalPage />} />}
                 {page === "skins" && <Lazy key="skins" page={<SkinsPage />} />}
                 {page === "friends" && <Lazy key="friends" page={<FriendsPage />} />}

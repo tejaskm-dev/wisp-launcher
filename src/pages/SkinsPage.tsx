@@ -3,7 +3,8 @@ import { AnimatePresence, m } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import stageArt from "../assets/art/skin-stage.jpg";
 import { EMOTES, type EmoteId } from "../components/skins/emotes";
-import { SkinEditor } from "../components/skins/SkinEditor";
+import type { SavedLayer } from "../components/skins/layers";
+import { SkinEditor, type StartLayer } from "../components/skins/SkinEditor";
 import { SkinDoll, announceSkinsChanged, loadSkinImage } from "../components/skins/SkinDoll";
 import { skinSource, useSkinSource } from "../components/skins/skinSource";
 import { SkinStage } from "../components/skins/SkinStage";
@@ -14,7 +15,7 @@ import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
 import { MenuItem, Popover } from "../components/ui/Popover";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
-import { addSkin, deleteSkin, exportSkin, fetchPlayerSkin, getSkins, importSkinPaths, isDesktop, onFileDrop, pickSkinFiles, setActiveSkin, updateSkin } from "../data/api";
+import { addSkin, deleteSkin, exportSkin, fetchPlayerSkin, getSkinLayers, getSkins, importSkinPaths, isDesktop, onFileDrop, pickSkinFiles, setActiveSkin, setSkinLayers, updateSkin } from "../data/api";
 import type { PlayerSkin, Skin, SkinImport, SkinLibrary, SkinModel } from "../data/types";
 import { cn } from "../lib/cn";
 import { fadeUp } from "../lib/motion";
@@ -38,7 +39,27 @@ function readPrefs(): StagePrefs {
   }
 }
 
-type Editing = { skin: Skin | null; source: HTMLCanvasElement; name: string; model: SkinModel };
+type Editing = { skin: Skin | null; source: HTMLCanvasElement; layers: StartLayer[] | null; name: string; model: SkinModel };
+
+/** The layers a skin was saved with, read back into canvases. Null when it has none (or they can't be read). */
+async function readLayers(skin: Skin): Promise<StartLayer[] | null> {
+  try {
+    const saved = await getSkinLayers(skin.id);
+    if (!saved || saved.length === 0) return null;
+    return await Promise.all(
+      saved.map(async (layer) => {
+        const picture = await loadSkinImage(layer.png.startsWith("data:") ? layer.png : `data:image/png;base64,${layer.png}`);
+        const canvas = document.createElement("canvas");
+        canvas.width = SIZE;
+        canvas.height = SIZE;
+        canvas.getContext("2d")?.drawImage(picture, 0, 0);
+        return { name: layer.name, visible: layer.visible, opacity: layer.opacity, canvas };
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
 
 export function SkinsPage() {
   const { home, notify } = useApp();
@@ -152,13 +173,16 @@ export function SkinsPage() {
     } else {
       g.drawImage(makeDefaultSkin(false), 0, 0);
     }
-    setEditing({ skin, source: canvas, name: skin?.name ?? "My skin", model: skin?.model ?? "classic" });
+    const layers = skin ? await readLayers(skin) : null;
+    setEditing({ skin, source: canvas, layers, name: skin?.name ?? "My skin", model: skin?.model ?? "classic" });
   };
 
-  const saveEdit = async (png: string, name: string, model: SkinModel, asNew: boolean) => {
+  const saveEdit = async (png: string, name: string, model: SkinModel, asNew: boolean, layers: SavedLayer[] | null) => {
     if (!editing) return;
     try {
       const saved = editing.skin && !asNew ? await updateSkin(editing.skin.id, { png, name, model }) : await addSkin(name, model, png, "editor");
+      // The layers stay beside the skin, for the next edit (one layer is just the skin).
+      await setSkinLayers(saved.id, layers ?? []).catch(() => {});
       await reload();
       announceSkinsChanged();
       setSelectedId(saved.id);
@@ -177,7 +201,7 @@ export function SkinsPage() {
   if (editing) {
     return (
       <Page>
-        <SkinEditor name={editing.name} model={editing.model} source={editing.source} isNew={editing.skin === null} onSave={saveEdit} onCancel={() => setEditing(null)} />
+        <SkinEditor name={editing.name} model={editing.model} source={editing.source} layers={editing.layers} isNew={editing.skin === null} onSave={saveEdit} onCancel={() => setEditing(null)} />
       </Page>
     );
   }

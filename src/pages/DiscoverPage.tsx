@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { Ghost } from "../components/brand/Ghost";
 import { SOURCE_NAMES, SourceIcon } from "../components/brand/SourceIcons";
 import { FilterPanel } from "../components/discover/FilterPanel";
+import { ServerBrowser } from "../components/servers/ServerBrowser";
+import { readDiscoverMode, saveDiscoverMode } from "../components/servers/address";
+import { Segmented } from "../components/ui/Segmented";
 import { ANY, DEFAULT_FILTERS, NOUNS, SOURCE_TABS, loaderChoices, type Filters, type Tab } from "../components/discover/filters";
 import { compatibleLoaders } from "../components/install/compat";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -62,7 +65,40 @@ interface Results {
 const curseforgeCategories = new Map<Tab, Category[]>();
 
 /** Browse Modrinth and CurseForge: results on the left, the filter rail on the right. The search box is the top bar's. */
+/** Discover: content from Modrinth and CurseForge, or public servers to join. */
 export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQuery: () => void }) {
+  const [mode, setModeState] = useState(readDiscoverMode);
+  const setMode = (next: "content" | "servers") => {
+    setModeState(next);
+    saveDiscoverMode(next);
+  };
+  return (
+    <Page>
+      <PageHeader
+        title="Discover"
+        subtitle={
+          mode === "servers"
+            ? "Public servers to join, with who's online right now. Type in the search bar above to narrow them down."
+            : "Modpacks, mods, resource packs, shaders, data packs and worlds from Modrinth and CurseForge. Type in the search bar above to find something."
+        }
+        actions={
+          <Segmented
+            label="Discover"
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: "content", label: "Mods & more" },
+              { value: "servers", label: "Servers" },
+            ]}
+          />
+        }
+      />
+      {mode === "servers" ? <ServerBrowser query={query} onClearQuery={onClearQuery} /> : <ContentBrowser query={query} onClearQuery={onClearQuery} />}
+    </Page>
+  );
+}
+
+function ContentBrowser({ query, onClearQuery }: { query: string; onClearQuery: () => void }) {
   const { comingSoon, now, home, openProject, requestInstall, settings, navigate } = useApp();
   const [filters, setFilterState] = useState(rememberedFilters);
   const setFilters = (patch: Partial<Filters>) =>
@@ -238,11 +274,7 @@ export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQu
   const heading = filters.tab === "modpack" ? "Modpacks" : NOUNS[filters.tab][1].replace(/^./, (first) => first.toUpperCase());
 
   return (
-    <Page>
-      <PageHeader
-        title="Discover"
-        subtitle="Modpacks, mods, resource packs, shaders, data packs and worlds from Modrinth and CurseForge. Type in the search bar above to find something."
-      />
+    <>
 
       <m.div variants={fadeUp} className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_288px]">
         <section ref={resultsRef} aria-label="Results" aria-busy={status === "loading"} className="flex min-w-0 scroll-mt-28 flex-col gap-4">
@@ -382,7 +414,7 @@ export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQu
           onSetUpCurseforge={setUpCurseforge}
         />
       </m.div>
-    </Page>
+    </>
   );
 }
 

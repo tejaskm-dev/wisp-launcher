@@ -10,6 +10,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageTabs } from "../components/ui/PageTabs";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { getScreenshots, thumbUrl } from "../data/api";
 import type { Screenshot } from "../data/types";
@@ -109,6 +110,14 @@ export function ScreenshotsPage() {
         title="Screenshots"
         subtitle="Every screenshot from every instance, filed by the world you took it in. Press F2 in game to take one."
         actions={settings && shots && shots.length > 0 ? <SyncSwitch syncing={syncing} onToggle={() => updateSettings((current) => ({ sync: { ...current.sync, screenshots: !current.sync.screenshots } }))} /> : undefined}
+      />
+      <PageTabs
+        label="Journal"
+        current="screenshots"
+        tabs={[
+          { id: "journal", label: "Timeline" },
+          { id: "screenshots", label: "Screenshots", count: shots?.length },
+        ]}
       />
 
       {failed ? (

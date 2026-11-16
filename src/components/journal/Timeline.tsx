@@ -1,7 +1,7 @@
-import { Archive, Box, Download, FolderInput, History, NotebookPen, Package, Pencil, RotateCcw, Trash2, TriangleAlert, Upload } from "lucide-react";
+import { Archive, Box, Check, Download, FolderInput, History, NotebookPen, Package, Pencil, RotateCcw, Trash2, TriangleAlert, Undo2, Upload, Wrench } from "lucide-react";
 import { m } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { addNote, deleteNote, editNote, getRestorePoints, restoreWorld, thumbUrl } from "../../data/api";
+import { addNote, deleteNote, editNote, getJournal, getRestorePoints, restoreWorld, thumbUrl, undoFix } from "../../data/api";
 import type { HomeSnapshot, JournalEntry, JournalEvent } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { formatBytes } from "../../lib/format";
@@ -373,7 +373,81 @@ function EntryCard({ entry, laneColor: color, instanceName, worldName, worldExis
           Moved <span className="font-bold text-cream">{event.name}</span> to the Trash <span className="text-mute">· its restore points are kept</span>
         </Line>
       );
+    case "fixed":
+      return <FixCard entry={entry} fixed={event.fixed} afterCrash={event.afterCrash} tag={tag} />;
+    case "fix-undone":
+      return (
+        <Line icon={<Undo2 size={14} aria-hidden="true" />} time={entry.at} tag={tag}>
+          Put one of Wisp's fixes back the way it was
+        </Line>
+      );
   }
+}
+
+/** Fixes that have been undone, by the id of their entry. */
+function useUndoneFixes(): Set<string> {
+  const { journalVersion } = useApp();
+  const [undone, setUndone] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let active = true;
+    getJournal({ kinds: ["fix-undone"], limit: 500 }).then(
+      (found) => active && setUndone(new Set(found.flatMap((entry) => (entry.event.kind === "fix-undone" ? [entry.event.fix] : [])))),
+      () => {},
+    );
+    return () => {
+      active = false;
+    };
+  }, [journalVersion]);
+  return undone;
+}
+
+/** What Wisp fixed, before a launch or after a crash, with Undo. */
+function FixCard({ entry, fixed, afterCrash, tag }: { entry: JournalEntry; fixed: string[]; afterCrash: boolean; tag: ReactNode }) {
+  const { notify } = useApp();
+  const undone = useUndoneFixes().has(entry.id);
+  const [busy, setBusy] = useState(false);
+  const undo = () => {
+    setBusy(true);
+    undoFix(entry.id).then(
+      () => notify({ tone: "success", title: "Put back the way it was" }),
+      (failure: unknown) => {
+        setBusy(false);
+        notify({ tone: "info", title: "Couldn't undo it", body: failure instanceof Error ? failure.message : String(failure) });
+      },
+    );
+  };
+  return (
+    <div className={cn("flex flex-col gap-2 rounded-2xl border px-3.5 py-3", undone ? "border-cream/8 bg-ink-800/50 opacity-70" : "border-moss/25 bg-moss/5")}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <Wrench size={14} className="text-moss-soft" aria-hidden="true" />
+        <p className="min-w-0 flex-1 text-sm font-bold">
+          {afterCrash ? "Wisp fixed what made the game crash" : "Wisp fixed the mods before starting"}
+          {undone && <span className="font-normal text-mute"> · undone</span>}
+        </p>
+        {tag}
+        <time className="text-xs tabular-nums text-mute-2">{clock(entry.at)}</time>
+        {!undone && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={undo}
+            className="flex h-8 items-center gap-1.5 rounded-full border border-cream/15 px-3 text-xs font-bold text-cream-300 transition-colors hover:border-cream/35 hover:bg-cream/8 hover:text-cream disabled:opacity-50"
+          >
+            <Undo2 size={12} aria-hidden="true" />
+            Undo
+          </button>
+        )}
+      </div>
+      <ul className="flex flex-col gap-1 pl-[22px]">
+        {fixed.map((line) => (
+          <li key={line} className="flex gap-2 text-[13px] leading-snug text-cream-300">
+            <Check size={13} className="mt-0.5 shrink-0 text-moss-soft" aria-hidden="true" />
+            {line}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function SessionCard({

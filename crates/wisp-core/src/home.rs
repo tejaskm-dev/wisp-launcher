@@ -6,6 +6,7 @@ use crate::accounts::{Account, AccountStore};
 use crate::device::DeviceInfo;
 use crate::instances::{GAME_DIR, Instance, InstanceStore, Loader};
 use crate::journal::{Event, Journal, JournalQuery};
+use crate::servers;
 use crate::worlds::{self, GameMode, WorldInfo};
 
 /// Everything the home screen and sidebar show about this computer's library.
@@ -19,7 +20,24 @@ pub struct HomeSnapshot {
     pub instances: Vec<Instance>,
     /// Every world in every instance, most recently played first.
     pub worlds: Vec<WorldSummary>,
+    /// Every server in every instance's server list, most recently played first.
+    pub servers: Vec<ServerSummary>,
     pub sync: SyncStatus,
+}
+
+/// A server from the instances' server lists. One saved in several instances shows up once.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSummary {
+    /// The address as saved.
+    pub address: String,
+    pub name: String,
+    /// Its icon as a PNG data URL, as the game last saw it.
+    pub icon: Option<String>,
+    /// Instances whose list has it; the first is the one Play uses.
+    pub instance_ids: Vec<String>,
+    /// When a session last joined it (unix ms), if the journal knows.
+    pub last_played: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,14 +139,78 @@ impl HomeSnapshot {
             }
         }
         worlds.sort_by_key(|world| std::cmp::Reverse(world.last_played));
+        let servers = server_summaries(instances, &list, &sessions);
         Self {
             account: accounts.active(),
             device,
             instances: list,
             worlds,
+            servers,
             sync: SyncStatus::Off,
         }
     }
+}
+
+/// Servers across instances (most recently used instance first), joined up by address, with when
+/// each was last played and in which instance.
+fn server_summaries(store: &InstanceStore, instances: &[Instance], sessions: &[crate::journal::Entry]) -> Vec<ServerSummary> {
+    // When each server was last joined, and from which instance.
+    let mut played: std::collections::HashMap<String, (i64, String)> = std::collections::HashMap::new();
+    for entry in sessions {
+        let Event::Session { servers: joined, ended_at, .. } = &entry.event else {
+            continue;
+        };
+        for address in joined {
+            if let Some(key) = servers::address_key(address) {
+                let instance = entry.instance_id.clone().unwrap_or_default();
+                let slot = played.entry(key).or_insert((0, String::new()));
+                if *ended_at > slot.0 {
+                    *slot = (*ended_at, instance);
+                }
+            }
+        }
+    }
+    let mut found: Vec<(String, ServerSummary)> = Vec::new();
+    for instance in instances {
+        let Some(game_dir) = store.game_dir(&instance.id) else {
+            continue;
+        };
+        for saved in servers::list(&game_dir) {
+            let Some(key) = servers::address_key(&saved.address) else {
+                continue;
+            };
+            match found.iter_mut().find(|(known, _)| *known == key) {
+                Some((_, summary)) => {
+                    if !summary.instance_ids.contains(&instance.id) {
+                        summary.instance_ids.push(instance.id.clone());
+                    }
+                    if summary.icon.is_none() {
+                        summary.icon = saved.icon;
+                    }
+                }
+                None => found.push((
+                    key,
+                    ServerSummary { address: saved.address, name: saved.name, icon: saved.icon, instance_ids: vec![instance.id.clone()], last_played: None },
+                )),
+            }
+        }
+    }
+    let mut summaries: Vec<ServerSummary> = found
+        .into_iter()
+        .map(|(key, mut summary)| {
+            if let Some((at, instance)) = played.get(&key) {
+                summary.last_played = Some(*at);
+                // Play it with the instance it was last played in, when that one still has it.
+                if let Some(position) = summary.instance_ids.iter().position(|id| id == instance) {
+                    let id = summary.instance_ids.remove(position);
+                    summary.instance_ids.insert(0, id);
+                }
+            }
+            summary
+        })
+        .collect();
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.last_played.unwrap_or(0)));
+    summaries
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,6 +323,7 @@ mod tests {
         std::fs::create_dir_all(game.join("mods")).unwrap();
         std::fs::write(game.join("mods/sodium.jar"), b"jar").unwrap();
         std::fs::write(game.join("mods/old.jar.disabled"), b"jar").unwrap();
+        crate::servers::add(&game, "Example", "play.example.net").unwrap();
 
         let journal = Journal::new(root.join("journal"));
         let session = Event::Session {
@@ -250,6 +333,7 @@ mod tests {
             worlds: vec!["Island".into()],
             new_worlds: vec![],
             screenshots: vec!["a.png".into(), "deleted.png".into()],
+            servers: vec!["play.example.net".into()],
             device: "Mac".into(),
             label: "Fabric 26.3".into(),
         };
@@ -257,6 +341,9 @@ mod tests {
         journal.append(Some(&instance.id), Some("Island"), 3, Event::Note { text: "Find the village".into(), session: None }).unwrap();
 
         let home = HomeSnapshot::load(&instances, &AccountStore::new(root.join("accounts.json")), &journal);
+        assert_eq!(home.servers.len(), 1);
+        assert_eq!((home.servers[0].name.as_str(), home.servers[0].last_played), ("Example", Some(2)));
+        assert_eq!(home.servers[0].instance_ids, vec![instance.id.clone()]);
         let world = &home.worlds[0];
         assert_eq!(world.id, format!("{}/Island", instance.id));
         assert_eq!((world.name.as_str(), world.loader.as_str(), world.mod_count), ("Island", "Fabric 26.3", 1));
@@ -279,6 +366,8 @@ mod tests {
             last_played: None,
             icon: None,
             modpack: None,
+            memory_mb: None,
+            java_major: None,
         })
         .unwrap();
         for key in [

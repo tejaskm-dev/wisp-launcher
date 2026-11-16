@@ -21,7 +21,19 @@ export function Toasts({ toasts, onDismiss, children }: { toasts: Toast[]; onDis
             <Ghost size={30} floating sleeping={toast.tone === "resting"} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-bold">{toast.title}</p>
-              {toast.body && <p className="mt-0.5 text-[13px] leading-snug text-mute">{toast.body}</p>}
+              {toast.body && <p className="mt-0.5 whitespace-pre-line text-[13px] leading-snug text-mute">{toast.body}</p>}
+              {toast.action && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    toast.action?.run();
+                    onDismiss(toast.id);
+                  }}
+                  className="mt-2 rounded-full border border-cream/20 px-3 py-1 text-xs font-bold text-cream-300 transition-colors hover:border-cream/45 hover:text-cream"
+                >
+                  {toast.action.label}
+                </button>
+              )}
             </div>
             <button
               type="button"

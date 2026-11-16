@@ -13,6 +13,19 @@ const INDEX: &str = "skins.json";
 /// A skin is 64×64 (or the old 64×32); anything big is not a skin.
 const MAX_PNG_BYTES: usize = 512 * 1024;
 const NAME_LIMIT: usize = 48;
+/// More layers than anyone paints a 64×64 skin with.
+const MAX_LAYERS: usize = 32;
+
+/// One of the editor's layers, kept so a skin can be reopened with them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkinLayer {
+    pub name: String,
+    pub visible: bool,
+    pub opacity: f32,
+    /// A 64×64 PNG, base64.
+    pub png: String,
+}
 
 /// The arm width a skin is drawn for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +68,10 @@ pub enum SkinError {
     NotASkin(String),
     #[error("that skin is gone")]
     Missing,
+    #[error("that isn't a PNG")]
+    NotPng,
+    #[error("that's more layers than a skin can keep ({MAX_LAYERS})")]
+    TooManyLayers,
     #[error("there's no Minecraft player called {0}")]
     NoSuchPlayer(String),
     #[error("couldn't reach Mojang: {0}")]
@@ -96,6 +113,38 @@ impl SkinStore {
     pub fn png_path(&self, id: &str) -> PathBuf {
         let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
         self.dir.join(format!("{safe}.png"))
+    }
+
+    fn layers_path(&self, id: &str) -> PathBuf {
+        self.png_path(id).with_extension("layers.json")
+    }
+
+    /// The editor's layers for a skin, if it was saved with them.
+    pub fn layers(&self, id: &str) -> Option<Vec<SkinLayer>> {
+        let bytes = std::fs::read(self.layers_path(id)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Keeps the editor's layers beside a skin (the skin itself is them flattened). An empty list
+    /// forgets them.
+    pub fn set_layers(&self, id: &str, layers: &[SkinLayer]) -> Result<(), SkinError> {
+        if !self.library().skins.iter().any(|skin| skin.id == id) {
+            return Err(SkinError::Missing);
+        }
+        if layers.is_empty() {
+            let _ = std::fs::remove_file(self.layers_path(id));
+            return Ok(());
+        }
+        if layers.len() > MAX_LAYERS {
+            return Err(SkinError::TooManyLayers);
+        }
+        let mut checked = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let png = normalize_png(&base64::engine::general_purpose::STANDARD.decode(&layer.png).map_err(|_| SkinError::NotPng)?)?;
+            checked.push(SkinLayer { name: clean_name(&layer.name), visible: layer.visible, opacity: layer.opacity.clamp(0.0, 1.0), png: base64::engine::general_purpose::STANDARD.encode(png) });
+        }
+        std::fs::write(self.layers_path(id), serde_json::to_vec(&checked).map_err(std::io::Error::other)?)?;
+        Ok(())
     }
 
     /// Adds a skin. The picture is checked and stored as a 64×64 PNG.
@@ -152,6 +201,7 @@ impl SkinStore {
         }
         self.save(&library)?;
         let _ = std::fs::remove_file(self.png_path(id));
+        let _ = std::fs::remove_file(self.layers_path(id));
         Ok(())
     }
 
@@ -352,6 +402,26 @@ mod tests {
         let mut out = Vec::new();
         picture.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
         out
+    }
+
+    #[test]
+    fn keeps_the_editors_layers_beside_a_skin() {
+        let dir = std::env::temp_dir().join(format!("wisp-skin-layers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SkinStore::new(&dir);
+        let skin = store.add("Layered", SkinModel::Classic, &png(64, 64), None, 10).unwrap();
+        assert!(store.layers(&skin.id).is_none());
+        let layer = |name: &str| SkinLayer { name: name.into(), visible: true, opacity: 1.5, png: base64::engine::general_purpose::STANDARD.encode(png(64, 64)) };
+        store.set_layers(&skin.id, &[layer("Base"), layer("Shading")]).unwrap();
+        let kept = store.layers(&skin.id).unwrap();
+        assert_eq!(kept.iter().map(|layer| layer.name.as_str()).collect::<Vec<_>>(), ["Base", "Shading"]);
+        assert_eq!(kept[0].opacity, 1.0);
+        let broken = SkinLayer { png: "not base64!".into(), ..layer("Broken") };
+        assert!(store.set_layers(&skin.id, &[broken]).is_err());
+        assert!(matches!(store.set_layers("missing", &[layer("X")]), Err(SkinError::Missing)));
+        store.remove(&skin.id).unwrap();
+        assert!(store.layers(&skin.id).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

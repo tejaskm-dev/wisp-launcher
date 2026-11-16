@@ -49,7 +49,9 @@ function Avatar({ skin }: { skin: string | HTMLCanvasElement | null }) {
 
 /** The account row at the foot of the sidebar; opens the account menu. */
 export function AccountButton({ collapsed }: { collapsed: boolean }) {
-  const { home } = useApp();
+  const { home, page } = useApp();
+  // Skins and Cloud sync open from this menu, so it shows as where you are on those pages.
+  const here = page === "skins" || page === "sync";
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const skin = useWornSkin();
@@ -75,10 +77,11 @@ export function AccountButton({ collapsed }: { collapsed: boolean }) {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={collapsed ? (account ? `${account.name}, account menu` : "Sign in") : undefined}
+        aria-current={here ? "page" : undefined}
         onClick={() => setOpen((isOpen) => !isOpen)}
         className={cn(
           "flex items-center gap-2.5 rounded-2xl p-1.5 text-left transition-colors duration-200",
-          open ? "bg-cream/8" : "hover:bg-cream/5",
+          open || here ? "bg-cream/8" : "hover:bg-cream/5",
           // Collapsed, only the avatar shows; the text stays laid out (clipped) so it can fade back in.
           collapsed ? "w-[52px] flex-none overflow-hidden" : "min-w-0 flex-1",
         )}

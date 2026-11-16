@@ -7,7 +7,7 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
-use wisp_core::skins::{self, PlayerSkin, Skin, SkinLibrary, SkinModel};
+use wisp_core::skins::{self, PlayerSkin, Skin, SkinLayer, SkinLibrary, SkinModel};
 
 use crate::{Network, Paths, now_ms};
 
@@ -59,6 +59,23 @@ pub async fn update_skin(
         .skins()
         .update(&id, name.as_deref(), model, bytes.as_deref(), now_ms())
         .map_err(|error| error.to_string())
+}
+
+/// The editor's layers for a skin, if it was saved with them.
+#[tauri::command]
+pub async fn get_skin_layers(id: String, paths: State<'_, Paths>) -> Result<Option<Vec<SkinLayer>>, String> {
+    Ok(paths.skins().layers(&id))
+}
+
+/// Keeps the editor's layers beside a skin; an empty list forgets them.
+#[tauri::command]
+pub async fn set_skin_layers(id: String, layers: Vec<SkinLayer>, paths: State<'_, Paths>) -> Result<(), String> {
+    let layers: Vec<SkinLayer> = layers.into_iter().map(|layer| SkinLayer { png: strip_data_url(&layer.png).to_string(), ..layer }).collect();
+    paths.skins().set_layers(&id, &layers).map_err(|error| error.to_string())
+}
+
+fn strip_data_url(png: &str) -> &str {
+    png.split_once("base64,").map_or(png, |(_, data)| data)
 }
 
 #[tauri::command]

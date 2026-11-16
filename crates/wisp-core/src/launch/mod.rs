@@ -5,7 +5,7 @@
 
 mod download;
 mod installer;
-mod java;
+pub(crate) mod java;
 pub mod macos;
 mod version;
 
@@ -94,6 +94,10 @@ pub enum LaunchUpdate {
     Installing {
         loader: String,
     },
+    /// Wisp found something that would stop the game, or just did, and is fixing it.
+    Fixing {
+        message: String,
+    },
     /// Java has started; the game window isn't up yet.
     Starting,
     Running {
@@ -109,6 +113,9 @@ pub enum LaunchUpdate {
         code: Option<i32>,
         crashed: bool,
         log_tail: Vec<String>,
+        /// What Wisp worked out (and fixed) about a crash.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        help: Option<crate::doctor::Report>,
     },
     Failed {
         message: String,
@@ -190,8 +197,17 @@ pub struct LaunchOptions {
     /// Java executables to use instead of Wisp's own, by Java major version.
     pub java_paths: HashMap<u32, PathBuf>,
     pub hooks: Hooks,
-    /// A world (its folder in saves/) to open straight away, on versions that can.
-    pub quick_play: Option<String>,
+    /// A world or server to go straight into.
+    pub quick_play: Option<QuickPlay>,
+}
+
+/// Where the game goes as soon as it opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickPlay {
+    /// A world, by its folder in saves/ (Minecraft 1.20 and later).
+    World(String),
+    /// A server, by address (1.20 and later by Quick Play; older versions by --server).
+    Server(String),
 }
 
 /// A version with every file in place, ready to start.
@@ -205,14 +221,14 @@ pub struct Prepared {
     hooks: Hooks,
     /// Variables the hooks get, named as Prism Launcher names them ($INST_NAME, $INST_JAVA, ...).
     hook_env: Vec<(&'static str, String)>,
-    /// The world the game opens straight into, when one was asked for and the version can.
-    quick_play: Option<String>,
+    /// Where the game goes as soon as it opens, when one was asked for and the version can.
+    quick_play: Option<QuickPlay>,
 }
 
 impl Prepared {
-    /// The world the game will open straight into, if any.
-    pub fn quick_play(&self) -> Option<&str> {
-        self.quick_play.as_deref()
+    /// Where the game will go as soon as it opens, if anywhere.
+    pub fn quick_play(&self) -> Option<&QuickPlay> {
+        self.quick_play.as_ref()
     }
 }
 
@@ -221,7 +237,12 @@ impl Prepared {
 pub struct Exit {
     pub code: Option<i32>,
     pub crashed: bool,
+    /// The last lines, for showing.
     pub log_tail: Vec<String>,
+    /// Everything kept of the output (the last few hundred lines), for working out what went wrong.
+    pub output: Vec<String>,
+    /// Whether the game got as far as its window.
+    pub window_seen: bool,
 }
 
 /// Downloads whatever the instance still needs and works out the command that starts it.
@@ -268,6 +289,13 @@ pub async fn prepare(
                 _ => needs_intel = true,
             }
         }
+    }
+    // A mod can need a newer Java than Minecraft asks for (Wisp's fixes set this).
+    if let Some(wanted) = instance.java_major
+        && java::major_version(&component).is_some_and(|current| wanted > current)
+        && let Some(newer) = java::component_for(wanted)
+    {
+        component = newer.to_string();
     }
     let platforms = java_platforms(needs_intel)?;
     let java_major = java::major_version(&component)
@@ -465,10 +493,26 @@ pub async fn prepare(
         WindowSize::Fullscreen => game_args.push("--fullscreen".into()),
     }
     // Quick Play arguments sit behind a feature Wisp leaves off; they're added here when asked.
-    let quick_play = options.quick_play.clone().filter(|_| version.supports_quick_play());
-    if let Some(world) = &quick_play {
-        game_args.extend(["--quickPlaySingleplayer".into(), world.clone()]);
-    }
+    // Before 1.20 there's no Quick Play: servers still work through --server and --port.
+    let quick_play = match options.quick_play.clone() {
+        Some(QuickPlay::World(world)) if version.supports_quick_play() => {
+            game_args.extend(["--quickPlaySingleplayer".into(), world.clone()]);
+            Some(QuickPlay::World(world))
+        }
+        Some(QuickPlay::Server(address)) if version.supports_quick_play() => {
+            game_args.extend(["--quickPlayMultiplayer".into(), address.clone()]);
+            Some(QuickPlay::Server(address))
+        }
+        Some(QuickPlay::Server(address)) => match crate::servers::ServerAddress::parse(&address) {
+            Ok(parsed) => {
+                game_args.extend(["--server".into(), parsed.host.clone()]);
+                game_args.extend(["--port".into(), parsed.port.unwrap_or(crate::servers::DEFAULT_PORT).to_string()]);
+                Some(QuickPlay::Server(address))
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    };
     let main_class = version
         .main_class
         .clone()
@@ -735,7 +779,7 @@ pub async fn run(
     if let Some(line) = &prepared.hooks.pre_launch {
         let output = tokio::select! {
             output = hook_command(line, &prepared).output() => output,
-            _ = &mut stop => return Ok(Exit { code: None, crashed: false, log_tail: Vec::new() }),
+            _ = &mut stop => return Ok(Exit { code: None, crashed: false, log_tail: Vec::new(), output: Vec::new(), window_seen: false }),
         };
         let output = output.map_err(|error| LaunchError::Hook(error.to_string()))?;
         if !output.status.success() {
@@ -802,18 +846,20 @@ pub async fn run(
     // If the log never mentions the window (a modded game, say), assume it's up after a while.
     let fallback = tokio::time::sleep(Duration::from_secs(40));
     tokio::pin!(fallback);
-    let (mut window_known, mut stopping) = (false, false);
+    let (mut window_known, mut window_up, mut stopping) = (false, false, false);
     let status = loop {
         tokio::select! {
             status = child.wait() => break status,
             seen = &mut window_rx, if !window_known => {
                 window_known = true;
                 if seen.is_ok() {
+                    window_up = true;
                     report(LaunchUpdate::Running { started_at: now_ms() });
                 }
             }
             _ = &mut fallback, if !window_known => {
                 window_known = true;
+                window_up = true;
                 report(LaunchUpdate::Running { started_at: now_ms() });
             }
             _ = &mut stop, if !stopping => {
@@ -846,6 +892,8 @@ pub async fn run(
         code,
         crashed,
         log_tail: lines.iter().rev().take(40).rev().cloned().collect(),
+        output: lines,
+        window_seen: window_up,
     })
 }
 
@@ -1169,6 +1217,7 @@ mod tests {
             code: Some(1),
             crashed: true,
             log_tail: vec!["boom".into()],
+            help: None,
         })
         .unwrap();
         assert_eq!(exited["phase"], "exited");

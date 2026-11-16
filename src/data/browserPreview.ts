@@ -22,9 +22,13 @@ import type {
   ProjectDetails,
   ProjectSummary,
   ProjectVersion,
+  PublicServer,
+  SavedServer,
   SearchQuery,
   SearchResults,
+  ServerStatus,
   Settings,
+  SkinLayerData,
   VersionList,
 } from "./types";
 
@@ -87,7 +91,52 @@ const readAccount = () => readStorage<Account | null>("wisp.preview.account", nu
 export function home(): Promise<HomeSnapshot> {
   if (forcedState === "loading") return new Promise<HomeSnapshot>(() => {});
   const instances = [...listInstances()].sort((a, b) => (b.lastPlayed ?? b.created) - (a.lastPlayed ?? a.created));
-  return Promise.resolve({ account: readAccount(), device: { name: "This computer", os: "" }, instances, worlds: [], sync: { state: "off" } });
+  const servers: HomeSnapshot["servers"] = [];
+  for (const instance of instances) {
+    for (const saved of readServers(instance.id)) {
+      const known = servers.find((server) => server.address.toLowerCase() === saved.address.toLowerCase());
+      if (known) known.instanceIds.push(instance.id);
+      else servers.push({ ...saved, instanceIds: [instance.id], lastPlayed: null });
+    }
+  }
+  return Promise.resolve({ account: readAccount(), device: { name: "This computer", os: "" }, instances, worlds: [], servers, sync: { state: "off" } });
+}
+
+const readServers = (instanceId: string) => readStorage<SavedServer[]>(`wisp.preview.servers.${instanceId}`, []);
+
+export async function addServer(instanceId: string, name: string, address: string): Promise<SavedServer> {
+  const trimmed = address.trim();
+  if (!trimmed) throw new Error("Type the server's address, like play.example.net.");
+  const list = readServers(instanceId);
+  if (list.some((server) => server.address.toLowerCase() === trimmed.toLowerCase())) throw new Error(`${trimmed} is already in this instance's server list.`);
+  const saved: SavedServer = { name: name.trim() || trimmed, address: trimmed, icon: null };
+  writeStorage(`wisp.preview.servers.${instanceId}`, [...list, saved]);
+  return saved;
+}
+
+export async function removeServer(instanceId: string, address: string): Promise<void> {
+  writeStorage(`wisp.preview.servers.${instanceId}`, readServers(instanceId).filter((server) => server.address.toLowerCase() !== address.toLowerCase()));
+}
+
+export async function serverStatuses(addresses: string[]): Promise<ServerStatus[]> {
+  return addresses.map((address) => ({
+    address,
+    online: false,
+    motd: [],
+    version: null,
+    protocol: null,
+    players: null,
+    maxPlayers: null,
+    sample: [],
+    icon: null,
+    pingMs: null,
+    error: "Checking servers needs the desktop app.",
+  }));
+}
+
+export async function publicServers(): Promise<PublicServer[]> {
+  const list = await import("../../crates/wisp-core/src/servers.json");
+  return list.default as PublicServer[];
 }
 
 export async function addOfflineAccount(name: string): Promise<Account> {
@@ -556,6 +605,14 @@ export async function deleteSkin(id: string): Promise<void> {
   } catch {
     // Nothing to clean up.
   }
+}
+
+export async function skinLayers(id: string): Promise<SkinLayerData[] | null> {
+  return readStorage<SkinLayerData[] | null>(`wisp.preview.skinLayers.${id}`, null);
+}
+
+export async function setSkinLayers(id: string, layers: SkinLayerData[]): Promise<void> {
+  writeStorage(`wisp.preview.skinLayers.${id}`, layers.length > 0 ? layers : null);
 }
 
 export async function skinDataUrl(id: string): Promise<string> {

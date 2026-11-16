@@ -7,6 +7,7 @@ export type PageId =
   | "discover"
   | "screenshots"
   | "journal"
+  | "servers"
   | "skins"
   | "friends"
   | "sync"
@@ -42,6 +43,10 @@ export interface Instance {
   /** "wisp:<n>" for a built-in icon, or an image URL (a modpack's icon). */
   icon: string | null;
   modpack: ModpackOrigin | null;
+  /** Memory for this instance in MB, instead of the one in Settings (Wisp's fixes set it). */
+  memoryMb?: number | null;
+  /** A newer Java than Minecraft asks for, when a mod needs one. */
+  javaMajor?: number | null;
 }
 
 export interface ModpackOrigin {
@@ -163,6 +168,8 @@ export type JournalEvent =
       worlds: string[];
       newWorlds: string[];
       screenshots: string[];
+      /** Servers joined, as addresses. */
+      servers?: string[];
       device: string;
       label: string;
     }
@@ -175,7 +182,43 @@ export type JournalEvent =
   | { kind: "modpack-installed"; title: string; version: string }
   | { kind: "world-imported"; name: string }
   | { kind: "world-exported"; name: string }
-  | { kind: "world-deleted"; name: string };
+  | { kind: "world-deleted"; name: string }
+  /** Wisp fixed what stopped (or would have stopped) the game. */
+  | { kind: "fixed"; found: string[]; fixed: string[]; changes: FixChange[]; afterCrash: boolean }
+  | { kind: "fix-undone"; fix: string };
+
+/** A change Wisp made to fix something; enough to put it back. */
+export type FixChange =
+  | { kind: "disabled"; file: string; name: string }
+  | { kind: "added"; projectId: string; title: string; version: string; files: string[] }
+  | { kind: "replaced"; previous: { title: string; versionNumber: string }; backup: string; current: { title: string; versionNumber: string } }
+  | { kind: "loader-changed"; from: string | null; to: string }
+  | { kind: "config-moved"; from: string; to: string }
+  | { kind: "memory-changed"; from: number | null; to: number }
+  | { kind: "java-changed"; from: number | null; to: number };
+
+/** Something Wisp can do with a click, left to the player because it can affect worlds. */
+export interface FixOffer {
+  label: string;
+  detail: string;
+  action: { kind: "disable"; file: string; name: string };
+}
+
+/** What Wisp found wrong with an instance, what it fixed, and what's left. */
+export interface FixReport {
+  found: string[];
+  fixed: string[];
+  changes: FixChange[];
+  offers: FixOffer[];
+  unsolved: string[];
+  /** The journal entry that records the changes, for Undo. */
+  entry?: string | null;
+}
+
+export interface FixedEvent {
+  instanceId: string;
+  report: FixReport;
+}
 
 export type JournalKind = JournalEvent["kind"];
 
@@ -214,6 +257,15 @@ export interface SkinLibrary {
 }
 
 /** A player's current skin from Mojang. */
+/** One of the skin editor's layers, as kept beside a skin. */
+export interface SkinLayerData {
+  name: string;
+  visible: boolean;
+  opacity: number;
+  /** A 64×64 PNG: base64, or a data URL when sent from the page. */
+  png: string;
+}
+
 export interface PlayerSkin {
   name: string;
   model: SkinModel;
@@ -312,7 +364,61 @@ export interface HomeSnapshot {
   /** Most recently used first. */
   instances: Instance[];
   worlds: WorldSummary[];
+  /** Every server in every instance's list, most recently played first. */
+  servers: ServerSummary[];
   sync: SyncStatus;
+}
+
+/** A server from the instances' server lists; one saved in several shows up once. */
+export interface ServerSummary {
+  address: string;
+  name: string;
+  /** PNG data URL, as the game last saw it. */
+  icon: string | null;
+  /** Instances whose list has it; the first is the one Play uses. */
+  instanceIds: string[];
+  lastPlayed: number | null;
+}
+
+export interface SavedServer {
+  name: string;
+  address: string;
+  icon: string | null;
+}
+
+/** A run of a server's message of the day in one style. */
+export interface MotdSpan {
+  text: string;
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underlined?: boolean;
+  strikethrough?: boolean;
+  obfuscated?: boolean;
+}
+
+/** What a server says about itself on the server list. */
+export interface ServerStatus {
+  address: string;
+  online: boolean;
+  motd: MotdSpan[];
+  version: string | null;
+  protocol: number | null;
+  players: number | null;
+  maxPlayers: number | null;
+  sample: string[];
+  icon: string | null;
+  pingMs: number | null;
+  error: string | null;
+}
+
+/** A public server on Discover; its status comes live from the server. */
+export interface PublicServer {
+  name: string;
+  address: string;
+  description: string;
+  tags: string[];
+  languages: string[];
 }
 
 export type IntroMode = "full" | "quick" | "off";
@@ -605,7 +711,9 @@ export type LaunchUpdate =
   | { phase: "running"; startedAt: number }
   /** The game closed and Wisp is taking a restore point of a world that was played. */
   | { phase: "saving"; world: string }
-  | { phase: "exited"; code: number | null; crashed: boolean; logTail: string[] }
+  /** Wisp found something that would stop the game (or just did) and is fixing it. */
+  | { phase: "fixing"; message: string }
+  | { phase: "exited"; code: number | null; crashed: boolean; logTail: string[]; help?: FixReport }
   /** `fix` names something Wisp can do about it: install Rosetta for Intel-only versions. */
   | { phase: "failed"; message: string; fix?: "install-rosetta" };
 
@@ -613,5 +721,7 @@ export interface LaunchEvent {
   instanceId: string;
   /** The world (its folder) the game opened straight into, if any. */
   world: string | null;
+  /** The server the game joined straight away, if any. */
+  server?: string | null;
   update: LaunchUpdate;
 }

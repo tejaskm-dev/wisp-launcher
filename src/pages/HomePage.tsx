@@ -6,6 +6,7 @@ import { describeLaunch } from "../components/launch/describe";
 import { ModpacksSection } from "../components/ModpacksSection";
 import { NewsPanel } from "../components/NewsPanel";
 import { QuickActions, type QuickActionId } from "../components/QuickActions";
+import { ServersSection } from "../components/servers/ServersSection";
 import { SyncPanel } from "../components/SyncPanel";
 import { WorldsSection, type WorldLaunch } from "../components/WorldsSection";
 import { worldLaunch } from "../components/worlds/launch";
@@ -51,50 +52,56 @@ export function HomePage({ revealed, heroIntro }: HomePageProps) {
       initial="hidden"
       animate={revealed ? "show" : "hidden"}
       exit={{ opacity: 0, transition: { duration: 0.15 } }}
-      className="grid grid-cols-1 gap-x-6 gap-y-7 px-7 pb-10 lg:grid-cols-[minmax(0,1fr)_minmax(280px,320px)]"
+      className="grid grid-cols-1 items-start gap-x-6 gap-y-7 px-7 pb-10 lg:grid-cols-[minmax(0,1fr)_minmax(280px,320px)]"
     >
-      <Hero
-        art={heroArt}
-        home={home}
-        world={selected}
-        worldLaunch={heroLaunch}
-        now={now}
-        revealed={revealed}
-        intro={heroIntro}
-        instance={instance}
-        instanceView={describeLaunch(instance ? launches[instance.id] : undefined, now)}
-        onSelectInstance={setInstanceId}
-        onPlayInstance={() => instance && play(instance.id)}
-        onStopInstance={() => instance && stop(instance.id)}
-        onSelectWorld={setSelectedId}
-        onPlay={() => selected && play(selected.instanceId, selected.folder)}
-        onStop={() => selected && stop(selected.instanceId)}
-        onImport={() => importWorlds()}
-        onNewWorld={() => (instance ? play(instance.id) : openNewInstance())}
-      />
-      <SyncPanel home={home} onSetUp={(provider) => comingSoon(`Syncing with ${provider}`)} />
-      {sections.worlds && (
-        <WorldsSection
-          worlds={worlds}
-          selectedId={selected?.id ?? null}
+      {/* Two columns that stack on their own: the main one, and the side one beside it. */}
+      <m.div variants={stagger} className="flex min-w-0 flex-col gap-7">
+        <Hero
+          art={heroArt}
+          home={home}
+          world={selected}
+          worldLaunch={heroLaunch}
           now={now}
-          viewOf={viewOf}
-          onSelect={(world) => (world.id === selected?.id ? openWorld(world.id) : setSelectedId(world.id))}
-          onPlay={(world) => play(world.instanceId, world.folder)}
-          onStop={(world) => stop(world.instanceId)}
+          revealed={revealed}
+          intro={heroIntro}
+          instance={instance}
+          instanceView={describeLaunch(instance ? launches[instance.id] : undefined, now)}
+          onSelectInstance={setInstanceId}
+          onPlayInstance={() => instance && play(instance.id)}
+          onStopInstance={() => instance && stop(instance.id)}
+          onSelectWorld={setSelectedId}
+          onPlay={() => selected && play(selected.instanceId, selected.folder)}
+          onStop={() => selected && stop(selected.instanceId)}
           onImport={() => importWorlds()}
           onNewWorld={() => (instance ? play(instance.id) : openNewInstance())}
-          onSeeAll={() => navigate("worlds")}
         />
-      )}
-      {sections.quickActions && <QuickActions onAction={onQuickAction} />}
-      {sections.modpacks && (
-        <ModpacksSection
-          onInstall={(pack) => requestInstall({ projectId: pack.id, title: pack.title, projectType: "modpack", iconUrl: pack.iconUrl })}
-          onBrowse={() => navigate("discover")}
-        />
-      )}
-      {sections.news && <NewsPanel />}
+        {sections.worlds && (
+          <WorldsSection
+            worlds={worlds}
+            selectedId={selected?.id ?? null}
+            now={now}
+            viewOf={viewOf}
+            onSelect={(world) => (world.id === selected?.id ? openWorld(world.id) : setSelectedId(world.id))}
+            onPlay={(world) => play(world.instanceId, world.folder)}
+            onStop={(world) => stop(world.instanceId)}
+            onImport={() => importWorlds()}
+            onNewWorld={() => (instance ? play(instance.id) : openNewInstance())}
+            onSeeAll={() => navigate("worlds")}
+          />
+        )}
+        {sections.modpacks && (
+          <ModpacksSection
+            onInstall={(pack) => requestInstall({ projectId: pack.id, title: pack.title, projectType: "modpack", iconUrl: pack.iconUrl })}
+            onBrowse={() => navigate("discover")}
+          />
+        )}
+      </m.div>
+      <m.div variants={stagger} className="flex min-w-0 flex-col gap-7">
+        <SyncPanel home={home} onSetUp={(provider) => comingSoon(`Syncing with ${provider}`)} />
+        {sections.worlds && <ServersSection servers={home?.servers ?? null} />}
+        {sections.quickActions && <QuickActions onAction={onQuickAction} />}
+        {sections.news && <NewsPanel />}
+      </m.div>
     </m.div>
   );
 }

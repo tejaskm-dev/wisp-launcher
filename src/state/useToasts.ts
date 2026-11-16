@@ -7,6 +7,10 @@ export interface Toast {
   tone: ToastTone;
   title: string;
   body?: string;
+  /** A button on the toast ("Undo"); pressing it also dismisses the toast. */
+  action?: { label: string; run: () => void };
+  /** How long it stays, when longer than usual (a list of fixes takes a moment to read). */
+  lifetimeMs?: number;
 }
 
 const TOAST_LIFETIME_MS = 5200;
@@ -29,7 +33,7 @@ export function useToasts() {
     (toast: Omit<Toast, "id">) => {
       const id = nextId++;
       setToasts((current) => [...current.slice(-2), { ...toast, id }]);
-      timers.current.set(id, window.setTimeout(() => dismiss(id), TOAST_LIFETIME_MS));
+      timers.current.set(id, window.setTimeout(() => dismiss(id), toast.lifetimeMs ?? TOAST_LIFETIME_MS));
     },
     [dismiss],
   );

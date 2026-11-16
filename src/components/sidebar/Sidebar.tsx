@@ -1,4 +1,4 @@
-import { ArrowRight, CloudOff, LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings } from "lucide-react";
+import { LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings } from "lucide-react";
 import { m, type Variants } from "motion/react";
 import { useEffect, useState, type FocusEvent, type PointerEvent } from "react";
 import { cn } from "../../lib/cn";
@@ -68,7 +68,6 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
 
   // A project's page belongs to Discover, a world's to Worlds.
   const activeIndex = NAV_ITEMS.findIndex((item) => item.id === navParent(page));
-  const syncOff = home?.sync.state === "off";
   const toggle = () => updateSettings((current) => ({ sidebarCollapsed: !current.sidebarCollapsed }));
 
   return (
@@ -108,7 +107,7 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
           </a>
         </div>
 
-        {/* The middle scrolls on short windows; the sync card and account stay put. */}
+        {/* The middle scrolls on short windows; the account row stays put. */}
         <div className="no-scrollbar mt-6 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overflow-x-hidden px-4 pb-6">
           <m.nav aria-label="Main" variants={navList} initial="hidden" animate={revealed ? "show" : "hidden"} className="relative flex flex-col gap-1">
             {activeIndex >= 0 && (
@@ -125,7 +124,6 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
               const Icon = item.icon;
               const count = item.id === "instances" ? home?.instances.length : item.id === "worlds" ? home?.worlds.length : undefined;
               const shortcut = `${modKey}${index + 1}`;
-              const offDot = item.id === "sync" && syncOff;
               return (
                 <m.a
                   key={item.id}
@@ -145,12 +143,9 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
                 >
                   <span className="relative shrink-0">
                     <Icon size={20} strokeWidth={active ? 2.1 : 1.8} aria-hidden="true" />
-                    {offDot && collapsed && (
-                      <span aria-hidden="true" className={cn("absolute -right-1 -top-0.5 size-2 rounded-full border-[1.5px] bg-ink-950", active ? "border-ink-900" : "border-mute")} />
-                    )}
                   </span>
                   <span className={cn("min-w-0 flex-1 overflow-hidden whitespace-nowrap", fade(collapsed))}>{item.label}</span>
-                  {/* Right side: the count (or sync's "off" ring), swapped for the shortcut on hover. */}
+                  {/* Right side: the count, swapped for the shortcut on hover. */}
                   <span className={cn("grid shrink-0 justify-items-end text-[13px]", fade(collapsed))}>
                     <span
                       className={cn(
@@ -158,11 +153,7 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
                         active ? "text-ink-900/60" : "text-mute-2",
                       )}
                     >
-                      {count !== undefined && count > 0 ? (
-                        count
-                      ) : offDot ? (
-                        <span role="img" aria-label="Off" className={cn("mt-1.5 block size-2 rounded-full border", active ? "border-ink-900/50" : "border-mute-2")} />
-                      ) : null}
+                      {count !== undefined && count > 0 ? count : null}
                     </span>
                     <kbd
                       className={cn(
@@ -181,8 +172,16 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
           <RecentInstances collapsed={collapsed} tipFor={tipFor} revealed={revealed} />
         </div>
 
-        <div className="flex flex-col gap-3 px-4 pb-4">
-          <SyncCard collapsed={collapsed} tipFor={tipFor} />
+        <div className="relative flex flex-col gap-3 border-t border-cream/5 px-4 pb-4 pt-3">
+          {/* Wisp's ghost keeps watch over the account row. */}
+          <Ghost
+            size={38}
+            floating
+            className={cn(
+              "pointer-events-none absolute -top-7 right-5 z-10 drop-shadow-[0_0_14px_rgba(244,238,228,0.28)] transition-opacity duration-200",
+              collapsed && "opacity-0",
+            )}
+          />
           <div className={cn("flex gap-1", collapsed ? "flex-col items-center" : "items-center")}>
             <AccountButton collapsed={collapsed} />
             <button
@@ -320,56 +319,5 @@ function RecentInstances({ collapsed, tipFor, revealed }: { collapsed: boolean; 
         </ul>
       )}
     </m.section>
-  );
-}
-
-/** Sync status at the foot of the sidebar, with the ghost peeking over it. */
-function SyncCard({ collapsed, tipFor }: { collapsed: boolean; tipFor: TipFor }) {
-  const { home, navigate } = useApp();
-
-  if (collapsed) {
-    return (
-      <button
-        type="button"
-        aria-label="Cloud sync is off. Set it up"
-        onClick={() => navigate("sync")}
-        {...tipFor("Cloud sync is off", "Set up")}
-        className="grid h-11 w-full place-items-center rounded-2xl text-cream-400 transition-colors duration-200 hover:bg-cream/5 hover:text-cream"
-      >
-        <CloudOff size={19} aria-hidden="true" />
-      </button>
-    );
-  }
-
-  return (
-    <div className="relative min-w-[216px]">
-      <Ghost size={46} floating className="pointer-events-none absolute -top-8 right-3 z-10 drop-shadow-[0_0_14px_rgba(244,238,228,0.28)]" />
-      {home === null ? (
-        <Loading label="Loading sync status" className="flex items-center gap-3 rounded-[18px] border border-cream/8 bg-ink-800 p-3">
-          <Skeleton className="size-9 shrink-0 rounded-xl" />
-          <div className="flex flex-1 flex-col gap-2">
-            <Skeleton className="h-3.5 w-28 rounded-full" />
-            <Skeleton className="h-3 w-20 rounded-full" />
-          </div>
-        </Loading>
-      ) : (
-        <button
-          type="button"
-          onClick={() => navigate("sync")}
-          className="group flex w-full items-center gap-3 rounded-[18px] border border-cream/8 bg-ink-800 p-3 text-left transition-colors duration-200 hover:border-cream/20 hover:bg-ink-700"
-        >
-          <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-cream/7 text-cream-300">
-            <CloudOff size={17} aria-hidden="true" />
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col whitespace-nowrap">
-            <span className="text-sm font-bold">Cloud sync is off</span>
-            <span className="flex items-center gap-1 text-xs font-semibold text-cream-300 transition-colors group-hover:text-cream">
-              Set up sync
-              <ArrowRight size={13} className="transition-transform duration-300 group-hover:translate-x-0.5" aria-hidden="true" />
-            </span>
-          </span>
-        </button>
-      )}
-    </div>
   );
 }

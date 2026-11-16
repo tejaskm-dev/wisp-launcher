@@ -24,8 +24,10 @@ export interface AppContextValue {
   launches: Record<string, LaunchUpdate>;
   /** The world (its folder) each launch opens straight into, when one was asked for. */
   launchWorlds: Record<string, string | null>;
-  /** Starts an instance (asking for an account first if there isn't one), straight into a world if given. */
-  play: (instanceId: string, world?: string | null) => void;
+  /** The server (its address) each launch joins straight away, when one was asked for. */
+  launchServers: Record<string, string | null>;
+  /** Starts an instance (asking for an account first if there isn't one), straight into a world or server if given. */
+  play: (instanceId: string, world?: string | null, server?: string | null) => void;
   /** Stops a running game, or cancels a launch still downloading. */
   stop: (instanceId: string) => void;
   /** Clears a failed or crashed launch from view. */

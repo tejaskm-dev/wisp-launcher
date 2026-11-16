@@ -1,7 +1,9 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fixes;
 mod library;
+mod multiplayer;
 mod protocol;
 mod skins;
 mod social;
@@ -25,8 +27,10 @@ use wisp_core::feeds::{self, PatchNote};
 use wisp_core::home::{HomeSnapshot, instance_label};
 use wisp_core::instances::{GAME_DIR, Instance, InstanceError, InstanceStore, Loader, NewInstance};
 use wisp_core::journal::{Event as JournalEvent, Journal};
+use wisp_core::doctor;
 use wisp_core::launch::{
-    self, GameFiles, Hooks, InstalledRuntime, JavaProbe, LaunchOptions, LaunchUpdate, WindowSize,
+    self, GameFiles, Hooks, InstalledRuntime, JavaProbe, LaunchOptions, LaunchUpdate, QuickPlay,
+    WindowSize,
 };
 use wisp_core::loaders::{self, LoaderVersion};
 use wisp_core::modpack::{self, InstallUpdate};
@@ -187,6 +191,8 @@ struct LaunchSlot {
     last: LaunchUpdate,
     /// The world the game is opening straight into, once that's known.
     world: Option<String>,
+    /// The server the game is joining straight away, once that's known.
+    server: Option<String>,
 }
 
 /// Sent to the UI on the "launch" event, and returned by `get_launches`.
@@ -196,10 +202,21 @@ struct LaunchEvent {
     instance_id: String,
     /// The world (its folder) the game opened straight into, if any.
     world: Option<String>,
+    /// The server the game joined straight away, if any.
+    server: Option<String>,
     update: LaunchUpdate,
 }
 
 const LAUNCH_EVENT: &str = "launch";
+/// Sent when Wisp fixed (or found) problems with an instance, before starting it or after a crash.
+const FIXED_EVENT: &str = "fixed";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FixedEvent {
+    instance_id: String,
+    report: doctor::Report,
+}
 
 struct SettingsState(SyncMutex<Settings>);
 
@@ -439,6 +456,7 @@ async fn get_java_news(network: State<'_, Network>) -> Result<Vec<PatchNote>, St
 async fn launch_instance(
     id: String,
     world: Option<String>,
+    server: Option<String>,
     app: AppHandle,
     paths: State<'_, Paths>,
     settings: State<'_, SettingsState>,
@@ -459,6 +477,9 @@ async fn launch_instance(
     {
         return Err("That world no longer exists.".into());
     }
+    if let Some(address) = &server {
+        wisp_core::servers::ServerAddress::parse(address).map_err(|error| error.to_string())?;
+    }
 
     let (stop, stop_requested) = oneshot::channel();
     {
@@ -475,16 +496,18 @@ async fn launch_instance(
                 stop: Some(stop),
                 last: LaunchUpdate::Checking,
                 world: None,
+                server: None,
             },
         );
     }
     let window = &settings.game_window;
     let hooks = &settings.hooks;
+    let memory_mb = instance.memory_mb.unwrap_or(settings.memory_mb);
     let options = LaunchOptions {
         instance,
         game_dir,
         account,
-        memory_mb: settings.memory_mb,
+        memory_mb,
         concurrency: settings.concurrent_downloads as usize,
         launcher_version: env!("CARGO_PKG_VERSION").to_string(),
         jvm_args: launch::split_args(&settings.jvm_args),
@@ -506,7 +529,11 @@ async fn launch_instance(
             wrapper: launch::split_args(&hooks.wrapper),
             post_exit: Some(hooks.post_exit.clone()).filter(|line| !line.is_empty()),
         },
-        quick_play: world,
+        quick_play: match (server, world) {
+            (Some(address), _) => Some(QuickPlay::Server(address)),
+            (None, Some(world)) => Some(QuickPlay::World(world)),
+            (None, None) => None,
+        },
     };
     tauri::async_runtime::spawn(play(
         app,
@@ -522,7 +549,7 @@ async fn launch_instance(
 
 /// Records a launch update for an instance and sends it to the window.
 fn report_launch(app: &AppHandle, id: &str, update: LaunchUpdate) {
-    let mut world = None;
+    let (mut world, mut server) = (None, None);
     if let Some(launches) = app.try_state::<Launches>()
         && let Some(slot) = launches
             .0
@@ -532,6 +559,7 @@ fn report_launch(app: &AppHandle, id: &str, update: LaunchUpdate) {
     {
         slot.last = update.clone();
         world = slot.world.clone();
+        server = slot.server.clone();
     }
     // Friends see when a game starts and stops.
     if matches!(update, LaunchUpdate::Running { .. } | LaunchUpdate::Exited { .. }) {
@@ -542,19 +570,68 @@ fn report_launch(app: &AppHandle, id: &str, update: LaunchUpdate) {
         LaunchEvent {
             instance_id: id.to_string(),
             world,
+            server,
             update,
         },
     );
 }
 
+/// The game's output after a load that failed yet exited cleanly (Forge's error screen does).
+fn failed_to_load(output: &[String]) -> bool {
+    const SIGNS: [&str; 4] = [
+        "Missing or unsupported mandatory dependencies",
+        "Mod resolution encountered an incompatible mod set",
+        "ModLoadingException",
+        "LoadingFailedException",
+    ];
+    output.iter().any(|line| SIGNS.iter().any(|sign| line.contains(sign)))
+}
+
+fn fixing_message(count: usize) -> String {
+    if count == 1 {
+        "Fixing a problem with the mods…".into()
+    } else {
+        format!("Fixing {count} problems with the mods…")
+    }
+}
+
+/// Records a fix in the journal; its entry id is what Undo uses.
+fn record_fix(app: &AppHandle, instance_id: &str, report: &doctor::Report, after_crash: bool) -> Option<String> {
+    let paths = app.try_state::<Paths>()?;
+    let event = JournalEvent::Fixed {
+        found: report.found.clone(),
+        fixed: report.fixed.clone(),
+        changes: report.changes.clone(),
+        after_crash,
+    };
+    let entry = paths.journal().append(Some(instance_id), None, now_ms(), event).ok()?;
+    library::journal_changed(app);
+    Some(entry.id)
+}
+
+/// The stop button's sender was taken: the player stopped this launch.
+fn stop_pressed(app: &AppHandle, id: &str) -> bool {
+    app.try_state::<Launches>().is_some_and(|launches| {
+        launches
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .is_some_and(|slot| slot.stop.is_none())
+    })
+}
+
+/// Runs a launch from start to finish. Before starting, the mods folder gets a quick look and
+/// whatever would stop the game is fixed; after a crash, the loader's report is read and fixed
+/// the same way. A crash fixed before the window even opened starts the game again, once.
 async fn play(
     app: AppHandle,
     id: String,
     client: HttpClient,
     files: GameFiles,
-    options: LaunchOptions,
+    mut options: LaunchOptions,
     settings: Settings,
-    mut stop_requested: oneshot::Receiver<()>,
+    stop_requested: oneshot::Receiver<()>,
 ) {
     let window = app.get_webview_window("main");
     let while_playing = settings.while_playing;
@@ -576,16 +653,126 @@ async fn play(
         }
         report_launch(&app, &id, update);
     };
+    let store = app.try_state::<Paths>().map(|paths| paths.instances());
+    let instance_dir = store.as_ref().and_then(|store| store.dir_of(&id));
+    let system_mb = tauri::async_runtime::spawn_blocking(device::total_memory_mb).await.ok().flatten();
+    let curseforge_key = curseforge::api_key(&settings.curseforge_api_key);
 
-    // Stop during the downloads cancels them (dropping the work aborts every transfer).
-    let prepared = tokio::select! {
-        prepared = launch::prepare(&client, &files, &options, &report) => Some(prepared),
-        _ = &mut stop_requested => None,
-    };
-    let outcome = match prepared {
-        None => Ok(None),
-        Some(Err(error)) => Err(error),
-        Some(Ok(prepared)) => {
+    let mut stop_requested = stop_requested;
+    let mut retried = false;
+    let outcome: Result<Option<(launch::Exit, Option<doctor::Report>)>, launch::LaunchError> = loop {
+        let attempt_started = now_ms();
+        // Get the game ready and, meanwhile, look over the mods folder.
+        let checking = {
+            let (instance, dir) = (options.instance.clone(), instance_dir.clone());
+            tauri::async_runtime::spawn_blocking(move || dir.map(|dir| doctor::check(&instance, &dir)).unwrap_or_default())
+        };
+        let ready = tokio::select! {
+            ready = async { tokio::join!(launch::prepare(&client, &files, &options, &report), checking) } => Some(ready),
+            _ = &mut stop_requested => None,
+        };
+        let Some((mut prepared, problems)) = ready else {
+            break Ok(None);
+        };
+        let problems = problems.unwrap_or_default();
+        if let Some(store) = &store
+            && !problems.is_empty()
+        {
+            report(LaunchUpdate::Fixing { message: fixing_message(problems.len()) });
+            let fixer = doctor::Fixer {
+                client: &client,
+                store,
+                instance_id: &id,
+                concurrency: options.concurrency,
+                curseforge_key: curseforge_key.as_deref(),
+                memory_mb: options.memory_mb,
+                system_mb,
+            };
+            let mut fixes = tokio::select! {
+                fixes = fixer.repair(problems) => fixes,
+                _ = &mut stop_requested => break Ok(None),
+            };
+            if !fixes.changes.is_empty() {
+                fixes.entry = record_fix(&app, &id, &fixes, false);
+                if let Some(updated) = store.get(&id) {
+                    // A newer loader, other memory or another Java changes how the game starts.
+                    let restart = fixes.changes.iter().any(|change| {
+                        matches!(change, doctor::Change::LoaderChanged { .. } | doctor::Change::JavaChanged { .. } | doctor::Change::MemoryChanged { .. })
+                    });
+                    options.memory_mb = updated.memory_mb.unwrap_or(settings.memory_mb);
+                    options.instance = updated;
+                    if restart {
+                        prepared = tokio::select! {
+                            again = launch::prepare(&client, &files, &options, &report) => again,
+                            _ = &mut stop_requested => break Ok(None),
+                        };
+                    }
+                }
+            }
+            if !fixes.is_empty() {
+                let _ = app.emit(FIXED_EVENT, FixedEvent { instance_id: id.clone(), report: fixes });
+            }
+        }
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => break Err(error),
+        };
+        if let Some(launches) = app.try_state::<Launches>()
+            && let Some(slot) = launches
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get_mut(&id)
+        {
+            (slot.world, slot.server) = match prepared.quick_play() {
+                Some(QuickPlay::World(world)) => (Some(world.clone()), None),
+                Some(QuickPlay::Server(address)) => (None, Some(address.clone())),
+                None => (None, None),
+            };
+        }
+        let exit = match launch::run(prepared, &report, stop_requested, now_ms).await {
+            Ok(exit) => exit,
+            Err(error) => break Err(error),
+        };
+
+        // After a crash, or a load that failed: read what went wrong and fix what can be.
+        let failed = !stop_pressed(&app, &id) && (exit.crashed || failed_to_load(&exit.output));
+        let (Some(store), Some(dir), true) = (&store, &instance_dir, failed) else {
+            break Ok(Some((exit, None)));
+        };
+        report(LaunchUpdate::Fixing { message: "Working out what went wrong…".into() });
+        let problems = {
+            let (instance, dir, output) = (options.instance.clone(), dir.clone(), exit.output.clone());
+            tauri::async_runtime::spawn_blocking(move || doctor::diagnose(&instance, &dir, &output, attempt_started))
+                .await
+                .unwrap_or_default()
+        };
+        if problems.is_empty() {
+            break Ok(Some((exit, None)));
+        }
+        let fixer = doctor::Fixer {
+            client: &client,
+            store,
+            instance_id: &id,
+            concurrency: options.concurrency,
+            curseforge_key: curseforge_key.as_deref(),
+            memory_mb: options.memory_mb,
+            system_mb,
+        };
+        let mut help = fixer.repair(problems).await;
+        if !help.changes.is_empty() {
+            help.entry = record_fix(&app, &id, &help, true);
+        }
+        // Fixed before the window even opened, with nothing left over: start again, once.
+        let clean = !help.changes.is_empty() && help.offers.is_empty() && help.unsolved.is_empty();
+        if clean && !exit.window_seen && !retried {
+            retried = true;
+            let _ = app.emit(FIXED_EVENT, FixedEvent { instance_id: id.clone(), report: help });
+            if let Some(updated) = store.get(&id) {
+                options.memory_mb = updated.memory_mb.unwrap_or(settings.memory_mb);
+                options.instance = updated;
+            }
+            let (stop, receiver) = oneshot::channel();
             if let Some(launches) = app.try_state::<Launches>()
                 && let Some(slot) = launches
                     .0
@@ -593,12 +780,14 @@ async fn play(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .get_mut(&id)
             {
-                slot.world = prepared.quick_play().map(str::to_string);
+                slot.stop = Some(stop);
             }
-            launch::run(prepared, &report, stop_requested, now_ms)
-                .await
-                .map(Some)
+            stop_requested = receiver;
+            report(LaunchUpdate::Fixing { message: "Fixed it. Starting again…".into() });
+            continue;
         }
+        // A load that failed counts as a crash, whatever Java's exit code said.
+        break Ok(Some((launch::Exit { crashed: true, ..exit }, Some(help))));
     };
     // Back from wherever it went while the game ran (harmless if the game never started).
     if let Some(window) = &window
@@ -609,20 +798,25 @@ async fn play(
         let _ = window.set_focus();
     }
     match outcome {
-        Ok(exit) => {
-            let (code, crashed, log_tail) = exit
-                .map(|exit| (exit.code, exit.crashed, exit.log_tail))
-                .unwrap_or((None, false, Vec::new()));
+        Ok(result) => {
+            let (code, crashed, log_tail, help) = match result {
+                Some((exit, help)) => (exit.code, exit.crashed, exit.log_tail, help),
+                None => (None, false, Vec::new(), None),
+            };
             // The session goes into the journal and played worlds get a restore point, before
             // the launch is over, so the same instance can't start mid-copy.
             let started = started_at.load(Ordering::Relaxed);
             if started > 0 {
                 let (app, id) = (app.clone(), id.clone());
                 let (instance, game_dir) = (options.instance.clone(), options.game_dir.clone());
+                let server = match &options.quick_play {
+                    Some(QuickPlay::Server(address)) => Some(address.clone()),
+                    _ => None,
+                };
                 let prefs = settings.journal.clone();
                 let ended = now_ms();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    library::after_session(&app, &instance, &game_dir, started, ended, crashed, &prefs, &|update| {
+                    library::after_session(&app, &instance, &game_dir, started, ended, crashed, server.as_deref(), &prefs, &|update| {
                         report_launch(&app, &id, update)
                     });
                 })
@@ -632,6 +826,7 @@ async fn play(
                 code,
                 crashed,
                 log_tail,
+                help,
             });
         }
         Err(error) => report(LaunchUpdate::Failed {
@@ -673,6 +868,7 @@ async fn get_launches(launches: State<'_, Launches>) -> Result<Vec<LaunchEvent>,
         .map(|(id, slot)| LaunchEvent {
             instance_id: id.clone(),
             world: slot.world.clone(),
+            server: slot.server.clone(),
             update: slot.last.clone(),
         })
         .collect())
@@ -1184,6 +1380,7 @@ fn main() {
         .manage(network)
         .manage(Launches::default())
         .manage(Installs::default())
+        .manage(multiplayer::StatusCache::default())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let settings_path = app.path().app_config_dir()?.join("settings.json");
@@ -1261,6 +1458,8 @@ fn main() {
             library::delete_restore_point,
             skins::get_skins,
             skins::get_skin_png,
+            skins::get_skin_layers,
+            skins::set_skin_layers,
             skins::add_skin,
             skins::update_skin,
             skins::delete_skin,
@@ -1281,7 +1480,13 @@ fn main() {
             social::invite_to_party,
             social::join_party,
             social::decline_party,
-            social::leave_party
+            social::leave_party,
+            multiplayer::get_server_statuses,
+            multiplayer::get_public_servers,
+            multiplayer::add_server,
+            multiplayer::remove_server,
+            fixes::undo_fix,
+            fixes::apply_fix
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Wisp");

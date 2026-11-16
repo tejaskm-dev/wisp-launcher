@@ -53,6 +53,12 @@ pub struct Instance {
     /// Set when the instance was made from a modpack.
     #[serde(default)]
     pub modpack: Option<ModpackOrigin>,
+    /// Memory for this instance in MB, instead of the one in Settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+    /// A newer Java than Minecraft asks for, when a mod needs one (by major version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_major: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +216,8 @@ impl InstanceStore {
             last_played: None,
             icon: request.icon,
             modpack,
+            memory_mb: None,
+            java_major: None,
         };
         let json = serde_json::to_vec_pretty(&instance).map_err(std::io::Error::other)?;
         std::fs::write(dir.join(MANIFEST), json)?;

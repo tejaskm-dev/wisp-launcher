@@ -1,4 +1,5 @@
-//! Just enough NBT, Minecraft's binary data format, to read level.dat and player stats files.
+//! Just enough NBT, Minecraft's binary data format, to read level.dat and player stats files and
+//! to read and write servers.dat.
 //!
 //! Files may be gzip- or zlib-compressed or plain. Reading is defensive: lengths are checked
 //! against the bytes left and nesting is capped, so a damaged file fails instead of running away.
@@ -111,6 +112,148 @@ pub fn read_file(path: &std::path::Path) -> Result<Tag, NbtError> {
     parse(&std::fs::read(path)?)
 }
 
+/// A root tag as uncompressed NBT bytes (how servers.dat is stored).
+pub fn to_bytes(root: &Tag) -> Vec<u8> {
+    let mut out = vec![kind_of(root)];
+    write_string(&mut out, "");
+    write_payload(&mut out, root);
+    out
+}
+
+fn kind_of(tag: &Tag) -> u8 {
+    match tag {
+        Tag::Byte(_) => 1,
+        Tag::Short(_) => 2,
+        Tag::Int(_) => 3,
+        Tag::Long(_) => 4,
+        Tag::Float(_) => 5,
+        Tag::Double(_) => 6,
+        Tag::ByteArray(_) => 7,
+        Tag::String(_) => 8,
+        Tag::List(_) => 9,
+        Tag::Compound(_) => 10,
+        Tag::IntArray(_) => 11,
+        Tag::LongArray(_) => 12,
+    }
+}
+
+fn write_length(out: &mut Vec<u8>, length: usize) {
+    out.extend((length.min(i32::MAX as usize) as i32).to_be_bytes());
+}
+
+fn write_payload(out: &mut Vec<u8>, tag: &Tag) {
+    match tag {
+        Tag::Byte(value) => out.push(*value as u8),
+        Tag::Short(value) => out.extend(value.to_be_bytes()),
+        Tag::Int(value) => out.extend(value.to_be_bytes()),
+        Tag::Long(value) => out.extend(value.to_be_bytes()),
+        Tag::Float(value) => out.extend(value.to_be_bytes()),
+        Tag::Double(value) => out.extend(value.to_be_bytes()),
+        Tag::ByteArray(items) => {
+            write_length(out, items.len());
+            out.extend(items.iter().map(|&byte| byte as u8));
+        }
+        Tag::String(text) => write_string(out, text),
+        Tag::List(items) => {
+            out.push(items.first().map_or(0, kind_of));
+            write_length(out, items.len());
+            for item in items {
+                write_payload(out, item);
+            }
+        }
+        Tag::Compound(children) => {
+            // Sorted, so the same data always makes the same bytes.
+            let mut names: Vec<&String> = children.keys().collect();
+            names.sort();
+            for name in names {
+                let child = &children[name];
+                out.push(kind_of(child));
+                write_string(out, name);
+                write_payload(out, child);
+            }
+            out.push(0);
+        }
+        Tag::IntArray(items) => {
+            write_length(out, items.len());
+            for item in items {
+                out.extend(item.to_be_bytes());
+            }
+        }
+        Tag::LongArray(items) => {
+            write_length(out, items.len());
+            for item in items {
+                out.extend(item.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// Java's "modified UTF-8": NUL takes two bytes, and characters past U+FFFF are written as their
+/// two UTF-16 halves, three bytes each. Cut at a character if it passes the 65,535-byte limit.
+fn write_string(out: &mut Vec<u8>, text: &str) {
+    let mut bytes = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        let before = bytes.len();
+        let mut units = [0u16; 2];
+        for &unit in character.encode_utf16(&mut units).iter() {
+            match unit {
+                0x0001..=0x007f => bytes.push(unit as u8),
+                0x0000 | 0x0080..=0x07ff => {
+                    bytes.push(0xc0 | (unit >> 6) as u8);
+                    bytes.push(0x80 | (unit & 0x3f) as u8);
+                }
+                _ => {
+                    bytes.push(0xe0 | (unit >> 12) as u8);
+                    bytes.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+                    bytes.push(0x80 | (unit & 0x3f) as u8);
+                }
+            }
+        }
+        if bytes.len() > u16::MAX as usize {
+            bytes.truncate(before);
+            break;
+        }
+    }
+    out.extend((bytes.len() as u16).to_be_bytes());
+    out.extend(bytes);
+}
+
+/// Reads modified UTF-8 (plain UTF-8 too); anything broken becomes U+FFFD.
+fn read_modified_utf8(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    let continuation = |index: usize| bytes.get(index).map(|&byte| u32::from(byte & 0x3f));
+    while at < bytes.len() {
+        let lead = bytes[at];
+        if lead < 0x80 {
+            units.push(u16::from(lead));
+            at += 1;
+        } else if lead & 0xe0 == 0xc0 && let Some(second) = continuation(at + 1) {
+            units.push(((u32::from(lead & 0x1f) << 6) | second) as u16);
+            at += 2;
+        } else if lead & 0xf0 == 0xe0
+            && let (Some(second), Some(third)) = (continuation(at + 1), continuation(at + 2))
+        {
+            units.push(((u32::from(lead & 0x0f) << 12) | (second << 6) | third) as u16);
+            at += 3;
+        } else if lead & 0xf8 == 0xf0
+            && let (Some(second), Some(third), Some(fourth)) = (continuation(at + 1), continuation(at + 2), continuation(at + 3))
+        {
+            let code = (u32::from(lead & 0x07) << 18) | (second << 12) | (third << 6) | fourth;
+            let mut pair = [0u16; 2];
+            units.extend_from_slice(char::from_u32(code).unwrap_or('\u{fffd}').encode_utf16(&mut pair));
+            at += 4;
+        } else {
+            units.push(0xfffd);
+            at += 1;
+        }
+    }
+    String::from_utf16_lossy(&units)
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -145,7 +288,7 @@ impl Reader<'_> {
     /// Java's "modified UTF-8"; ordinary text reads the same as UTF-8.
     fn string(&mut self) -> Result<String, NbtError> {
         let length = u16::from_be_bytes(self.array()?) as usize;
-        Ok(String::from_utf8_lossy(self.take(length)?).into_owned())
+        Ok(read_modified_utf8(self.take(length)?))
     }
 
     fn payload(&mut self, kind: u8, depth: usize) -> Result<Tag, NbtError> {
@@ -278,6 +421,23 @@ pub(crate) mod tests {
         assert_eq!(root.at(&["Data", "LastPlayed"]).and_then(Tag::as_i64), Some(1_794_760_228_899));
         assert_eq!(root.at(&["Data", "GameType"]).and_then(Tag::as_i64), Some(1));
         assert_eq!(root.at(&["Data", "Version", "Name"]).and_then(Tag::as_str), Some("26.3"));
+    }
+
+    #[test]
+    fn writes_what_it_reads_including_odd_text() {
+        let mut server = HashMap::new();
+        server.insert("name".to_string(), Tag::String("Caf\u{e9} \u{1d11e} \u{0} end".into()));
+        server.insert("ip".to_string(), Tag::String("play.example.net:25570".into()));
+        server.insert("acceptTextures".to_string(), Tag::Byte(1));
+        let mut root = HashMap::new();
+        root.insert("servers".to_string(), Tag::List(vec![Tag::Compound(server)]));
+        root.insert("empty".to_string(), Tag::List(Vec::new()));
+        root.insert("numbers".to_string(), Tag::IntArray(vec![1, -2, 3]));
+        let root = Tag::Compound(root);
+        let bytes = to_bytes(&root);
+        assert_eq!(parse(&bytes).unwrap(), root);
+        // NUL is written as two bytes, never a raw zero inside a string.
+        assert!(bytes.windows(2).any(|pair| pair == [0xc0, 0x80]));
     }
 
     #[test]
