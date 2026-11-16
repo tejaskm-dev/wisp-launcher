@@ -1,7 +1,6 @@
-import { Check, ChevronsDown, Crown, Download, FolderInput, Info, MoreHorizontal, MoveHorizontal, Music2, Pencil, PersonStanding, Plus, Rotate3d, Shirt, Trash2, Type, Upload, UserRound, Zap, type LucideIcon } from "lucide-react";
+import { Check, ChevronsDown, Crown, Download, FolderInput, Info, LocateFixed, MoreHorizontal, MoveHorizontal, Music2, Orbit, Pencil, PersonStanding, Plus, Rotate3d, Shirt, Trash2, Type, Upload, UserRound, Zap, type LucideIcon } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import stageArt from "../assets/art/skin-stage.jpg";
 import { EMOTES, type EmoteId } from "../components/skins/emotes";
 import type { SavedLayer } from "../components/skins/layers";
 import { SkinEditor, type StartLayer } from "../components/skins/SkinEditor";
@@ -68,6 +67,9 @@ export function SkinsPage() {
   const [prefs, setPrefs] = useState(readPrefs);
   // Pressing the playing emote again plays it from the start (the throne gathers again).
   const [take, setTake] = useState(0);
+  // Free roam: the island drops away and the camera can go anywhere, underneath included.
+  const [roam, setRoam] = useState(false);
+  const [recenter, setRecenter] = useState(0);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [lookup, setLookup] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -229,20 +231,16 @@ export function SkinsPage() {
 
       <m.div variants={fadeUp} className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
         <section aria-label="Preview" className="flex min-w-0 flex-col gap-3">
-          <div className="relative aspect-[3/2] w-full overflow-hidden rounded-[26px] border border-cream/8 bg-ink-850">
-            <img src={stageArt} alt="" aria-hidden="true" draggable={false} className="absolute inset-0 size-full object-cover" />
-            {/* Settle the art into the dark interface, and ground the player on the stone circle. */}
-            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_50%_55%,transparent_55%,rgba(10,9,8,0.55))]" />
-            <div className="pointer-events-none absolute left-1/2 top-[73.5%] h-[5%] w-[22%] -translate-x-1/2 rounded-[100%] bg-black/45 blur-md" />
+          <div className="relative aspect-[3/2] w-full overflow-hidden rounded-[26px] border border-cream/8 bg-[#0c0b14]">
             <SkinStage
               skin={stageSkin}
               model={selected?.model ?? "classic"}
               emote={prefs.emote}
               autoRotate={prefs.spin}
               nameTag={home?.account?.name ?? null}
-              zoom={0.62}
-              lift={2.2}
+              setting={roam ? "void" : "scene"}
               replay={take}
+              recenter={recenter}
               className="absolute inset-0"
             />
             <div className="pointer-events-none absolute inset-x-4 top-4 flex items-start gap-3">
@@ -250,19 +248,25 @@ export function SkinsPage() {
                 <p className="truncate font-display text-lg font-bold leading-tight">{selected?.name ?? "Wisp"}</p>
                 <p className="text-xs text-cream-300">{selected ? `${selected.model === "slim" ? "Slim" : "Classic"} arms` : "Wisp's own skin, until you add yours"}</p>
               </div>
-              <button
-                type="button"
-                aria-pressed={prefs.spin}
-                onClick={() => setPrefs((current) => ({ ...current, spin: !current.spin }))}
-                className={cn(
-                  "pointer-events-auto ml-auto flex h-9 items-center gap-2 rounded-full border px-3.5 text-xs font-bold backdrop-blur-sm transition-colors",
-                  prefs.spin ? "border-cream/60 bg-cream text-ink-900" : "border-cream/15 bg-ink-950/45 text-cream-300 hover:border-cream/35 hover:text-cream",
-                )}
-              >
-                <Rotate3d size={14} aria-hidden="true" />
-                Turntable
-              </button>
+              <div className="pointer-events-auto ml-auto flex items-center gap-2">
+                <StageToggle icon={Rotate3d} label="Turntable" pressed={prefs.spin} onClick={() => setPrefs((current) => ({ ...current, spin: !current.spin }))} />
+                <StageToggle icon={Orbit} label="Free roam" pressed={roam} onClick={() => setRoam((on) => !on)} />
+                <button
+                  type="button"
+                  aria-label="Put the view back"
+                  title="Put the view back"
+                  onClick={() => setRecenter((count) => count + 1)}
+                  className="grid size-9 place-items-center rounded-full border border-cream/15 bg-ink-950/45 text-cream-300 backdrop-blur-sm transition-colors hover:border-cream/35 hover:text-cream"
+                >
+                  <LocateFixed size={15} aria-hidden="true" />
+                </button>
+              </div>
             </div>
+            {roam && (
+              <p className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-xs font-semibold text-cream-300/85">
+                Free roam: drag to turn, right-drag to move, scroll to get close. Underneath too.
+              </p>
+            )}
           </div>
 
           <div role="group" aria-label="Emotes" className="flex flex-wrap items-center gap-2">
@@ -376,6 +380,23 @@ export function SkinsPage() {
         )}
       </AnimatePresence>
     </Page>
+  );
+}
+
+function StageToggle({ icon: Icon, label, pressed, onClick }: { icon: LucideIcon; label: string; pressed: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      onClick={onClick}
+      className={cn(
+        "flex h-9 items-center gap-2 rounded-full border px-3.5 text-xs font-bold backdrop-blur-sm transition-colors",
+        pressed ? "border-cream/60 bg-cream text-ink-900" : "border-cream/15 bg-ink-950/45 text-cream-300 hover:border-cream/35 hover:text-cream",
+      )}
+    >
+      <Icon size={14} aria-hidden="true" />
+      {label}
+    </button>
   );
 }
 

@@ -1,7 +1,7 @@
-// Emotes for the 3D skin viewer: a few that mean something, each choreographed from keyframes.
-// Joints follow skinview3d: arm and leg rotation.x < 0 swings forward and up; left arm
-// rotation.z > 0 (right arm < 0) lifts sideways; head rotation.x > 0 looks down. The player is
-// 32 units tall, centred on 0, feet at -16.
+// Emotes for the 3D skin stage: a few that mean something, each choreographed from keyframes,
+// plus the blending that eases from one into the next. Joints follow skinview3d: arm and leg
+// rotation.x < 0 swings forward and up; left arm rotation.z > 0 (right arm < 0) lifts sideways;
+// head rotation.x > 0 looks down. The player is 32 units tall, centred on 0, feet at -16.
 
 import type { PlayerObject } from "skinview3d";
 
@@ -40,6 +40,11 @@ export const smooth = (value: number) => {
   const x = clamp01(value);
   return x * x * (3 - 2 * x);
 };
+/** Eases out past the end and back: a snap with a little overshoot. */
+const backOut = (value: number) => {
+  const x = clamp01(value) - 1;
+  return 1 + 2.4 * x * x * x + 1.4 * x * x;
+};
 
 /** Blends two poses; a joint missing from one counts as rest. */
 export function mix(a: Pose, b: Pose, k: number): Pose {
@@ -49,6 +54,17 @@ export function mix(a: Pose, b: Pose, k: number): Pose {
     const to = b[key] ?? 0;
     if (from !== 0 || to !== 0) out[key] = from + (to - from) * k;
   }
+  return out;
+}
+
+/** An angle brought into -π to π. */
+const wrap = (angle: number) => Math.atan2(Math.sin(angle), Math.cos(angle));
+
+/** Like `mix`, but a turn takes the short way round (an emote that spun ten times eases back in one). */
+export function blendPose(from: Pose, to: Pose, k: number): Pose {
+  const out = mix(from, to, k);
+  const start = wrap(from.turn ?? 0);
+  out.turn = start + wrap((to.turn ?? 0) - start) * k;
   return out;
 }
 
@@ -89,14 +105,18 @@ export function applyPose(player: PlayerObject, pose: Pose) {
   player.rotation.set(0, pose.turn ?? 0, pose.lean ?? 0);
 }
 
-/** Standing, breathing, looking around a little. */
+/** Standing: breathing, shifting weight a little, looking around now and then. */
 export function idlePose(t: number): Pose {
-  const breath = Math.cos(t * 2) * 0.03;
+  const breath = Math.sin(t * 1.9);
   return {
-    leftArmZ: 0.06 + breath,
-    rightArmZ: -0.06 - breath,
-    headY: Math.sin(t * 0.6) * 0.18,
-    headX: Math.sin(t * 0.9) * 0.05,
+    leftArmZ: 0.07 + breath * 0.025,
+    rightArmZ: -0.07 - breath * 0.025,
+    leftArmX: Math.sin(t * 0.8) * 0.03,
+    rightArmX: -Math.sin(t * 0.8) * 0.03,
+    headY: Math.sin(t * 0.45) * 0.24 + Math.sin(t * 1.3) * 0.04,
+    headX: Math.sin(t * 0.7) * 0.06 - 0.02,
+    lean: Math.sin(t * 0.5) * 0.015,
+    y: breath * 0.15,
   };
 }
 
@@ -108,35 +128,55 @@ export interface Emote {
   /** A sentence for the tooltip. */
   hint: string;
   /** Something that appears with it. */
-  prop?: "throne" | "aura";
+  prop?: "throne" | "aura" | "dance";
   pose: (t: number) => Pose;
 }
 
-// ── Throne: it gathers out of sparkles, then you sit and survey your realm ──
+// ── Throne: it builds itself behind you; you glance back, hop up and take your seat ──
 
-/** Seat height: the hips rest 6 below where they stand. */
+/** Where the throne's seat is: the block behind the one the player stands on. */
+export const THRONE_Z = -16;
+export const THRONE_SIT_AT = 1.0;
+// Sitting on the seat's top (half a block up on the dais, then a wool slab: y = 0), thighs flat on
+// it, back near the backrest, hands out on the armrests.
 const SEATED: Pose = {
-  y: -6,
+  y: 6,
+  z: THRONE_Z - 3,
   leftLegX: -PI / 2,
   rightLegX: -PI / 2,
-  leftLegZ: 0.07,
-  rightLegZ: -0.07,
-  leftArmX: -1.05,
-  rightArmX: -1.05,
-  leftArmZ: 0.3,
-  rightArmZ: -0.3,
-  headX: -0.08,
+  leftLegZ: 0.06,
+  rightLegZ: -0.06,
+  leftArmX: -0.6,
+  rightArmX: -0.6,
+  leftArmZ: 0.4,
+  rightArmZ: -0.4,
+  headX: -0.06,
 };
-export const THRONE_SIT_AT = 0.95;
 
 function thronePose(t: number): Pose {
-  if (t < THRONE_SIT_AT) return idlePose(t);
-  const seated = add(SEATED, { headY: Math.sin((t - THRONE_SIT_AT) * 0.5) * 0.4, headX: Math.sin(t * 0.8) * 0.03 });
-  return mix(idlePose(t), seated, smooth((t - THRONE_SIT_AT) / 0.55));
+  if (t < THRONE_SIT_AT) {
+    // A look over the shoulder at it forming.
+    const glance = Math.sin(clamp01((t - 0.1) / 0.85) * PI) * 0.85;
+    return add(idlePose(t), { headY: glance, headX: -0.08 * glance });
+  }
+  const since = t - THRONE_SIT_AT;
+  const k = clamp01(since / 0.8);
+  const seated = add(SEATED, {
+    headY: Math.sin(since * 0.45) * 0.35,
+    headX: Math.sin(t * 0.8) * 0.03,
+    // A slow drum of the fingers on the armrest.
+    rightArmZ: Math.max(0, Math.sin(t * 5)) * 0.03 * smooth(k * 2 - 1),
+    y: Math.sin(t * 1.9) * 0.12,
+  });
+  const pose = mix(idlePose(t), seated, smooth(k));
+  // Up onto the seat with a hop.
+  pose.y = (pose.y ?? 0) + Math.sin(k * PI) * 5;
+  return pose;
 }
 
-// ── A dance: two side steps with the arm up, arm rolls, a spin and a pose (4 s loop) ──
+// ── A dance: side steps with an arm up, arm rolls, a spin and a pose, bouncing on every beat ──
 
+export const DANCE_BEAT = 0.5;
 const DANCE: [number, Pose][] = [
   [0, { leftArmZ: 0.12, rightArmZ: -0.12 }],
   [0.25, { y: 1.2, x: 1.6, lean: -0.08, rightArmZ: -2.5, rightArmX: -0.2, leftArmZ: 0.35, leftLegZ: 0.12, headZ: -0.12, headX: 0.1 }],
@@ -156,21 +196,29 @@ const DANCE: [number, Pose][] = [
   [4, { turn: 2 * PI, leftArmZ: 0.12, rightArmZ: -0.12 }],
 ];
 
-// ── Aura: a crouch while it gathers, then a burst and a hover in the light ──
+function dancePose(t: number): Pose {
+  const beat = (t % DANCE_BEAT) / DANCE_BEAT;
+  // Down on the beat, up between: the bounce that makes it a dance.
+  return add(timeline(DANCE, t, 4), { y: -Math.sin(beat * PI) * 0.9, headX: Math.sin(beat * PI * 2) * 0.06 });
+}
+
+// ── Aura: crouch while it gathers, fling it out, then hover in the light ──
 
 export const AURA_BURST_AT = 1.25;
-const CHARGING: Pose = { bend: 0.2, y: -0.8, headX: 0.38, leftArmX: 0.25, rightArmX: 0.25, leftArmZ: 0.2, rightArmZ: -0.2, leftLegZ: 0.13, rightLegZ: -0.13 };
-const RISEN: Pose = { bend: -0.04, y: 2.6, headX: -0.2, leftArmX: 0.12, rightArmX: 0.12, leftArmZ: 0.58, rightArmZ: -0.58, leftLegZ: 0.15, rightLegZ: -0.15 };
+const CHARGING: Pose = { bend: 0.2, y: -0.8, headX: 0.38, leftArmX: 0.35, rightArmX: 0.35, leftArmZ: 0.16, rightArmZ: -0.16, leftLegZ: 0.13, rightLegZ: -0.13 };
+const FLUNG: Pose = { bend: -0.12, y: 2, headX: -0.35, leftArmX: -0.2, rightArmX: -0.2, leftArmZ: 1.05, rightArmZ: -1.05, leftLegZ: 0.2, rightLegZ: -0.2 };
+const RISEN: Pose = { bend: -0.04, y: 2.6, headX: -0.18, leftArmX: 0.12, rightArmX: 0.12, leftArmZ: 0.58, rightArmZ: -0.58, leftLegZ: 0.15, rightLegZ: -0.15 };
 
 function auraPose(t: number): Pose {
   if (t < AURA_BURST_AT) {
-    const gather = smooth(t / 0.35);
     // Shaking harder as it builds.
-    return add(mix(idlePose(t), CHARGING, gather), { x: Math.sin(t * 70) * 0.09 * smooth(t / AURA_BURST_AT) });
+    return add(mix(idlePose(t), CHARGING, smooth(t / 0.35)), { x: Math.sin(t * 70) * 0.1 * smooth(t / AURA_BURST_AT), headZ: Math.sin(t * 53) * 0.03 });
   }
-  const rise = smooth((t - AURA_BURST_AT) / 0.3);
-  return add(mix(CHARGING, RISEN, rise), {
-    y: Math.sin((t - AURA_BURST_AT) * 2) * 0.5 * rise,
+  const since = t - AURA_BURST_AT;
+  if (since < 0.22) return mix(CHARGING, FLUNG, backOut(since / 0.22));
+  const settle = smooth((since - 0.22) / 0.6);
+  return add(mix(FLUNG, RISEN, settle), {
+    y: Math.sin(since * 2) * 0.5 * settle,
     leftArmZ: Math.sin(t * 1.7) * 0.05,
     rightArmZ: -Math.sin(t * 1.7) * 0.05,
   });
@@ -178,11 +226,11 @@ function auraPose(t: number): Pose {
 
 // ── Memes ──
 
-const T_POSE: Pose = { leftArmZ: PI / 2, rightArmZ: -PI / 2 };
-
 function tPose(t: number): Pose {
-  // Snap into it, then turn slowly and hover, asserting dominance.
-  return add(mix(idlePose(t), T_POSE, smooth(t / 0.12)), { turn: Math.max(0, t - 0.6) * 0.75, y: smooth((t - 0.4) / 0.6) * (0.8 + Math.sin(t * 1.5) * 0.4) });
+  // Snap into it (a touch past level, then back), turn slowly and hover, asserting dominance.
+  const snap = backOut(t / 0.2);
+  const arms = { leftArmZ: (PI / 2) * snap, rightArmZ: (-PI / 2) * snap };
+  return add(mix(idlePose(t), arms, clamp01(t / 0.2)), { turn: Math.max(0, t - 0.6) * 0.75, y: smooth((t - 0.4) / 0.6) * (0.8 + Math.sin(t * 1.5) * 0.4) });
 }
 
 const CROUCHED: Pose = { bend: 0.5, y: -1.8, headX: 0.28, leftArmX: -0.3, rightArmX: -0.3, leftArmZ: 0.08, rightArmZ: -0.08 };
@@ -194,9 +242,9 @@ function crouchSpam(t: number): Pose {
 }
 
 export const EMOTES: Emote[] = [
-  { id: "throne", label: "Throne", hint: "A throne gathers out of sparkles and you take your seat.", prop: "throne", pose: thronePose },
-  { id: "dance", label: "Dance", hint: "Side steps, arm rolls, a spin and a pose.", pose: (t) => timeline(DANCE, t, 4) },
-  { id: "aura", label: "Aura", hint: "Gather your power, then rise in a blaze of light.", prop: "aura", pose: auraPose },
+  { id: "throne", label: "Throne", hint: "A throne builds itself behind you, block by block, and you take your seat.", prop: "throne", pose: thronePose },
+  { id: "dance", label: "Dance", hint: "Side steps, arm rolls, a spin and a pose, on a glass floor that lights up with the beat.", prop: "dance", pose: dancePose },
+  { id: "aura", label: "Aura", hint: "Gather your power, then fling it out in a ring of fire.", prop: "aura", pose: auraPose },
   { id: "tpose", label: "T-pose", hint: "Assert dominance.", pose: tPose },
   { id: "crouch", label: "Crouch spam", hint: "The Minecraft hello.", pose: crouchSpam },
 ];
