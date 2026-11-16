@@ -103,4 +103,4 @@ Measured on macOS with a release build (Activity Monitor's "Memory" figure, idle
 | WebKit page, GPU and network helpers | 158 MB | 0.2% | 0% |
 | **Total** | **~185 MB** | **~0.3%** | **0%** |
 
-The app bundle is 7.8 MB (4.8 MB before the networking code).
+The app bundle is 15 MB on Apple Silicon as of 0.1.5 (7.8 MB before friends, servers and the 3D skin stage; 4.8 MB before the networking code).
