@@ -61,6 +61,10 @@ pub enum ContentError {
     IsModpack,
     #[error("{0} is a data pack: pick a world to add it to.")]
     IsDatapack(String),
+    #[error("{0} is a world: import it from Worlds.")]
+    IsWorld(String),
+    #[error("{0} isn't a mod, resource pack or shader pack Wisp can tell.")]
+    NotContent(String),
     #[error("There's no world called {0} in this instance anymore.")]
     NoSuchWorld(String),
     #[error("Wisp can't install this kind of project yet.")]

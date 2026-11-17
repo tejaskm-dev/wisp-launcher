@@ -1,5 +1,6 @@
-import { AnimatePresence, LazyMotion, MotionConfig, domAnimation } from "motion/react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { PackagePlus } from "lucide-react";
+import { AnimatePresence, LazyMotion, MotionConfig, domAnimation, m } from "motion/react";
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import heroArt from "./assets/art/hero-moon-shrine.jpg";
 import type { HeroIntro } from "./components/hero/Hero";
 import { StartupIntro } from "./components/intro/StartupIntro";
@@ -12,6 +13,7 @@ import { LaunchPanel } from "./components/launch/LaunchPanel";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { TopBar } from "./components/TopBar";
+import { UpdatePanel } from "./components/UpdatePanel";
 import {
   canAddOfflineAccounts,
   getHome,
@@ -22,6 +24,8 @@ import {
   importWorld,
   importWorldPaths,
   installModpack,
+  installModpackFile,
+  onFileDrop,
   launchInstance,
   onInstallEvent,
   onJournalChange,
@@ -35,23 +39,33 @@ import {
 import { DEFAULT_SETTINGS, EMPTY_HOME } from "./data/defaults";
 import type { HomeSnapshot, InstallEvent, LaunchUpdate, PageId, Settings, StartPage } from "./data/types";
 import { useIdleWhenUnfocused, useLatest, useNow } from "./lib/hooks";
+import { loadSkinsPage } from "./lib/preload";
 import { HomePage } from "./pages/HomePage";
+import { PageArrivalContext, type PageArrival } from "./components/ui/Page";
 import { AppContext, type AppContextValue, type SettingsPatch } from "./state/AppContext";
 import { useToasts } from "./state/useToasts";
 
 // Home ships in the main bundle; every other page loads from disk the first time it's opened.
 const InstancesPage = lazy(() => import("./pages/InstancesPage").then((module) => ({ default: module.InstancesPage })));
-const WorldsPage = lazy(() => import("./pages/WorldsPage").then((module) => ({ default: module.WorldsPage })));
+// The pages shown as tabs of another: each loads its siblings once it's open, so switching is instant.
+const tabPageCode = {
+  worlds: () => import("./pages/WorldsPage"),
+  servers: () => import("./pages/ServersPage"),
+  journal: () => import("./pages/JournalPage"),
+  screenshots: () => import("./pages/ScreenshotsPage"),
+} satisfies Partial<Record<PageId, () => Promise<unknown>>>;
+const WorldsPage = lazy(() => tabPageCode.worlds().then((module) => ({ default: module.WorldsPage })));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage").then((module) => ({ default: module.DiscoverPage })));
-const ScreenshotsPage = lazy(() => import("./pages/ScreenshotsPage").then((module) => ({ default: module.ScreenshotsPage })));
+const ScreenshotsPage = lazy(() => tabPageCode.screenshots().then((module) => ({ default: module.ScreenshotsPage })));
 const SyncPage = lazy(() => import("./pages/SyncPage").then((module) => ({ default: module.SyncPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const ProjectPage = lazy(() => import("./pages/ProjectPage").then((module) => ({ default: module.ProjectPage })));
 const WorldPage = lazy(() => import("./pages/WorldPage").then((module) => ({ default: module.WorldPage })));
-const JournalPage = lazy(() => import("./pages/JournalPage").then((module) => ({ default: module.JournalPage })));
-const SkinsPage = lazy(() => import("./pages/SkinsPage").then((module) => ({ default: module.SkinsPage })));
-const ServersPage = lazy(() => import("./pages/ServersPage").then((module) => ({ default: module.ServersPage })));
+const JournalPage = lazy(() => tabPageCode.journal().then((module) => ({ default: module.JournalPage })));
+const SkinsPage = lazy(() => loadSkinsPage().then((module) => ({ default: module.SkinsPage })));
+const ServersPage = lazy(() => tabPageCode.servers().then((module) => ({ default: module.ServersPage })));
 const FriendsPage = lazy(() => import("./pages/FriendsPage").then((module) => ({ default: module.FriendsPage })));
+const ImportDialog = lazy(() => import("./components/install/ImportDialog").then((module) => ({ default: module.ImportDialog })));
 const ImportWorldDialog = lazy(() =>
   import("./components/worlds/ImportWorldDialog").then((module) => ({ default: module.ImportWorldDialog })),
 );
@@ -77,6 +91,15 @@ const SAVE_DELAY_MS = 300;
 const LAST_PAGE_KEY = "wisp.lastPage";
 const RESTORABLE: PageId[] = ["home", "instances", "worlds", "servers", "discover", "screenshots", "journal", "skins", "friends", "sync", "settings"];
 
+/** Pages that share a sidebar entry and show as tabs of one page. */
+const TAB_GROUPS: (keyof typeof tabPageCode)[][] = [
+  ["worlds", "servers"],
+  ["journal", "screenshots"],
+];
+const tabGroupOf = (page: PageId) => TAB_GROUPS.find((group) => (group as PageId[]).includes(page)) ?? null;
+/** Whether going from one page to the other is a switch between tabs of the same page. */
+const isTabSwitch = (from: PageId, to: PageId) => from !== to && tabGroupOf(from) !== null && tabGroupOf(from) === tabGroupOf(to);
+
 /** Where Wisp was when it last closed, read once before this run starts recording its own pages. */
 const LAST_PAGE: PageId = (() => {
   try {
@@ -87,9 +110,15 @@ const LAST_PAGE: PageId = (() => {
   }
 })();
 
-/** The page Wisp opens on, per Settings → General. */
+/**
+ * Whether this window is Wisp coming back after a game it closed for (Settings → General → When a
+ * game starts). Then there's no intro, and it opens where you were.
+ */
+const BACK_FROM_GAME = (window as { __WISP_FROM_GAME__?: boolean }).__WISP_FROM_GAME__ === true;
+
+/** The page Wisp opens on, per Settings → General (or where you were, back from a game). */
 function startingPage(start: StartPage): PageId {
-  return start === "last" ? LAST_PAGE : start;
+  return start === "last" || BACK_FROM_GAME ? LAST_PAGE : start;
 }
 
 // The start page setting, mirrored here so the very first frame is already the right page (the
@@ -98,6 +127,7 @@ const START_PAGE_KEY = "wisp.startPage";
 const INITIAL_PAGE: PageId = (() => {
   try {
     const start = localStorage.getItem(START_PAGE_KEY);
+    if (BACK_FROM_GAME) return LAST_PAGE;
     return start === "home" || start === "instances" || start === "discover" || start === "last" ? startingPage(start) : "home";
   } catch {
     return "home";
@@ -176,16 +206,28 @@ export default function App() {
 
   // ── Navigation and search ──
   const [page, setPage] = useState<PageId>(INITIAL_PAGE);
+  const pageNow = useLatest(page);
   /** Once you've been elsewhere, Home makes its own entrance instead of the intro's hand-off. */
   const [leftHome, setLeftHome] = useState(INITIAL_PAGE !== "home");
-  const navigate = useCallback((next: PageId) => {
-    setPage(next);
-    if (next !== "home") setLeftHome(true);
-  }, []);
+  // Tabs of one page (Worlds and Servers) swap in place: no fade out and back in, and the old tab
+  // stays up until the new one is ready rather than the page going blank.
+  const [arrival, setArrival] = useState<PageArrival>("enter");
+  const navigate = useCallback(
+    (next: PageId) => {
+      const tab = isTabSwitch(pageNow.current, next);
+      setArrival(tab ? "tab" : "enter");
+      if (tab) startTransition(() => setPage(next));
+      else setPage(next);
+      if (next !== "home") setLeftHome(true);
+    },
+    [pageNow],
+  );
+  useEffect(() => {
+    for (const sibling of tabGroupOf(page) ?? []) void tabPageCode[sibling]().catch(() => {});
+  }, [page]);
 
   // A Modrinth project's page, and the page to go back to from it.
   const [projectRoute, setProjectRoute] = useState<{ id: string; from: PageId } | null>(null);
-  const pageNow = useLatest(page);
   const openProject = useCallback(
     (id: string) => {
       setProjectRoute((current) => ({ id, from: pageNow.current === "project" ? (current?.from ?? "discover") : pageNow.current }));
@@ -205,9 +247,22 @@ export default function App() {
   );
 
   const mainRef = useRef<HTMLElement>(null);
+  const arrivalNow = useLatest(arrival);
   useEffect(() => {
-    mainRef.current?.scrollTo({ top: 0 });
-  }, [page, projectRoute?.id, worldRoute?.id]);
+    const main = mainRef.current;
+    if (!main) return;
+    if (arrivalNow.current !== "tab") {
+      main.scrollTo({ top: 0 });
+      return;
+    }
+    // Switching tabs keeps your place, unless you'd scrolled past the tabs: then they come back up
+    // to just under the top bar.
+    const tabs = main.querySelector<HTMLElement>("[data-page-tabs]");
+    if (!tabs) return;
+    const cover = main.querySelector<HTMLElement>("[data-top-bar]")?.offsetHeight ?? 0;
+    const top = tabs.getBoundingClientRect().top - main.getBoundingClientRect().top + main.scrollTop - cover - 8;
+    if (main.scrollTop > top) main.scrollTo({ top });
+  }, [page, projectRoute?.id, worldRoute?.id, arrivalNow]);
 
   // Remembered for "Open Wisp on: where you left off". A project page reopens as Discover, a world's as Worlds.
   useEffect(() => {
@@ -245,7 +300,7 @@ export default function App() {
   );
 
   // ── Startup intro ──
-  const intro = useIntroTimeline(settings ? settings.intro : null);
+  const intro = useIntroTimeline(settings ? (BACK_FROM_GAME ? "off" : settings.intro) : null);
   const revealed = intro.phase === "dock" || intro.phase === "done";
   const heroIntro: HeroIntro = leftHome
     ? null
@@ -490,7 +545,51 @@ export default function App() {
     },
     [notify],
   );
+  const startModpackFileInstall = useCallback(
+    (path: string, title: string) => {
+      const jobId = `file:${path}`;
+      setInstalls((current) => ({ ...current, [jobId]: { jobId, title, update: { phase: "preparing" } } }));
+      installModpackFile(path, title).catch((failure: unknown) => {
+        setInstalls((current) => without(current, jobId));
+        notify({ tone: "info", title: "Couldn't install the modpack", body: message(failure) });
+      });
+    },
+    [notify],
+  );
   const dismissInstall = useCallback((jobId: string) => setInstalls((current) => without(current, jobId)), []);
+
+  // ── Bringing in files: modpacks become instances, mods and packs go into one ──
+  const [fileImport, setFileImport] = useState<{ open: boolean; session: number; files: string[] | null; instanceId: string | null }>({
+    open: false,
+    session: 0,
+    files: null,
+    instanceId: null,
+  });
+  const importFiles = useCallback(
+    (files: string[] | null = null, instanceId: string | null = null) =>
+      setFileImport((current) => ({ open: true, session: current.session + 1, files, instanceId })),
+    [],
+  );
+  // Files dropped anywhere go to the import dialog, except on pages that take their own drops
+  // (worlds on Worlds, skins on Skins).
+  const [droppingFiles, setDroppingFiles] = useState(false);
+  useEffect(
+    () =>
+      onFileDrop((drop) => {
+        const own = pageNow.current === "worlds" || pageNow.current === "skins";
+        if (drop.type === "leave" || own) {
+          setDroppingFiles(false);
+          return;
+        }
+        if (drop.type === "over") {
+          setDroppingFiles(drop.paths.length > 0);
+          return;
+        }
+        setDroppingFiles(false);
+        if (drop.paths.length > 0) importFiles(drop.paths);
+      }),
+    [importFiles, pageNow],
+  );
 
   // ── Importing worlds: straight to the file picker with one instance, else ask which ──
   const [worldImport, setWorldImport] = useState<{ open: boolean; session: number; files: string[] | null }>({ open: false, session: 0, files: null });
@@ -569,7 +668,9 @@ export default function App() {
       requestInstall,
       installs,
       startModpackInstall,
+      startModpackFileInstall,
       dismissInstall,
+      importFiles,
       journalVersion,
       now,
     }),
@@ -597,7 +698,9 @@ export default function App() {
       requestInstall,
       installs,
       startModpackInstall,
+      startModpackFileInstall,
       dismissInstall,
+      importFiles,
       journalVersion,
       now,
     ],
@@ -619,28 +722,32 @@ export default function App() {
                 onQueryChange={onQueryChange}
               />
 
-              <AnimatePresence mode="wait" initial={false}>
-                {page === "home" && <HomePage key="home" revealed={revealed} heroIntro={heroIntro} />}
-                {page === "instances" && <Lazy key="instances" page={<InstancesPage />} />}
-                {page === "worlds" && <Lazy key="worlds" page={<WorldsPage />} />}
-                {page === "discover" && <Lazy key="discover" page={<DiscoverPage query={query} onClearQuery={() => setQuery("")} />} />}
-                {page === "screenshots" && <Lazy key="screenshots" page={<ScreenshotsPage />} />}
-                {page === "servers" && <Lazy key="servers" page={<ServersPage />} />}
-                {page === "journal" && <Lazy key="journal" page={<JournalPage />} />}
-                {page === "skins" && <Lazy key="skins" page={<SkinsPage />} />}
-                {page === "friends" && <Lazy key="friends" page={<FriendsPage />} />}
-                {page === "sync" && <Lazy key="sync" page={<SyncPage />} />}
-                {page === "settings" && <Lazy key="settings" page={<SettingsPage />} />}
-                {page === "project" && projectRoute && (
-                  <Lazy
-                    key={`project-${projectRoute.id}`}
-                    page={<ProjectPage projectId={projectRoute.id} backTo={projectRoute.from} onBack={() => navigate(projectRoute.from)} />}
-                  />
-                )}
-                {page === "world" && worldRoute && (
-                  <Lazy key={`world-${worldRoute.id}`} page={<WorldPage worldId={worldRoute.id} backTo={worldRoute.from} onBack={() => navigate(worldRoute.from)} />} />
-                )}
-              </AnimatePresence>
+              {/* Tabs of one page (worlds and servers, journal and screenshots) share a key, so moving
+                  between them swaps the page in place instead of fading it out and back. */}
+              <PageArrivalContext value={arrival}>
+                <AnimatePresence mode="wait" initial={false}>
+                  {page === "home" && <HomePage key="home" revealed={revealed} heroIntro={heroIntro} />}
+                  {page === "instances" && <Lazy key="instances" page={<InstancesPage />} />}
+                  {page === "worlds" && <Lazy key="worlds" page={<WorldsPage />} />}
+                  {page === "discover" && <Lazy key="discover" page={<DiscoverPage query={query} onClearQuery={() => setQuery("")} />} />}
+                  {page === "screenshots" && <Lazy key="journal" page={<ScreenshotsPage />} />}
+                  {page === "servers" && <Lazy key="worlds" page={<ServersPage />} />}
+                  {page === "journal" && <Lazy key="journal" page={<JournalPage />} />}
+                  {page === "skins" && <Lazy key="skins" page={<SkinsPage />} />}
+                  {page === "friends" && <Lazy key="friends" page={<FriendsPage />} />}
+                  {page === "sync" && <Lazy key="sync" page={<SyncPage />} />}
+                  {page === "settings" && <Lazy key="settings" page={<SettingsPage />} />}
+                  {page === "project" && projectRoute && (
+                    <Lazy
+                      key={`project-${projectRoute.id}`}
+                      page={<ProjectPage projectId={projectRoute.id} backTo={projectRoute.from} onBack={() => navigate(projectRoute.from)} />}
+                    />
+                  )}
+                  {page === "world" && worldRoute && (
+                    <Lazy key={`world-${worldRoute.id}`} page={<WorldPage worldId={worldRoute.id} backTo={worldRoute.from} onBack={() => navigate(worldRoute.from)} />} />
+                  )}
+                </AnimatePresence>
+              </PageArrivalContext>
             </main>
           </div>
 
@@ -669,6 +776,18 @@ export default function App() {
               />
             </Suspense>
           )}
+          {fileImport.session > 0 && (
+            <Suspense fallback={null}>
+              <ImportDialog
+                key={fileImport.session}
+                files={fileImport.files}
+                instanceId={fileImport.instanceId}
+                open={fileImport.open}
+                onClose={() => setFileImport((current) => ({ ...current, open: false }))}
+              />
+            </Suspense>
+          )}
+          <AnimatePresence>{droppingFiles && <FileDropHint key="drop" />}</AnimatePresence>
           {installDialog.session > 0 && installDialog.target && (
             <Suspense fallback={null}>
               <InstallDialog key={installDialog.session} target={installDialog.target} open={installDialog.open} onClose={closeInstallDialog} />
@@ -676,6 +795,7 @@ export default function App() {
           )}
           <Toasts toasts={toasts} onDismiss={dismiss}>
             <AnimatePresence>{noteRequest && <NotePrompt key={noteRequest.session ?? noteRequest.world} request={noteRequest} onDone={() => setNoteRequest(null)} />}</AnimatePresence>
+            <UpdatePanel />
             <InstallPanel />
             <LaunchPanel />
           </Toasts>
@@ -691,6 +811,28 @@ export default function App() {
         </AppContext>
       </LazyMotion>
     </MotionConfig>
+  );
+}
+
+/** Shown while files are dragged over the window, on pages that don't take their own drops. */
+function FileDropHint() {
+  return (
+    <m.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="pointer-events-none fixed inset-0 z-[70] grid place-items-center bg-ink-950/70 p-10 backdrop-blur-sm"
+    >
+      <m.div
+        initial={{ scale: 0.94, y: 10 }}
+        animate={{ scale: 1, y: 0 }}
+        className="flex flex-col items-center gap-3 rounded-[28px] border-2 border-dashed border-cream/40 bg-ink-800/90 px-14 py-12 text-center"
+      >
+        <PackagePlus size={40} className="text-cream" aria-hidden="true" />
+        <p className="font-display text-2xl font-bold">Drop to add</p>
+        <p className="text-sm text-mute">Modpacks become instances. Mods and packs go into one you pick.</p>
+      </m.div>
+    </m.div>
   );
 }
 

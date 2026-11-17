@@ -5,8 +5,8 @@
 // Built like a mob model: boxes with one texel per unit, cream with dark eyes, a wavy hem of little
 // tails, and the ember sparkle from Wisp's logo floating at its shoulder.
 
-import { BoxGeometry, Color, Group, Mesh, MeshLambertMaterial, Vector3, type Material, type Texture } from "three";
-import { box, paint } from "./voxel";
+import { BoxGeometry, Color, Group, Mesh, MeshBasicMaterial, Vector3, type Material, type Texture } from "three";
+import { box, halo, paint } from "./voxel";
 
 type Mood = "hover" | "wander" | "orbit" | "peek" | "boop" | "perch" | "spin";
 
@@ -65,7 +65,7 @@ export class WispGhost {
   private readonly body = new Group();
   private readonly tails: Mesh[] = [];
   private readonly sparkle = new Group();
-  private readonly face: MeshLambertMaterial;
+  private readonly face: MeshBasicMaterial;
   private readonly textures: ReturnType<typeof faces>;
   private readonly materials: Material[] = [];
   private readonly position = new Vector3(30, 4, 8);
@@ -91,20 +91,30 @@ export class WispGhost {
 
   constructor() {
     this.textures = faces();
-    const plain = new MeshLambertMaterial({ map: this.textures.plain, emissive: new Color("#f4eee4"), emissiveIntensity: 0.22 });
-    // The glow follows the face's own picture, so the eyes stay dark.
-    this.face = new MeshLambertMaterial({ map: this.textures.open, emissive: new Color("#f4eee4"), emissiveIntensity: 0.22, emissiveMap: this.textures.open });
-    const ember = new MeshLambertMaterial({ color: "#e5484d", emissive: new Color("#ff5a52"), emissiveIntensity: 2.2 });
-    this.materials.push(plain, this.face, ember);
+    // A spirit glows from inside, so it isn't lit by the scene. Its faces are shaded the way the
+    // game shades blocks (top brightest, sides darker, underneath darkest) so it keeps its shape.
+    const shade = (amount: number) => new MeshBasicMaterial({ map: this.textures.plain, color: new Color(amount, amount, amount) });
+    const top = shade(1);
+    const front = shade(0.96);
+    const back = shade(0.86);
+    const side = shade(0.78);
+    const under = shade(0.6);
+    this.face = new MeshBasicMaterial({ map: this.textures.open });
+    // Unfogged, like the wisps, so the two share a shader (the fog never comes this close anyway).
+    const ember = new MeshBasicMaterial({ color: "#ff5a52", fog: false });
+    this.materials.push(top, front, back, side, under, this.face, ember);
+    // BoxGeometry's faces: +x, -x, +y, -y, +z (front), -z.
+    const faces6 = [side, side, top, under, front, back];
 
     // Body: 14 wide, 13 tall, 12 deep, its face on the front (+z).
-    const body = new Mesh(box(14, 13, 12), [plain, plain, plain, plain, this.face, plain]);
-    body.castShadow = true;
-    this.body.add(body);
-    const dome = new Mesh(box(10, 2, 9), plain);
+    this.body.add(new Mesh(box(14, 13, 12), [side, side, top, under, this.face, back]));
+    const dome = new Mesh(box(10, 2, 9), faces6);
     dome.position.y = 7.5;
-    dome.castShadow = true;
     this.body.add(dome);
+    // A faint glow round it.
+    const aura = halo("#fff4e4", 46, 0.12);
+    this.materials.push(aura.material);
+    this.body.add(aura);
     // The hem: little tails that wiggle as it floats.
     for (const [x, z] of [
       [-4.5, 3],
@@ -113,9 +123,8 @@ export class WispGhost {
       [-3, -3],
       [3, -3],
     ]) {
-      const tail = new Mesh(box(4, 3, 4), plain);
+      const tail = new Mesh(box(4, 3, 4), faces6);
       tail.position.set(x, -8, z);
-      tail.castShadow = true;
       this.tails.push(tail);
       this.body.add(tail);
     }
@@ -124,6 +133,9 @@ export class WispGhost {
     const beam = new BoxGeometry(6, 1.4, 1.4);
     const heart = new BoxGeometry(2.4, 2.4, 2.4);
     for (const shape of [bar, beam, heart]) this.sparkle.add(new Mesh(shape, ember));
+    const sparkleGlow = halo("#ff6a5a", 24, 0.6);
+    this.materials.push(sparkleGlow.material);
+    this.sparkle.add(sparkleGlow);
     // At its upper left as you look at it, as on the logo.
     this.sparkle.position.set(-10, 10, 0);
     this.body.add(this.sparkle);
@@ -320,7 +332,6 @@ export class WispGhost {
     }
     if (this.face.map !== face) {
       this.face.map = face;
-      this.face.emissiveMap = face;
     }
 
     this.flinch = Math.max(0, this.flinch - dt * 2.2);

@@ -1,4 +1,4 @@
-import { ArrowDownUp, Download, Heart, History, KeyRound, LayoutGrid, List, LoaderCircle, RotateCcw, User, X } from "lucide-react";
+import { ArrowDownUp, Download, Heart, History, KeyRound, LayoutGrid, List, LoaderCircle, PackagePlus, RotateCcw, User, X } from "lucide-react";
 import { m } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { Ghost } from "../components/brand/Ghost";
@@ -9,6 +9,7 @@ import { readDiscoverMode, saveDiscoverMode } from "../components/servers/addres
 import { Segmented } from "../components/ui/Segmented";
 import { ANY, DEFAULT_FILTERS, NOUNS, SOURCE_TABS, loaderChoices, type Filters, type Tab } from "../components/discover/filters";
 import { compatibleLoaders } from "../components/install/compat";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Page } from "../components/ui/Page";
@@ -67,6 +68,7 @@ const curseforgeCategories = new Map<Tab, Category[]>();
 /** Browse Modrinth and CurseForge: results on the left, the filter rail on the right. The search box is the top bar's. */
 /** Discover: content from Modrinth and CurseForge, or public servers to join. */
 export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQuery: () => void }) {
+  const { importFiles } = useApp();
   const [mode, setModeState] = useState(readDiscoverMode);
   const setMode = (next: "content" | "servers") => {
     setModeState(next);
@@ -82,15 +84,22 @@ export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQu
             : "Modpacks, mods, resource packs, shaders, data packs and worlds from Modrinth and CurseForge. Type in the search bar above to find something."
         }
         actions={
-          <Segmented
-            label="Discover"
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "content", label: "Mods & more" },
-              { value: "servers", label: "Servers" },
-            ]}
-          />
+          <div className="flex items-center gap-2.5">
+            {mode === "content" && (
+              <Button variant="secondary" icon={PackagePlus} onClick={() => importFiles()} title="Modpacks (.mrpack or CurseForge zip), mods (.jar) and resource or shader packs you already have">
+                Add from file
+              </Button>
+            )}
+            <Segmented
+              label="Discover"
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: "content", label: "Mods & more" },
+                { value: "servers", label: "Servers" },
+              ]}
+            />
+          </div>
         }
       />
       {mode === "servers" ? <ServerBrowser query={query} onClearQuery={onClearQuery} /> : <ContentBrowser query={query} onClearQuery={onClearQuery} />}

@@ -1,7 +1,9 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod away;
 mod fixes;
+mod imports;
 mod library;
 mod multiplayer;
 mod protocol;
@@ -462,6 +464,7 @@ async fn launch_instance(
     settings: State<'_, SettingsState>,
     network: State<'_, Network>,
     launches: State<'_, Launches>,
+    skins_state: State<'_, SkinServerState>,
 ) -> Result<(), String> {
     let instances = paths.instances();
     let instance = instances
@@ -500,6 +503,10 @@ async fn launch_instance(
             },
         );
     }
+    // Offline accounts get their Wisp skin in game through the skin server.
+    let skin_server = match account.kind {
+        wisp_core::accounts::AccountKind::Offline => skins_state.0.get_or_init(|| start_skin_server(paths.data.clone())).await.clone(),
+    };
     let window = &settings.game_window;
     let hooks = &settings.hooks;
     let memory_mb = instance.memory_mb.unwrap_or(settings.memory_mb);
@@ -534,6 +541,7 @@ async fn launch_instance(
             (None, Some(world)) => Some(QuickPlay::World(world)),
             (None, None) => None,
         },
+        skin_server,
     };
     tauri::async_runtime::spawn(play(
         app,
@@ -633,7 +641,6 @@ async fn play(
     settings: Settings,
     stop_requested: oneshot::Receiver<()>,
 ) {
-    let window = app.get_webview_window("main");
     let while_playing = settings.while_playing;
     // When the game window came up (0 until it does), for the journal.
     let started_at = AtomicI64::new(0);
@@ -643,12 +650,15 @@ async fn play(
             if let Some(paths) = app.try_state::<Paths>() {
                 let _ = paths.instances().mark_played(&id, now_ms());
             }
-            if let Some(window) = &window {
-                let _ = match while_playing {
-                    WhilePlaying::KeepOpen => Ok(()),
-                    WhilePlaying::Minimize => window.minimize(),
-                    WhilePlaying::Hide => window.hide(),
-                };
+            match while_playing {
+                WhilePlaying::KeepOpen => {}
+                WhilePlaying::Minimize => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.minimize();
+                    }
+                }
+                // The window closes outright, so the game gets the memory its web view used.
+                WhilePlaying::Hide => away::close_for_game(&app),
             }
         }
         report_launch(&app, &id, update);
@@ -737,6 +747,24 @@ async fn play(
 
         // After a crash, or a load that failed: read what went wrong and fix what can be.
         let failed = !stop_pressed(&app, &id) && (exit.crashed || failed_to_load(&exit.output));
+        // Java refusing the class cache (see launch::class_cache): it goes, and the game starts again
+        // without it, once.
+        if failed && !exit.window_seen && !retried && launch::class_cache::switch_off_if_blamed(&options.game_dir, &exit.output) {
+            retried = true;
+            let (stop, receiver) = oneshot::channel();
+            if let Some(launches) = app.try_state::<Launches>()
+                && let Some(slot) = launches
+                    .0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_mut(&id)
+            {
+                slot.stop = Some(stop);
+            }
+            stop_requested = receiver;
+            report(LaunchUpdate::Fixing { message: "Starting again without the class cache…".into() });
+            continue;
+        }
         let (Some(store), Some(dir), true) = (&store, &instance_dir, failed) else {
             break Ok(Some((exit, None)));
         };
@@ -789,8 +817,11 @@ async fn play(
         // A load that failed counts as a crash, whatever Java's exit code said.
         break Ok(Some((launch::Exit { crashed: true, ..exit }, Some(help))));
     };
-    // Back from wherever it went while the game ran (harmless if the game never started).
-    if let Some(window) = &window
+    // Back from wherever it went while the game ran (harmless if the game never started). A window
+    // that closed for the game opens again; one opened from the tray meanwhile is just brought up.
+    if app.state::<away::Away>().is_away() {
+        away::come_back(&app);
+    } else if let Some(window) = app.get_webview_window("main")
         && while_playing != WhilePlaying::KeepOpen
     {
         let _ = window.unminimize();
@@ -955,6 +986,29 @@ async fn update_instance(
                 instance.icon = (!icon.is_empty()).then_some(icon);
             }
         })
+        .map_err(|error| error.to_string())
+}
+
+/// Adds the performance mods to an instance, moving a vanilla one to Fabric first.
+#[tauri::command]
+async fn speed_up_instance(
+    instance_id: String,
+    paths: State<'_, Paths>,
+    settings: State<'_, SettingsState>,
+    network: State<'_, Network>,
+    launches: State<'_, Launches>,
+) -> Result<wisp_core::performance::SpedUp, String> {
+    if launches
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&instance_id)
+    {
+        return Err("Quit the game first: its mods can't change while it's running.".into());
+    }
+    let concurrency = current_settings(&settings).concurrent_downloads as usize;
+    wisp_core::performance::speed_up(&network.downloads, &paths.instances(), &instance_id, concurrency)
+        .await
         .map_err(|error| error.to_string())
 }
 
@@ -1171,6 +1225,44 @@ async fn install_modpack(
     installs: State<'_, Installs>,
 ) -> Result<String, String> {
     let job_id = project_id.clone();
+    start_modpack_job(app, &paths, &settings, &network, &installs, job_id, title, PackSource::Project { project_id, version_id })
+}
+
+/// Installs a modpack file you have (a `.mrpack`, or a CurseForge zip) as a new instance.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri hands state over as arguments.
+async fn install_modpack_file(
+    path: String,
+    title: String,
+    app: AppHandle,
+    paths: State<'_, Paths>,
+    settings: State<'_, SettingsState>,
+    network: State<'_, Network>,
+    installs: State<'_, Installs>,
+) -> Result<String, String> {
+    let job_id = format!("file:{path}");
+    start_modpack_job(app, &paths, &settings, &network, &installs, job_id, title, PackSource::File(PathBuf::from(path)))
+}
+
+/// Where a modpack comes from.
+enum PackSource {
+    Project { project_id: String, version_id: Option<String> },
+    File(PathBuf),
+}
+
+/// Starts installing a modpack as a new instance in the background; progress goes out on the
+/// install event, keyed by the job id this returns.
+#[allow(clippy::too_many_arguments)]
+fn start_modpack_job(
+    app: AppHandle,
+    paths: &Paths,
+    settings: &SettingsState,
+    network: &Network,
+    installs: &Installs,
+    job_id: String,
+    title: String,
+    source: PackSource,
+) -> Result<String, String> {
     {
         let mut active = installs
             .0
@@ -1188,7 +1280,7 @@ async fn install_modpack(
             },
         );
     }
-    let settings = current_settings(&settings);
+    let settings = current_settings(settings);
     let concurrency = settings.concurrent_downloads as usize;
     let client = network.downloads.clone();
     let instances = paths.instances();
@@ -1218,15 +1310,29 @@ async fn install_modpack(
             let _ = app.emit(INSTALL_EVENT, event);
         };
         let key = curseforge::api_key(&settings.curseforge_api_key);
-        let request = modpack::Request {
-            project_id: &project_id,
-            version_id: version_id.as_deref(),
-            cache_dir: &cache,
-            concurrency,
-            now_ms: now_ms(),
-            curseforge_key: key.as_deref(),
+        let result = match &source {
+            PackSource::Project { project_id, version_id } => {
+                let request = modpack::Request {
+                    project_id,
+                    version_id: version_id.as_deref(),
+                    cache_dir: &cache,
+                    concurrency,
+                    now_ms: now_ms(),
+                    curseforge_key: key.as_deref(),
+                };
+                modpack::install(&client, &instances, request, &report).await
+            }
+            PackSource::File(path) => {
+                let request = modpack::FileRequest {
+                    path,
+                    concurrency,
+                    now_ms: now_ms(),
+                    curseforge_key: key.as_deref(),
+                };
+                modpack::install_file(&client, &instances, request, &report).await
+            }
         };
-        match modpack::install(&client, &instances, request, &report).await {
+        match result {
             Ok(installed) => {
                 // Only fills in an options.txt if the modpack didn't bring its own.
                 seed_options(&instances, &settings, &installed.instance.id);
@@ -1241,7 +1347,7 @@ async fn install_modpack(
                     Some(&installed.instance.id),
                     None,
                     JournalEvent::ModpackInstalled {
-                        title: title.clone(),
+                        title: installed.instance.name.clone(),
                         version,
                     },
                 );
@@ -1359,6 +1465,49 @@ async fn clear_cache(
         .map_err(|error| format!("Couldn't clear everything: {error}"))
 }
 
+/// The skin server (see wisp_core::skin_server), started with the first game on an offline
+/// account; None inside if it couldn't start (games then just use the default skins).
+#[derive(Default)]
+struct SkinServerState(tokio::sync::OnceCell<Option<wisp_core::skin_server::SkinServer>>);
+
+/// Starts the skin server: it answers for the account playing, wearing the skin worn in Wisp.
+async fn start_skin_server(data: PathBuf) -> Option<wisp_core::skin_server::SkinServer> {
+    use wisp_core::skin_server::{self, Player, Skin, Who};
+    let key_path = data.join("skins").join("signing-key.der");
+    let key = tauri::async_runtime::spawn_blocking(move || skin_server::load_or_make_key(&key_path)).await.ok()?.ok()?;
+    let lookup: skin_server::Lookup = std::sync::Arc::new(move |who| {
+        let account = AccountStore::new(data.join("accounts.json")).active()?;
+        let uuid = account.uuid.replace('-', "").to_lowercase();
+        let matches = match who {
+            Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
+            Who::Name(asked) => asked.eq_ignore_ascii_case(&account.name),
+        };
+        if !matches {
+            return None;
+        }
+        let store = SkinStore::new(data.join("skins"));
+        let library = store.library();
+        let worn = library.active.as_ref().and_then(|id| library.skins.iter().find(|skin| &skin.id == id));
+        let skin = worn.and_then(|skin| {
+            Some(Skin {
+                png: std::fs::read(store.png_path(&skin.id)).ok()?,
+                slim: skin.model == wisp_core::skins::SkinModel::Slim,
+            })
+        });
+        Some(Player { uuid, name: account.name, skin })
+    });
+    skin_server::start(key, lookup).await.ok()
+}
+
+/// Whether this build can update itself (see `main`).
+struct UpdatesOn(bool);
+
+/// Whether this build can update itself: release builds can, developer builds can't.
+#[tauri::command]
+fn updates_on(updates: State<'_, UpdatesOn>) -> bool {
+    updates.0
+}
+
 fn main() {
     let network = Network {
         client: http_client().expect("failed to create the HTTP client"),
@@ -1373,12 +1522,28 @@ fn main() {
         versions: Cached::new(),
     };
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    // Updates are signed, so they only turn on in builds whose config carries the signing key's
+    // public half (release builds made by the release workflow). Developer builds never replace
+    // themselves.
+    let updates = context
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get("pubkey"))
+        .and_then(|key| key.as_str())
+        .is_some_and(|key| !key.trim().is_empty());
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, protocol::handle)
         .manage(network)
         .manage(Launches::default())
+        .manage(away::Away::default())
+        .manage(UpdatesOn(updates))
+        .manage(SkinServerState::default())
         .manage(Installs::default())
         .manage(multiplayer::StatusCache::default())
         .setup(|app| {
@@ -1410,11 +1575,13 @@ fn main() {
             launch_instance,
             stop_instance,
             get_launches,
+            updates_on,
             add_offline_account,
             remove_account,
             get_loader_game_versions,
             get_loader_versions,
             update_instance,
+            speed_up_instance,
             delete_instance,
             get_project,
             get_project_versions,
@@ -1428,6 +1595,10 @@ fn main() {
             install_project,
             remove_content,
             install_modpack,
+            install_modpack_file,
+            imports::pick_import_files,
+            imports::inspect_import_files,
+            imports::add_content_files,
             get_installs,
             install_rosetta,
             get_system_memory,
@@ -1487,7 +1658,21 @@ fn main() {
             multiplayer::remove_server,
             fixes::undo_fix,
             fixes::apply_fix
-        ])
-        .run(tauri::generate_context!())
-        .expect("failed to start Wisp");
+        ]);
+    let builder = if updates {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    builder
+        .build(context)
+        .expect("failed to start Wisp")
+        .run(|app, event| match event {
+            // The window closing for a game isn't quitting: Wisp waits for the game to end.
+            tauri::RunEvent::ExitRequested { code: None, api, .. } if app.state::<away::Away>().closing_for_game() => api.prevent_exit(),
+            // Clicking the Dock icon while the window is closed for a game opens it.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => away::come_back(app),
+            _ => {}
+        });
 }

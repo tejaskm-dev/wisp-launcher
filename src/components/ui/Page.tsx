@@ -1,14 +1,22 @@
 import { m } from "motion/react";
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 import { stagger } from "../../lib/motion";
 
+/**
+ * How the current page was reached: "enter" from another page, or "tab" from one of its sibling
+ * tabs (Worlds and Servers, say), which swaps the page in place with no entrance.
+ */
+export type PageArrival = "enter" | "tab";
+export const PageArrivalContext = createContext<PageArrival>("enter");
+
 /** A page's root: staggers its sections in on arrival and fades out on the way to another page. */
 export function Page({ children, className }: { children: ReactNode; className?: string }) {
+  const arrival = useContext(PageArrivalContext);
   return (
     <m.div
       variants={stagger}
-      initial="hidden"
+      initial={arrival === "tab" ? false : "hidden"}
       animate="show"
       exit={{ opacity: 0, transition: { duration: 0.15 } }}
       className={cn("flex flex-col gap-7 px-7 pb-12", className)}

@@ -33,6 +33,10 @@ const NO_WORLD = "none";
 const WEEK = 7 * 86_400_000;
 
 /** The whole history, like a git log: a lane per instance, newest at the top. */
+// The last numbers and lanes read, shown at once when you come back (from the Screenshots tab, say)
+// while they're read again.
+const seen: { week: JournalEntry[] | null; usage: number | null; lanes: string[] } = { week: null, usage: null, lanes: [] };
+
 export function JournalPage() {
   const { home, now, journalVersion, openWorld } = useApp();
   const [filter, setFilter] = useState<Filter>("all");
@@ -41,12 +45,18 @@ export function JournalPage() {
   const journal = useJournal({ instanceId, kinds });
 
   // This week's numbers, from every session regardless of the filters.
-  const [week, setWeek] = useState<JournalEntry[] | null>(null);
-  const [usage, setUsage] = useState<number | null>(null);
+  const [week, setWeek] = useState<JournalEntry[] | null>(seen.week);
+  const [usage, setUsage] = useState<number | null>(seen.usage);
   useEffect(() => {
     let active = true;
-    getJournal({ kinds: ["session"], limit: 500 }).then((found) => active && setWeek(found.filter((entry) => entry.at > Date.now() - WEEK)), () => active && setWeek([]));
-    getRestorePointUsage().then((bytes) => active && setUsage(bytes), () => active && setUsage(null));
+    getJournal({ kinds: ["session"], limit: 500 }).then((found) => {
+      seen.week = found.filter((entry) => entry.at > Date.now() - WEEK);
+      if (active) setWeek(seen.week);
+    }, () => active && setWeek([]));
+    getRestorePointUsage().then((bytes) => {
+      seen.usage = bytes;
+      if (active) setUsage(bytes);
+    }, () => active && setUsage(null));
     return () => {
       active = false;
     };
@@ -63,13 +73,14 @@ export function JournalPage() {
   }, [week]);
 
   // Instances that appear in the journal, coloured like their lanes (lanes follow the unfiltered order).
-  const [allLanes, setAllLanes] = useState<string[]>([]);
+  const [allLanes, setAllLanes] = useState<string[]>(seen.lanes);
   useEffect(() => {
     let active = true;
     getJournal({ limit: 400 }).then((found) => {
       if (!active) return;
       const order: string[] = [];
       for (const entry of found) if (entry.instanceId && !order.includes(entry.instanceId)) order.push(entry.instanceId);
+      seen.lanes = order;
       setAllLanes(order);
     }, () => {});
     return () => {

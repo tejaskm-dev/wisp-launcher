@@ -28,6 +28,11 @@ zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2
 regex = "1"
 toml = "1"
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+# Minecraft checks skin signatures as SHA1withRSA, which aws-lc-rs won't sign: the skin server
+# (skin_server.rs) signs with these, on the digest 0.10 generation of SHA-1 that rsa 0.9 takes.
+rsa = { version = "0.9", features = ["sha1"] }
+sha1_10 = { package = "sha1", version = "0.10", features = ["oid"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

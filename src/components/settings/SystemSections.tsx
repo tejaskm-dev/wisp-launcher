@@ -1,4 +1,4 @@
-import { Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RotateCcw, ShieldCheck } from "lucide-react";
+import { ArrowUpCircle, Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { clearCache, getDataFolder, getStorageUsage, openDataFolder } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
@@ -6,6 +6,7 @@ import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
 import { useResource } from "../../lib/useResource";
 import { useApp } from "../../state/AppContext";
+import { checkForUpdate, installUpdate, useUpdate } from "../../state/updates";
 import { Ghost } from "../brand/Ghost";
 import { Button } from "../ui/Button";
 import { Dialog } from "../ui/Dialog";
@@ -173,6 +174,7 @@ export function AboutSection({ update }: SectionProps) {
             <p className="mt-1 text-mute-2">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
           </div>
         </div>
+        <UpdateRow />
       </Panel>
 
       <Panel title="Start over" icon={<RotateCcw size={19} aria-hidden="true" />}>
@@ -201,5 +203,39 @@ export function AboutSection({ update }: SectionProps) {
         {null}
       </Dialog>
     </>
+  );
+}
+
+/** The version check: Wisp also looks on its own every few hours and offers what it finds. */
+function UpdateRow() {
+  const update = useUpdate();
+  const description =
+    update.phase === "off"
+      ? "This build doesn't update itself. Release builds look for new versions on their own and offer them."
+      : update.phase === "checking"
+        ? "Looking for a newer Wisp…"
+        : update.phase === "available"
+          ? `Wisp ${update.version} is ready to install.`
+          : update.phase === "downloading"
+            ? `Downloading Wisp ${update.version}…`
+            : update.phase === "restarting"
+              ? "Restarting on the new version…"
+              : update.phase === "failed"
+                ? `Couldn't check: ${update.message}`
+                : update.checkedAt
+                  ? "You have the newest Wisp."
+                  : "Wisp looks for new versions on its own every few hours.";
+  return (
+    <Row label="Updates" description={description}>
+      {update.phase === "available" ? (
+        <Button icon={ArrowUpCircle} onClick={() => void installUpdate()}>
+          Update and restart
+        </Button>
+      ) : (
+        <Button variant="secondary" icon={RefreshCw} disabled={update.phase === "off" || update.phase === "checking" || update.phase === "downloading" || update.phase === "restarting"} onClick={() => void checkForUpdate()}>
+          Check now
+        </Button>
+      )}
+    </Row>
   );
 }

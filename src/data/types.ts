@@ -663,6 +663,53 @@ export interface CurseForgeStatus {
   builtIn: boolean;
 }
 
+/** What a file you bring in turned out to be (from what's inside it, not just its name). */
+export type ImportKind = "modpack" | "mod" | "resource-pack" | "shader-pack" | "data-pack" | "world" | "unknown";
+
+/** What a modpack file makes. */
+export interface PackSummary {
+  name: string | null;
+  version: string | null;
+  gameVersion: string;
+  loader: Loader;
+  from: "modrinth" | "curse-forge";
+}
+
+/** A file looked over before it's brought in. */
+export interface InspectedFile {
+  path: string;
+  fileName: string;
+  kind: ImportKind;
+  /** From the file's own metadata, when it has some. */
+  name: string | null;
+  version: string | null;
+  /** For a mod: the loaders it's made for. */
+  loaders: string[];
+  /** For a modpack: what it makes. */
+  pack: PackSummary | null;
+  /** Why a modpack can't be read, when it can't. */
+  problem: string | null;
+}
+
+/** What "Speed up" did to an instance. */
+export interface SpedUp {
+  /** The instance as it is now (a vanilla one moves to Fabric). */
+  instance: Instance;
+  added: InstalledContent[];
+  /** Already in the instance. */
+  had: string[];
+  /** No build for this version and loader, or clashing with something already there. */
+  skipped: string[];
+  movedToFabric: boolean;
+}
+
+/** How adding one file to an instance went. */
+export interface AddedFile {
+  path: string;
+  added: { content: InstalledContent; note: string | null } | null;
+  error: string | null;
+}
+
 export interface InstalledContent {
   projectId: string;
   versionId: string;

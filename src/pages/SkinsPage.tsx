@@ -1,6 +1,7 @@
 import { Check, ChevronsDown, Crown, Download, FolderInput, Info, LocateFixed, MoreHorizontal, MoveHorizontal, Music2, Orbit, Pencil, PersonStanding, Plus, Rotate3d, Shirt, Trash2, Type, Upload, UserRound, Zap, type LucideIcon } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Ghost } from "../components/brand/Ghost";
 import { EMOTES, type EmoteId } from "../components/skins/emotes";
 import type { SavedLayer } from "../components/skins/layers";
 import { SkinEditor, type StartLayer } from "../components/skins/SkinEditor";
@@ -129,13 +130,27 @@ export function SkinsPage() {
 
   const skins = library?.skins ?? [];
   const selected = skins.find((skin) => skin.id === selectedId) ?? skins.find((skin) => skin.id === library?.active) ?? skins[0] ?? null;
-  // Keep showing the last skin until the next one has loaded, so it never flashes back to Wisp's.
-  const selectedSource = useSkinSource(selected);
-  const [stageSkin, setStageSkin] = useState<string | HTMLCanvasElement>(defaultSkin);
+  // The skin on the stage: none until the first is ready, so the stage starts with the right one,
+  // then the last one until the next has loaded, so it never flashes back to Wisp's. Wisp's own
+  // stands in when there are no skins, or one won't load.
+  const [stageSkin, setStageSkin] = useState<string | HTMLCanvasElement | null>(null);
+  const [stageReady, setStageReady] = useState(false);
   useEffect(() => {
-    if (!selected) setStageSkin(defaultSkin);
-    else if (selectedSource) setStageSkin(selectedSource);
-  }, [selected, selectedSource, defaultSkin]);
+    if (library === null) return;
+    if (!selected) {
+      setStageSkin(defaultSkin);
+      return;
+    }
+    let active = true;
+    skinSource(selected).then(
+      (source) => active && setStageSkin(source),
+      () => active && setStageSkin((current) => current ?? defaultSkin),
+    );
+    return () => {
+      active = false;
+    };
+    // The id and version cover which picture to show.
+  }, [library, selected?.id, selected?.updated, defaultSkin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // In the browser preview there's no file picker from Rust: read the file here.
   const browserInput = useRef<HTMLInputElement>(null);
@@ -231,18 +246,22 @@ export function SkinsPage() {
 
       <m.div variants={fadeUp} className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
         <section aria-label="Preview" className="flex min-w-0 flex-col gap-3">
-          <div className="relative aspect-[3/2] w-full overflow-hidden rounded-[26px] border border-cream/8 bg-[#0c0b14]">
-            <SkinStage
-              skin={stageSkin}
-              model={selected?.model ?? "classic"}
-              emote={prefs.emote}
-              autoRotate={prefs.spin}
-              nameTag={home?.account?.name ?? null}
-              setting={roam ? "void" : "scene"}
-              replay={take}
-              recenter={recenter}
-              className="absolute inset-0"
-            />
+          <div aria-busy={!stageReady} className="relative aspect-[3/2] w-full overflow-hidden rounded-[26px] border border-cream/8 bg-[#0c0b14]">
+            <StageLoading done={stageReady} />
+            {stageSkin && (
+              <SkinStage
+                skin={stageSkin}
+                model={selected?.model ?? "classic"}
+                emote={prefs.emote}
+                autoRotate={prefs.spin}
+                nameTag={home?.account?.name ?? null}
+                setting={roam ? "void" : "scene"}
+                replay={take}
+                recenter={recenter}
+                onReady={() => setStageReady(true)}
+                className="absolute inset-0"
+              />
+            )}
             <div className="pointer-events-none absolute inset-x-4 top-4 flex items-start gap-3">
               <div className="min-w-0 rounded-2xl bg-ink-950/45 px-3.5 py-2 backdrop-blur-sm">
                 <p className="truncate font-display text-lg font-bold leading-tight">{selected?.name ?? "Wisp"}</p>
@@ -380,6 +399,25 @@ export function SkinsPage() {
         )}
       </AnimatePresence>
     </Page>
+  );
+}
+
+/**
+ * Wisp floating where the player will stand while the stage gets ready. It fades out as the stage
+ * fades in, then goes, so its float doesn't keep running underneath.
+ */
+function StageLoading({ done }: { done: boolean }) {
+  const [gone, setGone] = useState(done);
+  useEffect(() => {
+    if (!done) return;
+    const timer = window.setTimeout(() => setGone(true), 600);
+    return () => window.clearTimeout(timer);
+  }, [done]);
+  if (gone) return null;
+  return (
+    <div aria-hidden="true" className={cn("pointer-events-none absolute inset-0 grid place-items-center transition-opacity duration-500", done && "opacity-0")}>
+      <Ghost size={64} floating className="opacity-50" />
+    </div>
   );
 }
 

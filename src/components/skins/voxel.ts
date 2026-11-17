@@ -6,6 +6,7 @@
 // Units are skin pixels: a block is 16, so the player is two blocks tall.
 
 import {
+  AdditiveBlending,
   BoxGeometry,
   BufferAttribute,
   BufferGeometry,
@@ -20,6 +21,9 @@ import {
   NearestFilter,
   PlaneGeometry,
   RepeatWrapping,
+  Sprite,
+  SpriteMaterial,
+  type ColorRepresentation,
   type Material,
   type Texture,
 } from "three";
@@ -369,7 +373,6 @@ const SHADE = [1, 0.8, 0.66, 0.52];
 
 interface Bucket {
   material: Material;
-  cast: boolean;
   position: number[];
   normal: number[];
   uv: number[];
@@ -408,10 +411,10 @@ export class World {
 
   /**
    * One mesh per material. `see` lists kinds that don't hide what's behind them (leaves, water):
-   * faces against them are drawn, except between two of the same kind. `cast` lists the kinds
-   * that throw shadows. Materials given here are switched to vertex colours for the shading.
+   * faces against them are drawn, except between two of the same kind. Lit materials given here
+   * are switched to vertex colours for the corner shading.
    */
-  build(parent: Group, materials: Record<string, Material | Material[]>, options: { see: Set<string>; cast: Set<string> }) {
+  build(parent: Group, materials: Record<string, Material | Material[]>, options: { see: Set<string> }) {
     const solid = (x: number, y: number, z: number) => {
       const kind = this.cells.get(pack(x, y, z));
       return kind !== undefined && !options.see.has(kind);
@@ -423,15 +426,13 @@ export class World {
       if (!material) continue;
       const [x, y, z] = this.positions.get(key) as Triple;
       const [cx, cy, cz] = at(x, y, z);
-      const cast = options.cast.has(kind);
       FACES.forEach((face, side) => {
         const [nx, ny, nz] = face.normal;
         const next = this.cells.get(pack(x + nx, y + ny, z + nz));
         if (next !== undefined && (!options.see.has(next) || next === kind)) return;
         const faceMaterial = Array.isArray(material) ? material[side] : material;
-        const id = `${faceMaterial.uuid}:${cast}`;
-        let bucket = buckets.get(id);
-        if (!bucket) buckets.set(id, (bucket = { material: faceMaterial, cast, position: [], normal: [], uv: [], color: [], index: [] }));
+        let bucket = buckets.get(faceMaterial.uuid);
+        if (!bucket) buckets.set(faceMaterial.uuid, (bucket = { material: faceMaterial, position: [], normal: [], uv: [], color: [], index: [] }));
         const base = bucket.position.length / 3;
         // The layer this face looks into, and the two directions across it.
         const [ox, oy, oz] = [x + nx, y + ny, z + nz];
@@ -467,14 +468,63 @@ export class World {
       geometry.setAttribute("position", new Float32BufferAttribute(bucket.position, 3));
       geometry.setAttribute("normal", new Float32BufferAttribute(bucket.normal, 3));
       geometry.setAttribute("uv", new Float32BufferAttribute(bucket.uv, 2));
-      geometry.setAttribute("color", new Float32BufferAttribute(bucket.color, 3));
       geometry.setIndex(bucket.index);
-      bucket.material.vertexColors = true;
-      const mesh = new Mesh(geometry, bucket.material);
-      mesh.castShadow = bucket.cast;
-      mesh.receiveShadow = true;
-      parent.add(mesh);
+      // Light sources stay full-bright and share their shader with the other glowing things.
+      if (!(bucket.material instanceof MeshBasicMaterial)) {
+        geometry.setAttribute("color", new Float32BufferAttribute(bucket.color, 3));
+        bucket.material.vertexColors = true;
+      }
+      parent.add(new Mesh(geometry, bucket.material));
     }
     return faces;
   }
+}
+
+// -- Glow and shadow without post-processing or shadow maps --
+//
+// The stage used to bloom bright pixels and cast real shadows. Both cost shader programs (slow to
+// compile when the page opens) and full-screen passes every frame. These do the same job the way
+// the game does: a soft sprite of light round things that glow, and a dark spot under mobs.
+
+let haloPicture: CanvasTexture | null = null;
+let shadowPicture: CanvasTexture | null = null;
+
+function radial(stops: [number, string][]): CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const g = canvas.getContext("2d") as CanvasRenderingContext2D;
+  const gradient = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  for (const [at, color] of stops) gradient.addColorStop(at, color);
+  g.fillStyle = gradient;
+  g.fillRect(0, 0, 64, 64);
+  return new CanvasTexture(canvas);
+}
+
+/** A soft round glow that always faces the camera, added over what's behind it. Dispose its material. */
+export function halo(color: ColorRepresentation, size: number, strength = 0.55): Sprite {
+  haloPicture ??= radial([
+    [0, "rgba(255,255,255,1)"],
+    [0.18, "rgba(255,255,255,0.55)"],
+    [0.45, "rgba(255,255,255,0.16)"],
+    [1, "rgba(255,255,255,0)"],
+  ]);
+  const sprite = new Sprite(new SpriteMaterial({ map: haloPicture, color, opacity: strength, transparent: true, depthWrite: false, blending: AdditiveBlending, fog: false }));
+  sprite.scale.set(size, size, 1);
+  return sprite;
+}
+
+/** A soft dark spot lying on the ground under something, the way the game shadows its mobs. Dispose its geometry and material. */
+export function blobShadow(size: number): Mesh {
+  shadowPicture ??= radial([
+    [0, "rgba(0,0,0,0.62)"],
+    [0.55, "rgba(0,0,0,0.38)"],
+    [1, "rgba(0,0,0,0)"],
+  ]);
+  const geometry = new PlaneGeometry(size, size);
+  geometry.rotateX(-Math.PI / 2);
+  const material = new MeshBasicMaterial({ map: shadowPicture, transparent: true, depthWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  const mesh = new Mesh(geometry, material);
+  mesh.renderOrder = 1;
+  return mesh;
 }

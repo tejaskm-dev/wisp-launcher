@@ -6,14 +6,18 @@ import { useApp } from "../../state/AppContext";
 const PAGE = 80;
 
 /** Journal entries matching a query, newest first, reloaded whenever the journal changes. */
+// The first page of each query last read, shown at once when you come back (from the Screenshots
+// tab, say) while it's read again.
+const firstPages = new Map<string, { entries: JournalEntry[]; more: boolean }>();
+
 export function useJournal(query: Omit<JournalQuery, "before" | "limit">) {
   const { journalVersion } = useApp();
-  const [entries, setEntries] = useState<JournalEntry[] | null>(null);
+  const key = JSON.stringify(query);
+  const [entries, setEntries] = useState<JournalEntry[] | null>(() => firstPages.get(key)?.entries ?? null);
   const [failed, setFailed] = useState(false);
-  const [more, setMore] = useState(false);
+  const [more, setMore] = useState(() => firstPages.get(key)?.more ?? false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const key = JSON.stringify(query);
 
   useEffect(() => {
     let active = true;
@@ -21,6 +25,7 @@ export function useJournal(query: Omit<JournalQuery, "before" | "limit">) {
     getJournal({ ...(JSON.parse(key) as JournalQuery), limit: PAGE }).then(
       (found) => {
         if (!active) return;
+        firstPages.set(key, { entries: found, more: found.length === PAGE });
         setEntries(found);
         setMore(found.length === PAGE);
       },
