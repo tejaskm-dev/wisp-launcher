@@ -124,7 +124,7 @@ export function JournalPage() {
         <Stat icon={<HardDrive size={15} aria-hidden="true" />} label="Restore points use" value={usage === null ? "—" : formatBytes(usage)} />
       </m.dl>
 
-      <m.div variants={fadeUp} className="flex flex-col gap-3 rounded-[22px] border border-cream/8 bg-ink-800/60 p-4">
+      <m.div variants={fadeUp} className="wisp-surface flex flex-col gap-3 rounded-[22px] p-4">
         <div className="flex flex-wrap items-center gap-3">
           <span className="flex items-center gap-2 text-sm font-bold">
             <NotebookPen size={15} className="text-mute" aria-hidden="true" />
@@ -212,7 +212,7 @@ export function JournalPage() {
 
 function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: string | null }) {
   return (
-    <div className="rounded-2xl border border-cream/7 bg-ink-800 px-4 py-3.5">
+    <div className="wisp-surface rounded-2xl px-4 py-3.5">
       <dt className="flex items-center gap-1.5 text-xs font-semibold text-mute">
         {icon}
         {label}

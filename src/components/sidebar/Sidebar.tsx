@@ -10,6 +10,7 @@ import { Ghost } from "../brand/Ghost";
 import { LOGO_GHOST_SIZE, LOGO_ROW, LOGO_SPARKLE, Wordmark } from "../brand/Logo";
 import { Sparkle } from "../brand/Sparkle";
 import { InstanceAvatar } from "../instances/InstanceAvatar";
+import { InstanceLabel } from "../instances/VersionTag";
 import { describeLaunch } from "../launch/describe";
 import { Loading, Skeleton } from "../ui/Skeleton";
 import { AccountButton } from "./AccountButton";
@@ -113,7 +114,7 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
             {activeIndex >= 0 && (
               <m.span
                 aria-hidden="true"
-                className="absolute inset-x-0 top-0 h-[46px] rounded-full bg-cream shadow-[0_8px_24px_-8px_rgba(244,238,228,0.45)]"
+                className="tail absolute inset-x-0 top-0 h-[46px] rounded-full bg-cream shadow-[0_8px_24px_-8px_rgba(244,238,228,0.45)] [--tail:26px]"
                 initial={false}
                 animate={{ y: activeIndex * ITEM_STEP }}
                 transition={{ type: "spring", stiffness: 480, damping: 36 }}
@@ -138,7 +139,7 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
                   {...tipFor(item.label, shortcut)}
                   className={cn(
                     "group relative z-10 flex h-[46px] items-center gap-3.5 rounded-full px-4 text-[15px] font-semibold transition-colors duration-200",
-                    active ? "text-ink-900" : "text-cream-400 hover:bg-cream/5 hover:text-cream",
+                    active ? "text-ink-900" : "lit text-cream-400 hover:bg-cream/5 hover:text-cream",
                   )}
                 >
                   <span className="relative shrink-0">
@@ -193,8 +194,8 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
               onClick={() => navigate("settings")}
               {...tipFor("Settings", `${modKey},`)}
               className={cn(
-                "group/gear grid size-10 shrink-0 place-items-center rounded-xl transition-colors duration-200",
-                page === "settings" ? "bg-cream text-ink-900" : "text-mute hover:bg-cream/6 hover:text-cream",
+                "group/gear relative grid size-10 shrink-0 place-items-center rounded-xl transition-colors duration-200",
+                page === "settings" ? "tail bg-cream text-ink-900 [--tail:18px]" : "text-mute hover:bg-cream/6 hover:text-cream",
               )}
             >
               <Settings size={18} className="transition-transform duration-500 ease-out-expo group-hover/gear:rotate-45" aria-hidden="true" />
@@ -272,11 +273,16 @@ function RecentInstances({ collapsed, tipFor, revealed }: { collapsed: boolean; 
             const view = describeLaunch(launches[instance.id], now);
             const active = view.kind === "busy" || view.kind === "running";
             const status =
-              view.kind === "idle"
-                ? `${instanceLabel(instance)}${instance.lastPlayed !== null ? ` · ${timeAgo(instance.lastPlayed, now)}` : ""}`
-                : view.kind === "problem"
-                  ? "Didn't start · try again"
-                  : view.label;
+              view.kind === "idle" ? (
+                <>
+                  <InstanceLabel instance={instance} />
+                  {instance.lastPlayed !== null ? ` · ${timeAgo(instance.lastPlayed, now)}` : ""}
+                </>
+              ) : view.kind === "problem" ? (
+                "Didn't start · try again"
+              ) : (
+                view.label
+              );
             return (
               <li key={instance.id}>
                 <button
@@ -285,18 +291,18 @@ function RecentInstances({ collapsed, tipFor, revealed }: { collapsed: boolean; 
                   aria-disabled={active}
                   onClick={active ? undefined : () => play(instance.id)}
                   {...tipFor(active ? `${instance.name}: ${view.label}` : `Play ${instance.name}`, instanceLabel(instance))}
-                  className="group flex w-full items-center gap-3 rounded-2xl p-1.5 text-left transition-colors duration-200 hover:bg-cream/5"
+                  className="lit group flex w-full items-center gap-3 rounded-2xl p-1.5 text-left transition-colors duration-200 hover:bg-cream/5"
                 >
                   <span className="relative shrink-0">
                     <InstanceAvatar instance={instance} className="size-10 text-base" />
                     {view.kind === "busy" ? (
-                      <span className="absolute inset-0 grid place-items-center rounded-xl bg-ink-950/65 text-cream">
+                      <span className="ghost-shape absolute inset-0 grid place-items-center bg-ink-950/65 text-cream">
                         <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
                       </span>
                     ) : view.kind === "running" ? (
                       <span aria-hidden="true" className="absolute -right-0.5 -top-0.5 size-3 rounded-full border-2 border-ink-950 bg-moss" />
                     ) : (
-                      <span className="absolute inset-0 grid place-items-center rounded-xl bg-ink-950/60 text-cream opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100">
+                      <span className="ghost-shape absolute inset-0 grid place-items-center bg-ink-950/60 text-cream opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100">
                         <Play size={15} fill="currentColor" strokeWidth={0} aria-hidden="true" />
                       </span>
                     )}

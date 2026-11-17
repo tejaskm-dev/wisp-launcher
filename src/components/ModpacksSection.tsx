@@ -71,10 +71,10 @@ function ModpackCard({ pack, onInstall }: { pack: Project; onInstall: () => void
     <m.article
       whileHover={{ y: -4 }}
       transition={{ type: "spring", stiffness: 320, damping: 24 }}
-      className="group flex h-full flex-col overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800 transition-colors duration-300 hover:border-cream/18"
+      className="wisp-card wag lit group flex h-full flex-col"
     >
       <div
-        className="relative h-28 overflow-hidden bg-ink-700"
+        className="relative h-28 overflow-hidden rounded-t-[22px] bg-ink-700"
         style={pack.color !== null ? { backgroundColor: hexColor(pack.color) } : undefined}
       >
         {pack.imageUrl && (
@@ -120,8 +120,8 @@ function ModpackCard({ pack, onInstall }: { pack: Project; onInstall: () => void
 
 function ModpackSkeleton() {
   return (
-    <div className="overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800">
-      <Skeleton className="h-28 w-full" />
+    <div className="wisp-card">
+      <Skeleton className="h-28 w-full rounded-t-[22px]" />
       <div className="flex flex-col gap-2 px-3.5 pb-3.5">
         <Skeleton className="-mt-6 mb-1 size-11 rounded-xl ring-2 ring-ink-800" />
         <Skeleton className="h-4 w-4/5 rounded-full" />

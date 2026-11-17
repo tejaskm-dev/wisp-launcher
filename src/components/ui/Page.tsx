@@ -35,7 +35,7 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-[24px] border border-cream/8 bg-ink-800 p-6", className)}>
+    <section className={cn("wisp-surface rounded-[24px] p-6", className)}>
       <header className="mb-2 flex items-start gap-3.5">
         {icon && <span className="grid size-10 shrink-0 place-items-center rounded-[13px] bg-cream/7 text-cream-300">{icon}</span>}
         <div className="min-w-0 flex-1">

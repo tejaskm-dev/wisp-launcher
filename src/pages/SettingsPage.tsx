@@ -14,6 +14,7 @@ import { cn } from "../lib/cn";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 import { takeRequestedSettingsSection } from "../state/settingsSection";
+import { Sparkle } from "../components/brand/Sparkle";
 
 type SectionId = "general" | "appearance" | "game" | "java" | "hooks" | "journal" | "sources" | "storage" | "privacy" | "about";
 
@@ -93,11 +94,12 @@ export function SettingsPage() {
                         onClick={() => open(id)}
                         className={cn(
                           "flex h-10 w-full items-center gap-3 rounded-xl px-3 text-left text-sm font-semibold transition-colors duration-150",
-                          active ? "bg-cream/10 text-cream" : "text-mute hover:bg-cream/5 hover:text-cream",
+                          active ? "bg-cream/10 text-cream" : "lit text-mute hover:bg-cream/5 hover:text-cream",
                         )}
                       >
                         <Icon size={17} aria-hidden="true" className={cn("shrink-0", active ? "text-cream" : "text-mute-2")} />
-                        {label}
+                        <span className="min-w-0 flex-1 truncate">{label}</span>
+                        {active && <Sparkle className="size-2.5 shrink-0 text-ember" />}
                       </button>
                     </li>
                   );

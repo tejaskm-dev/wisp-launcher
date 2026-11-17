@@ -482,10 +482,10 @@ function ProjectCard({ project, source, one, now, onOpen, onInstall }: ProjectVi
   const installLabel = project.projectType === "modpack" ? "Install" : "Add";
 
   return (
-    <article className="group relative flex h-full flex-col overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800 transition-[border-color,transform] duration-300 ease-out-expo hover:-translate-y-0.5 hover:border-cream/22">
+    <article className="wisp-card lift lit group relative flex h-full flex-col">
       {/* The whole card opens the project's page; the install button sits above it. */}
-      <button type="button" onClick={onOpen} aria-label={`Open ${project.title}`} className="absolute inset-0 z-0 rounded-[20px]" />
-      <div className="pointer-events-none relative h-32 overflow-hidden bg-ink-700" style={tint ? { backgroundColor: tint } : undefined}>
+      <button type="button" onClick={onOpen} aria-label={`Open ${project.title}`} className="absolute inset-0 z-0 rounded-[22px_22px_0_22px]" />
+      <div className="pointer-events-none relative h-32 overflow-hidden rounded-t-[22px] bg-ink-700" style={tint ? { backgroundColor: tint } : undefined}>
         {project.imageUrl ? (
           <img src={project.imageUrl} alt="" loading="lazy" decoding="async" className="size-full object-cover transition-transform duration-700 ease-out-expo group-hover:scale-[1.04]" />
         ) : (
@@ -528,7 +528,7 @@ function ProjectCard({ project, source, one, now, onOpen, onInstall }: ProjectVi
           type="button"
           onClick={onInstall}
           aria-label={`${installLabel} ${project.title} (${one})`}
-          className="flex h-9 w-full items-center justify-center gap-2 rounded-full bg-cream/10 text-[13px] font-bold transition-colors hover:bg-cream hover:text-ink-900"
+          className="tail relative flex h-9 w-full items-center justify-center gap-2 rounded-full bg-cream/10 text-[13px] font-bold transition-colors [--tail:18px] hover:bg-cream hover:text-ink-900"
         >
           <Download size={14} aria-hidden="true" />
           {installLabel}
@@ -543,7 +543,7 @@ function ProjectRow({ project, source, now, onOpen, onInstall }: ProjectViewProp
   const updated = Date.parse(project.updated);
   const installLabel = project.projectType === "modpack" ? "Install" : "Add";
   return (
-    <article className="group relative flex items-center gap-4 rounded-[18px] border border-cream/7 bg-ink-800 p-3 pr-4 transition-colors duration-200 hover:border-cream/22">
+    <article className="wisp-surface lit group relative flex items-center gap-4 rounded-[18px] p-3 pr-4 transition-colors duration-200 hover:bg-ink-750">
       <button type="button" onClick={onOpen} aria-label={`Open ${project.title}`} className="absolute inset-0 z-0 rounded-[18px]" />
       <ProjectIcon project={project} className="pointer-events-none relative size-14 shrink-0 rounded-[14px] text-xl" />
       <div className="pointer-events-none relative flex min-w-0 flex-1 flex-col gap-0.5">
@@ -591,7 +591,7 @@ function ResultsLoading({ view }: { view: View }) {
     return (
       <Loading label="Loading results" className="flex flex-col gap-2.5">
         {Array.from({ length: 8 }, (_, index) => (
-          <div key={index} className="flex items-center gap-4 rounded-[18px] border border-cream/7 bg-ink-800 p-3">
+          <div key={index} className="wisp-surface flex items-center gap-4 rounded-[18px] p-3">
             <Skeleton className="size-14 shrink-0 rounded-[14px]" />
             <div className="flex flex-1 flex-col gap-2">
               <Skeleton className="h-4 w-1/3 rounded-full" />
@@ -607,8 +607,8 @@ function ResultsLoading({ view }: { view: View }) {
   return (
     <Loading label="Loading results" className={GRID}>
       {Array.from({ length: 8 }, (_, index) => (
-        <div key={index} className="overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800">
-          <Skeleton className="h-32 w-full" />
+        <div key={index} className="wisp-card">
+          <Skeleton className="h-32 w-full rounded-t-[22px]" />
           <div className="flex flex-col gap-2 px-4 pb-4">
             <Skeleton className="-mt-7 mb-1 size-14 rounded-2xl ring-[3px] ring-ink-800" />
             <Skeleton className="h-4 w-3/4 rounded-full" />

@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 import type { Settings } from "../../data/types";
 import type { SettingsPatch } from "../../state/AppContext";
 import { cn } from "../../lib/cn";
+import { Sparkle } from "../brand/Sparkle";
 
 /** What every settings section gets: the settings, and a way to change them (saved as you go). */
 export interface SectionProps {
@@ -121,7 +122,7 @@ export function NumberField({ label, value, min, max, onCommit, suffix }: { labe
   );
 }
 
-/** A labelled group of choices shown as pills (every option visible, as the UX rules ask). */
+/** A labelled group of choices shown as pills (every option visible, as the UX rules ask); the spark marks the chosen one. */
 export function Choice<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { value: T; label: string }[]; onChange: (value: T) => void }) {
   return (
     <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1.5">
@@ -135,10 +136,11 @@ export function Choice<T extends string>({ label, value, options, onChange }: { 
             aria-checked={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-9 rounded-full border px-3.5 text-[13px] font-bold transition-colors duration-200",
-              selected ? "border-cream bg-cream text-ink-900" : "border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
+              "flex h-9 items-center gap-1.5 rounded-full border px-3.5 text-[13px] font-bold transition-colors duration-200",
+              selected ? "border-cream bg-cream text-ink-900" : "lit border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
             )}
           >
+            {selected && <Sparkle className="-ml-0.5 size-2.5 text-ember" />}
             {option.label}
           </button>
         );

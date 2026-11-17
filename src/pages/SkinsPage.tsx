@@ -441,8 +441,8 @@ function SkinCard({ skin, selected, active, onSelect, onWear, onEdit, onRename, 
   const from = skin.source?.startsWith("player:") ? `from ${skin.source.slice(7)}` : skin.source === "editor" ? "made here" : null;
 
   return (
-    <div className={cn("group relative flex flex-col items-center gap-1.5 rounded-2xl border p-2.5 pt-3 transition-colors", selected ? "border-cream/45 bg-cream/6" : "border-cream/8 bg-ink-800 hover:border-cream/20")}>
-      <button type="button" onClick={onSelect} aria-label={`Preview ${skin.name}`} className="absolute inset-0 rounded-2xl" />
+    <div className={cn("wisp-card wag lit group relative flex flex-col items-center gap-1.5 rounded-[18px_18px_0_18px] p-2.5 pt-3 [--tail:24px]", selected && "ghost-ring bg-ink-700")}>
+      <button type="button" onClick={onSelect} aria-label={`Preview ${skin.name}`} className="absolute inset-0 rounded-[18px_18px_0_18px]" />
       {source ? (
         <SkinDoll src={source} slim={skin.model === "slim"} className="pointer-events-none relative h-[88px] w-[44px] drop-shadow-[0_8px_10px_rgba(0,0,0,0.5)] transition-transform duration-300 ease-out-expo group-hover:-translate-y-0.5" />
       ) : (

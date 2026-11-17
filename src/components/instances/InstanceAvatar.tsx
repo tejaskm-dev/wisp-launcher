@@ -28,21 +28,24 @@ export function SpriteIcon({ index, className }: { index: number; className?: st
   );
 }
 
-/** An instance's icon: a built-in one, a modpack's image, or a block with its first letter. */
+/**
+ * An instance's icon: a built-in one, a modpack's image, or a block with its first letter, always
+ * in the ghost's outline (a rounded tile with the tail flicking out at the corner).
+ */
 export function InstanceAvatar({ instance, className }: { instance: Pick<Instance, "name" | "loader"> & { icon?: string | null }; className?: string }) {
   const builtin = builtinIcon(instance.icon);
   if (builtin !== null) {
-    return <SpriteIcon index={builtin} className={cn("overflow-hidden rounded-xl shadow-[inset_0_0_0_1px_rgba(244,238,228,0.07)]", className)} />;
+    return <SpriteIcon index={builtin} className={cn("ghost-shape", className)} />;
   }
   if (instance.icon?.startsWith("https://")) {
-    return <img src={instance.icon} alt="" loading="lazy" decoding="async" className={cn("shrink-0 rounded-xl bg-ink-700 object-cover", className)} />;
+    return <img src={instance.icon} alt="" loading="lazy" decoding="async" className={cn("ghost-shape shrink-0 bg-ink-700 object-cover", className)} />;
   }
   const letter = instance.name.trim().charAt(0).toUpperCase() || "?";
   return (
     <span
       aria-hidden="true"
       className={cn(
-        "grid shrink-0 place-items-center rounded-xl bg-linear-to-br font-display font-extrabold shadow-[inset_0_-3px_0_rgba(0,0,0,0.25),inset_0_2px_0_rgba(255,255,255,0.18)]",
+        "ghost-shape grid shrink-0 place-items-center bg-linear-to-br pb-[6%] pr-[6%] font-display font-extrabold shadow-[inset_0_-3px_0_rgba(0,0,0,0.25),inset_0_2px_0_rgba(255,255,255,0.18)]",
         LOADER_STYLE[instance.loader],
         className,
       )}

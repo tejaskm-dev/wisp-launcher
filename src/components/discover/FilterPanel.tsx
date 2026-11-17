@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { Check, ChevronDown, Filter, KeyRound, Lock, Monitor, RotateCw, Server, X } from "lucide-react";
+import { ChevronDown, Filter, KeyRound, Lock, Monitor, RotateCw, Server, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { Category, Instance, LoaderTag, VersionList } from "../../data/types";
 import { cn } from "../../lib/cn";
@@ -10,6 +10,7 @@ import { InstanceAvatar } from "../instances/InstanceAvatar";
 import { Select, type SelectOption } from "../ui/Select";
 import { Loading, Skeleton } from "../ui/Skeleton";
 import { ANY, CONTENT_TYPES, HEADER_ORDER, LOADER_CHOICES, SOURCES, SOURCE_TABS, type Filters } from "./filters";
+import { Sparkle } from "../brand/Sparkle";
 
 interface FilterPanelProps {
   filters: Filters;
@@ -298,10 +299,10 @@ function Pill({ active, label, icon, onClick, role }: { active: boolean; label: 
       onClick={onClick}
       className={cn(
         "flex h-8 max-w-full items-center gap-1.5 rounded-full border px-3 text-[13px] font-semibold transition-colors duration-150",
-        active ? "border-cream/60 bg-cream text-ink-900" : "border-cream/10 bg-cream/[0.04] text-cream-300 hover:border-cream/25 hover:bg-cream/8 hover:text-cream",
+        active ? "border-cream/60 bg-cream text-ink-900" : "lit border-cream/10 bg-cream/[0.04] text-cream-300 hover:border-cream/25 hover:bg-cream/8 hover:text-cream",
       )}
     >
-      {icon}
+      {icon ?? (active && <Sparkle className="-ml-0.5 size-2.5 shrink-0 text-ember" />)}
       <span className="truncate">{label}</span>
     </button>
   );
@@ -317,7 +318,7 @@ function CheckRow({ label, checked, onChange }: { label: string; checked: boolea
       className="flex items-center gap-2 self-start rounded-lg py-0.5 pr-1.5 text-left text-xs font-semibold text-cream-300 transition-colors hover:text-cream"
     >
       <span aria-hidden="true" className={cn("grid size-4 shrink-0 place-items-center rounded-[5px] border transition-colors", checked ? "border-cream bg-cream text-ink-900" : "border-cream/30")}>
-        {checked && <Check size={11} strokeWidth={3} />}
+        {checked && <Sparkle className="size-2.5 text-ember" />}
       </span>
       {label}
     </button>

@@ -29,7 +29,7 @@ export function InstallPanel() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, x: 28, transition: { duration: 0.2 } }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
-            className={`pointer-events-auto flex flex-col gap-3 rounded-2xl border bg-ink-700/95 p-3.5 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.8)] ${failed ? "border-coral/30" : "border-cream/10"}`}
+            className={`tail pointer-events-auto relative flex flex-col gap-3 rounded-2xl bg-ink-700 p-3.5 [--tail:26px] [filter:drop-shadow(0_20px_32px_rgba(0,0,0,0.65))] ${failed ? "shadow-[inset_0_0_0_1px_rgba(240,122,90,0.3)]" : "shadow-[inset_0_1px_0_rgba(244,238,228,0.07)]"}`}
           >
             <div className="flex items-center gap-3">
               <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-cream/8 text-cream-300">
@@ -53,7 +53,7 @@ export function InstallPanel() {
                 </button>
               )}
             </div>
-            {!failed && <ProgressBar value={progress} label={`Installing ${job.title}`} />}
+            {!failed && <ProgressBar pixel value={progress} label={`Installing ${job.title}`} />}
             {failed && (
               <button
                 type="button"
@@ -61,7 +61,7 @@ export function InstallPanel() {
                   dismissInstall(job.jobId);
                   startModpackInstall({ projectId: job.jobId, title: job.title, projectType: "modpack", iconUrl: null });
                 }}
-                className="flex h-8 items-center gap-1.5 self-start rounded-full bg-cream px-3.5 text-xs font-bold text-ink-900 transition-transform active:scale-95"
+                className="tail wag relative flex h-8 items-center gap-1.5 self-start rounded-full bg-cream px-3.5 text-xs font-bold text-ink-900 transition-transform active:scale-95 [--tail:17px]"
               >
                 <RotateCw size={12} aria-hidden="true" />
                 Try again

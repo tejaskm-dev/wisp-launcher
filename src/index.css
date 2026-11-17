@@ -5,6 +5,7 @@
   --color-ink-900: #0e0d0c;
   --color-ink-850: #141210;
   --color-ink-800: #171513;
+  --color-ink-750: #1b1916;
   --color-ink-700: #1f1c19;
   --color-cream: #f4eee4;
   --color-cream-200: #e9e1d5;
@@ -24,6 +25,8 @@
   --font-sans: "Figtree Variable", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
+  /* For game things only: versions, counts, download percentages. */
+  --font-pixel: "Pixelify Sans Variable", ui-monospace, "SF Mono", Menlo, monospace;
 
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -87,6 +90,129 @@
   }
 }
 
+/*
+ * The Wisp look. What makes a component Wisp's and nobody else's: the ghost's tail (the flick at
+ * the bottom right of Wisp's ghost) on things that float, the spark on what's chosen, pixels for
+ * game things, and a wisp of light under the pointer. The shapes are drawn once, here.
+ */
+:root {
+  --tail-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 22'%3E%3Cpath d='M24 4C24 10 26.5 13.5 29.5 16.2C31.4 18 32 20 30.8 21.3C29.4 22.6 26.2 21.9 22.6 20.4C16.5 18 9.5 16.4 0 16L24 16Z'/%3E%3C/svg%3E");
+  --ghost-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M16 0H40A16 16 0 0 1 56 16V44C56 50 58.5 53.5 61.5 56.2C63.4 58 64 60 62.8 61.3C61.4 62.6 58.2 61.9 54.6 60.4C48.5 58 41.5 56.4 32 56H16A16 16 0 0 1 0 40V16A16 16 0 0 1 16 0Z'/%3E%3C/svg%3E");
+  /* Wisp's ghost, as a picture, for slider thumbs. */
+  --ghost-thumb: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='5 3 56 58'%3E%3Cpath fill='%23f4eee4' d='M31 6C19.4 6 10 15.4 10 27V41C10 50.4 17.6 58 27 58C32.4 58 36.2 56 40.2 54.6C45.6 52.7 51.4 54.6 57.6 58.4C54.3 54.3 53 49.5 53 44V28C53 15.8 43.2 6 31 6Z'/%3E%3Cellipse cx='24.5' cy='28' rx='3.3' ry='5.2' fill='%23141210'/%3E%3Cellipse cx='38' cy='28' rx='3.3' ry='5.2' fill='%23141210'/%3E%3C/svg%3E");
+}
+
+/*
+ * The tail: a fin in the element's own colour (so it follows hover and press), hung off the
+ * bottom-right corner, which it squares off. The element must be positioned; --tail sizes it.
+ */
+@utility tail {
+  /* Important: rounding utilities (rounded-full) sort after this one, and the corner must stay square. */
+  border-bottom-right-radius: 0 !important;
+  &::after {
+    content: "";
+    position: absolute;
+    right: calc(var(--tail, 28px) * -0.25);
+    bottom: calc(var(--tail, 28px) * -0.1875);
+    width: var(--tail, 28px);
+    height: calc(var(--tail, 28px) * 0.6875);
+    background-color: inherit;
+    -webkit-mask: var(--tail-mask) no-repeat 0 0 / 100% 100%;
+    mask: var(--tail-mask) no-repeat 0 0 / 100% 100%;
+    transform-origin: 0% 72%;
+    pointer-events: none;
+  }
+}
+
+/*
+ * An outline that follows the whole silhouette, tail included (a border would stop at the corner
+ * the tail hangs from). Four hard shadows in a solid colour, so they don't stack up where they
+ * overlap; --ring sets the colour.
+ */
+@utility ghost-ring {
+  filter: drop-shadow(1.5px 0 0 var(--ring, #77716a)) drop-shadow(-1.5px 0 0 var(--ring, #77716a)) drop-shadow(0 1.5px 0 var(--ring, #77716a))
+    drop-shadow(0 -1.5px 0 var(--ring, #77716a));
+}
+
+/* The tail wags when you point at it. */
+@utility wag {
+  &:hover::after {
+    animation: wag 0.75s var(--ease-out-expo);
+  }
+}
+
+/* A wisp of light that follows the pointer across what you can click (lib/wispLight.ts moves it). */
+@utility lit {
+  background-image: radial-gradient(260px circle at var(--mx, -999px) var(--my, -999px), rgb(255 239 218 / 0.065), transparent 70%);
+}
+
+/* Instance icons wear the ghost's outline: a rounded tile whose tail flicks out at the corner. */
+@utility ghost-shape {
+  -webkit-mask: var(--ghost-mask) center / 100% 100% no-repeat;
+  mask: var(--ghost-mask) center / 100% 100% no-repeat;
+}
+
+@keyframes wag {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(-11deg);
+  }
+  62% {
+    transform: rotate(7deg);
+  }
+}
+
+@layer components {
+  /* A card that floats: no outline, a step lighter than the page, a soft shadow, and the tail. */
+  .wisp-card {
+    --tail: 34px;
+    --ring: #2a2724;
+    position: relative;
+    border-radius: 22px 22px 0 22px;
+    background-color: var(--color-ink-800);
+    box-shadow: inset 0 1px 0 rgb(244 238 228 / 0.05);
+    /* The card's edge: a hairline that runs round the whole ghost, tail included. */
+    filter: drop-shadow(1px 0 0 var(--ring)) drop-shadow(-1px 0 0 var(--ring)) drop-shadow(0 1px 0 var(--ring)) drop-shadow(0 -1px 0 var(--ring));
+    transition:
+      background-color 0.3s ease,
+      transform 0.5s var(--ease-out-expo);
+  }
+  .wisp-card::after {
+    content: "";
+    position: absolute;
+    right: calc(var(--tail) * -0.25);
+    bottom: calc(var(--tail) * -0.1875);
+    width: var(--tail);
+    height: calc(var(--tail) * 0.6875);
+    background-color: inherit;
+    -webkit-mask: var(--tail-mask) no-repeat 0 0 / 100% 100%;
+    mask: var(--tail-mask) no-repeat 0 0 / 100% 100%;
+    transform-origin: 0% 72%;
+    pointer-events: none;
+  }
+  .wisp-card:hover,
+  .wisp-card:focus-within {
+    --ring: #3a3632;
+    background-color: var(--color-ink-750);
+  }
+  /* Cards you act on rise a little toward the pointer, and their tail wags. */
+  .wisp-card.lift:hover {
+    transform: translateY(-3px);
+  }
+  .wisp-card.lift:hover::after {
+    animation: wag 0.75s var(--ease-out-expo);
+  }
+
+  /* A surface that sits on the page (settings panels, error notes): the card's fill, no tail. */
+  .wisp-surface {
+    background-color: var(--color-ink-800);
+    box-shadow: inset 0 1px 0 rgb(244 238 228 / 0.045);
+  }
+}
+
 /* A placeholder block with a soft light sweeping across it (transform only, so it stays on the GPU). */
 @utility skeleton {
   position: relative;
@@ -133,29 +259,30 @@
     background: linear-gradient(to right, var(--color-cream) var(--fill, 0%), rgb(244 238 228 / 0.12) var(--fill, 0%));
     cursor: pointer;
   }
+  /* The thumb is Wisp's ghost, riding the line; it leans in while you drag it. */
   .wisp-range::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 22px;
-    height: 22px;
-    border-radius: 999px;
-    background: var(--color-cream);
-    box-shadow:
-      0 0 0 5px var(--color-ink-800),
-      0 6px 16px rgb(0 0 0 / 0.55);
-    transition: transform 150ms ease-out;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 0;
+    background: var(--ghost-thumb) center / contain no-repeat;
+    filter: drop-shadow(0 5px 7px rgb(0 0 0 / 0.55));
+    transition: transform 200ms var(--ease-out-expo);
   }
   .wisp-range::-moz-range-thumb {
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     border: none;
-    border-radius: 999px;
-    background: var(--color-cream);
-    box-shadow:
-      0 0 0 5px var(--color-ink-800),
-      0 6px 16px rgb(0 0 0 / 0.55);
+    border-radius: 0;
+    background: var(--ghost-thumb) center / contain no-repeat;
+    filter: drop-shadow(0 5px 7px rgb(0 0 0 / 0.55));
+  }
+  .wisp-range:hover::-webkit-slider-thumb {
+    transform: translateY(-1px) scale(1.06);
   }
   .wisp-range:active::-webkit-slider-thumb {
-    transform: scale(1.12);
+    transform: translateY(-2px) scale(1.14) rotate(-8deg);
   }
   .wisp-range:focus-visible {
     outline-offset: 8px;

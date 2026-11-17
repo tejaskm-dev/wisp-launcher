@@ -231,7 +231,7 @@ function Intro({ relays, busy, onEnable }: { relays: string[]; busy: boolean; on
     { icon: <Gamepad2 size={18} aria-hidden="true" />, title: "What everyone's playing", body: "See who's on, their instance and world (you choose whether to share yours), and start a party." },
   ];
   return (
-    <m.section variants={fadeUp} className="relative overflow-hidden rounded-[26px] border border-cream/8 bg-ink-800 p-8">
+    <m.section variants={fadeUp} className="wisp-surface relative overflow-hidden rounded-[26px] p-8">
       <div className="pointer-events-none absolute -right-10 -top-10 size-72 rounded-full bg-[radial-gradient(circle,rgba(244,238,228,0.1),transparent_65%)]" />
       <div className="relative flex flex-wrap items-start gap-8">
         <div className="flex min-w-[260px] flex-1 flex-col gap-5">
@@ -419,7 +419,7 @@ function YouCard({ social, busy, act }: { social: SocialView; busy: string | nul
   };
   const connected = social.relaysConnected;
   return (
-    <section aria-label="You" className="rounded-[24px] border border-cream/8 bg-ink-800 p-5">
+    <section aria-label="You" className="wisp-surface rounded-[24px] p-5">
       <div className="flex items-center gap-3">
         <Face face={social.profile.face} name={social.profile.name} status={{ state: "online" }} />
         <label className="flex h-10 min-w-0 flex-1 items-center rounded-xl border border-transparent px-2 hover:border-cream/12 focus-within:border-cream/35">
@@ -474,7 +474,7 @@ function PartyCard({ social, now, busy, act }: { social: SocialView; now: number
   const party = social.party;
   const nameOf = (code: string) => social.friends.find((friend) => friend.code === code)?.profile.name ?? shortCode(code);
   return (
-    <section aria-label="Party" className="rounded-[24px] border border-cream/8 bg-ink-800 p-5">
+    <section aria-label="Party" className="wisp-surface rounded-[24px] p-5">
       <h2 className="flex items-center gap-2 font-display text-lg font-bold">
         <PartyPopper size={18} className="text-ember-soft" aria-hidden="true" />
         {party ? party.name : "Party"}

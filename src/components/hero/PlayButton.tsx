@@ -29,23 +29,22 @@ export function PlayButton({ view, name, onPlay, onStop }: PlayButtonProps) {
       aria-disabled={busy}
       whileHover={busy ? undefined : { scale: 1.035 }}
       whileTap={busy ? undefined : { scale: 0.97 }}
-      className="group relative flex h-[60px] min-w-[156px] items-center justify-center overflow-hidden rounded-full bg-cream px-8 font-display text-[21px] font-extrabold text-ink-900 shadow-[0_12px_40px_-6px_rgba(244,238,228,0.35)] transition-shadow duration-300 hover:shadow-[0_16px_56px_-4px_rgba(244,238,228,0.55)]"
+      className={`tail group relative flex h-[60px] min-w-[156px] items-center justify-center rounded-full bg-cream px-8 font-display text-[21px] font-extrabold text-ink-900 shadow-[0_12px_40px_-6px_rgba(244,238,228,0.35)] transition-shadow duration-300 [--tail:34px] hover:shadow-[0_16px_56px_-4px_rgba(244,238,228,0.55)] ${view.kind === "idle" ? "wag" : ""}`}
     >
-      {busy && view.progress !== null && (
-        <m.span
-          aria-hidden="true"
-          className="absolute inset-0 origin-left bg-cream-400/70"
-          initial={false}
-          animate={{ scaleX: view.progress }}
-          transition={{ ease: "linear", duration: 0.15 }}
-        />
-      )}
-      {view.kind === "idle" && (
-        <span
-          aria-hidden="true"
-          className="absolute inset-y-0 left-0 w-1/3 bg-linear-to-r from-transparent via-white/70 to-transparent opacity-0 group-hover:animate-shimmer group-hover:opacity-100"
-        />
-      )}
+      {/* Progress and the hover sweep stay inside the pill; the tail hangs outside it. */}
+      <span aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]">
+        {busy && view.progress !== null && (
+          <m.span
+            className="absolute inset-0 origin-left bg-cream-400/70"
+            initial={false}
+            animate={{ scaleX: view.progress }}
+            transition={{ ease: "linear", duration: 0.15 }}
+          />
+        )}
+        {view.kind === "idle" && (
+          <span className="absolute inset-y-0 left-0 w-1/3 bg-linear-to-r from-transparent via-white/70 to-transparent opacity-0 group-hover:animate-shimmer group-hover:opacity-100" />
+        )}
+      </span>
       <span className="relative flex items-center gap-3">
         {running ? (
           <span className="relative flex size-2.5" aria-hidden="true">

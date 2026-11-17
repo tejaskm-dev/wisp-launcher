@@ -38,8 +38,8 @@ export function Pagination({ page, pages, onChange }: { page: number; pages: num
             aria-label={`Page ${entry}`}
             aria-current={entry === page ? "page" : undefined}
             className={cn(
-              "h-10 min-w-10 rounded-xl px-2 text-sm font-bold tabular-nums transition-colors",
-              entry === page ? "bg-cream text-ink-900" : "text-cream-300 hover:bg-cream/8 hover:text-cream",
+              "relative h-10 min-w-10 rounded-xl px-2 text-sm font-bold tabular-nums transition-colors",
+              entry === page ? "tail bg-cream text-ink-900 [--tail:16px]" : "text-cream-300 hover:bg-cream/8 hover:text-cream",
             )}
           >
             {entry.toLocaleString()}

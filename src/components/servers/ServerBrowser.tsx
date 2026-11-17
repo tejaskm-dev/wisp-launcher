@@ -15,6 +15,7 @@ import { sameServer } from "./address";
 import { JoinServerDialog, type JoinTarget } from "./JoinServerDialog";
 import { RowButton, ServerRow } from "./ServerRow";
 import { useServerStatuses } from "./useServerStatuses";
+import { Sparkle } from "../brand/Sparkle";
 
 type Sort = "players" | "name" | "ping";
 const SORTS: SelectOption<Sort>[] = [
@@ -178,7 +179,7 @@ export function ServerBrowser({ query, onClearQuery }: { query: string; onClearQ
         </p>
       </section>
 
-      <aside aria-label="Filter servers" className="flex flex-col gap-5 rounded-[22px] border border-cream/8 bg-ink-800/60 p-4 lg:sticky lg:top-24">
+      <aside aria-label="Filter servers" className="wisp-surface flex flex-col gap-5 rounded-[22px] p-4 lg:sticky lg:top-24">
         <FilterGroup title="Kind">
           <Pill active={tag === ALL} onClick={() => setTag(ALL)}>
             All
@@ -228,10 +229,11 @@ function Pill({ active, onClick, children }: { active: boolean; onClick: () => v
       aria-checked={active}
       onClick={onClick}
       className={cn(
-        "rounded-full border px-3 py-1.5 text-[13px] font-bold transition-colors duration-150",
-        active ? "border-cream/60 bg-cream text-ink-900" : "border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
+        "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[13px] font-bold transition-colors duration-150",
+        active ? "border-cream/60 bg-cream text-ink-900" : "lit border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
       )}
     >
+      {active && <Sparkle className="-ml-0.5 size-2.5 text-ember" />}
       {children}
     </button>
   );

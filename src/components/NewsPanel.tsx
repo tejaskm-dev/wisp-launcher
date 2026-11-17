@@ -19,7 +19,7 @@ export function NewsPanel() {
 
       {news.status === "loading" && (
         <Loading label="Loading Minecraft news" className="flex flex-col gap-2.5">
-          <div className="flex gap-3.5 rounded-[18px] border border-cream/7 bg-ink-800 p-3.5">
+          <div className="flex gap-3.5 wisp-surface rounded-[18px] p-3.5">
             <Skeleton className="size-[72px] shrink-0 rounded-xl" />
             <div className="flex flex-1 flex-col gap-2 pt-1">
               <Skeleton className="h-3 w-24 rounded-full" />
@@ -28,7 +28,7 @@ export function NewsPanel() {
               <Skeleton className="h-3 w-3/5 rounded-full" />
             </div>
           </div>
-          <div className="flex items-center gap-3 rounded-[18px] border border-cream/7 bg-ink-800 p-3">
+          <div className="flex items-center gap-3 wisp-surface rounded-[18px] p-3">
             <Skeleton className="size-10 shrink-0 rounded-lg" />
             <div className="flex flex-1 flex-col gap-2">
               <Skeleton className="h-3 w-20 rounded-full" />
@@ -55,7 +55,7 @@ function NewsList({ notes }: { notes: PatchNote[] }) {
   return (
     <m.div initial="hidden" animate="show" variants={{ hidden: {}, show: { transition: { staggerChildren: 0.08 } } }} className="flex flex-col gap-2.5">
       {release && (
-        <m.article variants={item} className="flex gap-3.5 rounded-[18px] border border-cream/7 bg-ink-800 p-3.5">
+        <m.article variants={item} className="flex gap-3.5 wisp-surface rounded-[18px] p-3.5">
           {release.imageUrl && <img src={release.imageUrl} alt="" loading="lazy" decoding="async" className="size-[72px] shrink-0 rounded-xl object-cover" />}
           <div className="min-w-0 flex-1">
             <NoteMeta note={release} />
@@ -65,7 +65,7 @@ function NewsList({ notes }: { notes: PatchNote[] }) {
         </m.article>
       )}
       {others.map((note) => (
-        <m.article key={note.id} variants={item} className="flex items-center gap-3 rounded-[18px] border border-cream/7 bg-ink-800 p-3">
+        <m.article key={note.id} variants={item} className="flex items-center gap-3 wisp-surface rounded-[18px] p-3">
           {note.imageUrl && <img src={note.imageUrl} alt="" loading="lazy" decoding="async" className="size-10 shrink-0 rounded-lg object-cover" />}
           <div className="min-w-0 flex-1">
             <NoteMeta note={note} />
