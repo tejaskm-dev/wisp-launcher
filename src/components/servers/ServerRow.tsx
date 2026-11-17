@@ -22,7 +22,7 @@ interface ServerRowProps {
 export function ServerRow({ name, address, icon, status, description, footer, actions, className }: ServerRowProps) {
   const live = status?.online ? status : undefined;
   return (
-    <article className={cn("group flex gap-4 rounded-[22px] border border-cream/8 bg-ink-800 p-4 transition-colors duration-200 hover:border-cream/18", className)}>
+    <article className={cn("wisp-card lift lit group flex gap-4 p-4", className)}>
       <ServerIcon icon={live?.icon ?? icon} name={name} className="size-14 text-xl" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex items-start gap-3">
@@ -80,8 +80,8 @@ export function RowButton({ children, onClick, primary = false, disabled = false
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex h-8 items-center gap-1.5 rounded-full px-3.5 text-xs font-bold transition-[transform,colors] duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45",
-        primary ? "bg-cream text-ink-900" : "border border-cream/15 text-cream-300 enabled:hover:border-cream/35 enabled:hover:text-cream",
+        "relative flex h-8 items-center gap-1.5 rounded-full px-3.5 text-xs font-bold transition-[transform,colors] duration-150 active:scale-95 disabled:cursor-not-allowed disabled:opacity-45",
+        primary ? "tail wag bg-cream text-ink-900 [--tail:17px]" : "lit border border-cream/15 text-cream-300 enabled:hover:border-cream/35 enabled:hover:text-cream",
       )}
     >
       {children}

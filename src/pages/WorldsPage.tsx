@@ -97,7 +97,7 @@ export function WorldsPage() {
       {worlds === null ? (
         <Loading label="Loading worlds" className={GRID}>
           {[0, 1, 2, 3].map((index) => (
-            <div key={index} className="overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800">
+            <div key={index} className="wisp-card [&>*:first-child]:rounded-t-[22px]">
               <Skeleton className="h-32 w-full" />
               <div className="flex flex-col gap-2 p-3.5">
                 <Skeleton className="h-4 w-3/4 rounded-full" />

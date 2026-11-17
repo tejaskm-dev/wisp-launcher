@@ -44,7 +44,7 @@ export function SyncPage() {
 
       <m.div variants={fadeUp} className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-w-0 flex-col gap-5">
-          <section aria-labelledby="sync-status" className="relative overflow-hidden rounded-[24px] border border-cream/8 bg-ink-800 p-6">
+          <section aria-labelledby="sync-status" className="wisp-surface relative overflow-hidden rounded-[24px] p-6">
             <div aria-hidden="true" className="absolute -right-16 -top-20 size-64 rounded-full bg-[radial-gradient(circle,rgba(244,238,228,0.09),transparent_65%)]" />
             <div className="relative flex items-start gap-4">
               <span className="grid size-12 shrink-0 place-items-center rounded-[15px] bg-cream/8 text-cream-300">

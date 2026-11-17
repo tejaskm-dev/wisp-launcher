@@ -23,7 +23,7 @@ export function SyncPanel({ home, onSetUp }: SyncPanelProps) {
     <m.section
       variants={rise}
       aria-labelledby="sync-title"
-      className="flex flex-col gap-4 rounded-[26px] border border-cream/8 bg-ink-800 p-[22px]"
+      className="wisp-surface flex flex-col gap-4 rounded-[26px] p-[22px]"
     >
       <header className="flex items-center gap-3">
         <span className="grid size-[46px] place-items-center rounded-[14px] bg-cream/8 text-cream-300">

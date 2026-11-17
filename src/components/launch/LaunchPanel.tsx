@@ -145,8 +145,10 @@ export function LaunchPanel() {
             exit={{ opacity: 0, x: 28, transition: { duration: 0.2 } }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
             className={cn(
-              "pointer-events-auto flex flex-col gap-3 rounded-2xl border bg-ink-700/95 p-3.5 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.8)]",
-              view.kind === "problem" ? "border-coral/30" : "border-cream/10",
+              "tail pointer-events-auto relative flex flex-col gap-3 rounded-2xl bg-ink-700 p-3.5 [--tail:26px]",
+              view.kind === "problem"
+                ? "shadow-[inset_0_0_0_1px_rgba(240,122,90,0.3)] [filter:drop-shadow(0_20px_32px_rgba(0,0,0,0.65))]"
+                : "shadow-[inset_0_1px_0_rgba(244,238,228,0.07)] [filter:drop-shadow(0_20px_32px_rgba(0,0,0,0.65))]",
             )}
           >
             <div className="flex items-center gap-3">
@@ -183,7 +185,7 @@ export function LaunchPanel() {
               )}
             </div>
 
-            {view.kind === "busy" && <ProgressBar value={view.progress} label={view.label} />}
+            {view.kind === "busy" && <ProgressBar pixel value={view.progress} label={view.label} />}
             {view.kind === "busy" && update.phase === "downloading" && (
               <p className="-mt-1.5 text-[11px] text-mute-2">The first launch of a version downloads it. Later launches start straight away.</p>
             )}
@@ -198,7 +200,7 @@ export function LaunchPanel() {
                   <button
                     type="button"
                     onClick={() => play(id)}
-                    className="flex h-8 items-center gap-1.5 rounded-full bg-cream px-3.5 text-xs font-bold text-ink-900 transition-transform active:scale-95"
+                    className="tail wag relative flex h-8 items-center gap-1.5 rounded-full bg-cream px-3.5 text-xs font-bold text-ink-900 transition-transform active:scale-95 [--tail:17px]"
                   >
                     {update.phase === "exited" ? (
                       <Play size={11} fill="currentColor" strokeWidth={0} aria-hidden="true" />

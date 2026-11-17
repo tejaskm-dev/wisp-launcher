@@ -293,7 +293,7 @@ function EntryCard({ entry, laneColor: color, instanceName, worldName, worldExis
       const live = restorable?.has(event.snapshot) ?? false;
       const title = event.label ?? (event.reason === "auto" ? "Restore point after playing" : event.reason === "manual" ? "Restore point" : "Kept before a restore");
       return (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-cream/8 bg-ink-800/70 px-3.5 py-3">
+        <div className="wisp-surface flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl px-3.5 py-3">
           <code className="rounded-md bg-cream/8 px-1.5 py-0.5 font-mono text-xs font-semibold text-cream-300" title={event.snapshot}>
             {event.snapshot.slice(0, 7)}
           </code>
@@ -468,7 +468,7 @@ function SessionCard({
   const shots = event.screenshots;
   const instanceId = entry.instanceId;
   return (
-    <div className={cn("rounded-2xl border bg-ink-800 p-3.5", event.crashed ? "border-coral/25" : "border-cream/8")}>
+    <div className={cn("wisp-surface rounded-2xl p-3.5", event.crashed && "shadow-[inset_0_0_0_1px_rgba(240,122,90,0.28)]")}>
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[15px] leading-snug text-cream-300">

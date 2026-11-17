@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Info, Search } from "lucide-react";
+import { ChevronDown, Info, Search } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { createInstance, getLoaderGameVersions, getLoaderVersions, getVersions } from "../../data/api";
 import type { Loader, LoaderVersion } from "../../data/types";
@@ -15,6 +15,7 @@ import { Loading, Skeleton } from "../ui/Skeleton";
 import { IconPicker } from "./IconPicker";
 import { InstanceAvatar } from "./InstanceAvatar";
 import { DEFAULT_ICONS, iconId } from "./icons";
+import { Sparkle } from "../brand/Sparkle";
 
 const LOADERS: SegmentOption<Loader>[] = [
   { value: "vanilla", label: "Vanilla" },
@@ -278,14 +279,14 @@ export function NewInstanceDialog({ open, onClose }: { open: boolean; onClose: (
                           checked ? "bg-cream text-ink-900" : "text-cream-300 hover:bg-cream/6 hover:text-cream",
                         )}
                       >
-                        <span className="font-bold tabular-nums">{entry.id}</span>
+                        <span className="font-pixel text-[15px] tracking-[0.02em]">{entry.id}</span>
                         {entry.id === latest && (
                           <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-bold", checked ? "bg-ink-900/10 text-ink-900" : "bg-ember/15 text-ember-soft")}>
                             Latest
                           </span>
                         )}
                         <span className={cn("ml-auto text-xs", checked ? "text-ink-900/60" : "text-mute-2")}>{formatDay(entry.released)}</span>
-                        <Check size={15} strokeWidth={2.4} className={cn("shrink-0", !checked && "invisible")} aria-hidden="true" />
+                        <Sparkle className={cn("size-3.5 shrink-0 text-ember", !checked && "invisible")} />
                       </button>
                     );
                   })}

@@ -16,7 +16,7 @@ export function Toasts({ toasts, onDismiss, children }: { toasts: Toast[]; onDis
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, x: 28, transition: { duration: 0.2 } }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
-            className="pointer-events-auto flex items-start gap-3 rounded-2xl border border-cream/10 bg-ink-700/95 p-3.5 shadow-[0_20px_50px_-12px_rgba(0,0,0,0.8)]"
+            className="tail pointer-events-auto relative flex items-start gap-3 rounded-2xl bg-ink-700 p-3.5 shadow-[inset_0_1px_0_rgba(244,238,228,0.07)] [--tail:26px] [filter:drop-shadow(0_20px_32px_rgba(0,0,0,0.65))]"
           >
             <Ghost size={30} floating sleeping={toast.tone === "resting"} className="mt-0.5" />
             <div className="min-w-0 flex-1">

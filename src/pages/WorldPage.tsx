@@ -141,8 +141,10 @@ export function WorldPage({ worldId, backTo, onBack }: { worldId: string; backTo
               aria-disabled={starting || launch?.blocked}
               title={launch?.blocked ? `${world.instanceName} is already running` : undefined}
               className={cn(
-                "flex h-14 min-w-[150px] items-center justify-center gap-3 rounded-full px-7 font-display text-[19px] font-extrabold transition-transform duration-200 ease-out-expo active:scale-[0.97]",
-                running ? "border border-moss/40 bg-moss/15 text-moss-soft" : "bg-cream text-ink-900 shadow-[0_12px_40px_-6px_rgba(244,238,228,0.35)] hover:scale-[1.03]",
+                "relative flex h-14 min-w-[150px] items-center justify-center gap-3 rounded-full px-7 font-display text-[19px] font-extrabold transition-transform duration-200 ease-out-expo active:scale-[0.97]",
+                running
+                  ? "border border-moss/40 bg-moss/15 text-moss-soft"
+                  : "tail wag bg-cream text-ink-900 shadow-[0_12px_40px_-6px_rgba(244,238,228,0.35)] [--tail:30px] hover:scale-[1.03]",
                 launch?.blocked && "opacity-50",
               )}
             >

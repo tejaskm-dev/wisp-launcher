@@ -1,9 +1,9 @@
-import { Check } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/cn";
 import { useLatest } from "../../lib/hooks";
+import { Sparkle } from "../brand/Sparkle";
 
 export type Placement = "top-start" | "bottom-start" | "bottom-end" | "right-end";
 
@@ -45,7 +45,8 @@ const ORIGIN: Record<Placement, string> = {
 const FOCUSABLE = "button:not(:disabled), [href], input:not(:disabled)";
 
 /**
- * A floating panel (menus, pickers). Rendered into <body> so no scroll container clips it.
+ * A floating panel (menus, pickers), with the ghost's tail at its corner. Rendered into <body> so
+ * no scroll container clips it.
  * Closes on Escape, an outside click or scrolling; arrow keys move between its buttons.
  */
 export function Popover({ open, anchorRef, placement, onClose, label, children, className }: PopoverProps) {
@@ -130,7 +131,7 @@ export function Popover({ open, anchorRef, placement, onClose, label, children, 
           exit={{ opacity: 0, scale: 0.97, transition: { duration: 0.12 } }}
           transition={{ type: "spring", stiffness: 560, damping: 36 }}
           className={cn(
-            "z-[70] rounded-[18px] border border-cream/10 bg-ink-700 p-1.5 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.85)]",
+            "tail z-[70] rounded-[18px] bg-ink-700 p-1.5 shadow-[inset_0_1px_0_rgba(244,238,228,0.07)] [--tail:26px] [filter:drop-shadow(0_24px_40px_rgba(0,0,0,0.72))]",
             className,
           )}
         >
@@ -142,7 +143,7 @@ export function Popover({ open, anchorRef, placement, onClose, label, children, 
   );
 }
 
-/** A row inside a popover menu. */
+/** A row inside a popover menu. In single-choice menus the spark marks the chosen row. */
 export function MenuItem({
   icon,
   label,
@@ -176,7 +177,7 @@ export function MenuItem({
         {hint && <span className="text-xs leading-snug text-mute-2">{hint}</span>}
       </span>
       {shortcut && <kbd className="shrink-0 font-sans text-xs font-semibold text-mute-2">{shortcut}</kbd>}
-      {checked && <Check size={15} strokeWidth={2.6} className="shrink-0 text-ember" aria-hidden="true" />}
+      {checked && <Sparkle className="size-3.5 shrink-0 text-ember" />}
     </button>
   );
 }

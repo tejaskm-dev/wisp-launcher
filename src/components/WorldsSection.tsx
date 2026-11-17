@@ -65,8 +65,8 @@ function WorldsLoading() {
   return (
     <Loading label="Loading your worlds" className="flex gap-4 overflow-hidden pb-2 pt-1">
       {[0, 1, 2].map((index) => (
-        <div key={index} className="w-[220px] shrink-0 overflow-hidden rounded-[20px] border border-cream/7 bg-ink-800">
-          <Skeleton className="h-32 w-full" />
+        <div key={index} className="wisp-card w-[220px] shrink-0">
+          <Skeleton className="h-32 w-full rounded-t-[22px]" />
           <div className="flex flex-col gap-2 p-3.5">
             <Skeleton className="h-4 w-3/4 rounded-full" />
             <Skeleton className="h-3 w-1/2 rounded-full" />
@@ -167,7 +167,7 @@ function WorldsRow({ worlds, selectedId, now, viewOf, onSelect, onPlay, onStop, 
         animate="show"
         variants={stagger}
         style={{ maskImage: mask, WebkitMaskImage: mask }}
-        className="no-scrollbar -mx-1 flex snap-x snap-mandatory gap-4 overflow-x-auto px-1 pb-2 pt-1"
+        className="no-scrollbar -mx-1 flex snap-x snap-mandatory gap-4 overflow-x-auto pb-3 pl-1 pr-3 pt-1.5"
       >
         {worlds.map((world) => (
           <m.li key={world.id} variants={fadeUp} className="w-[220px] shrink-0 snap-start">
@@ -228,13 +228,13 @@ export function WorldCard({ world, now, selected = false, lastPlayed, launch, op
       whileHover={{ y: -4 }}
       transition={{ type: "spring", stiffness: 320, damping: 24 }}
       className={cn(
-        "group relative flex h-full flex-col overflow-hidden rounded-[20px] border bg-ink-800 transition-colors duration-300",
-        selected ? "border-cream/45" : running ? "border-moss/40" : "border-cream/7 hover:border-cream/18",
+        "wisp-card wag lit group relative flex h-full flex-col",
+        selected ? "ghost-ring" : running && "ghost-ring [--ring:#27563e]",
       )}
     >
       {/* The whole card opens (or selects) the world; the play button sits above it. */}
-      <button type="button" aria-pressed={selected || undefined} aria-label={openLabel} onClick={onOpen} className="absolute inset-0 z-0 rounded-[20px]" />
-      <div className="pointer-events-none relative h-32">
+      <button type="button" aria-pressed={selected || undefined} aria-label={openLabel} onClick={onOpen} className="absolute inset-0 z-0 rounded-[22px_22px_0_22px]" />
+      <div className="pointer-events-none relative h-32 overflow-hidden rounded-t-[22px]">
         <WorldArt world={world} width={480} className="absolute inset-0" zoomOnHover />
         <div className="absolute inset-0 bg-linear-to-t from-ink-800/80 via-transparent to-transparent" />
         {running ? (

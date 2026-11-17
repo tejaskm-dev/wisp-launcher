@@ -1,6 +1,7 @@
-import { Check, ChevronDown, Search } from "lucide-react";
+import { ChevronDown, Search } from "lucide-react";
 import { useRef, useState } from "react";
 import { cn } from "../../lib/cn";
+import { Sparkle } from "../brand/Sparkle";
 import { Popover } from "./Popover";
 
 export interface SelectOption<T extends string> {
@@ -21,7 +22,7 @@ interface SelectProps<T extends string> {
   className?: string;
 }
 
-/** A button showing the current choice; opens a menu with a checkmark on the selected option. */
+/** A button showing the current choice; opens a menu with the spark on the selected option. */
 export function Select<T extends string>({ label, value, options, onChange, searchable = false, className }: SelectProps<T>) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
@@ -88,7 +89,7 @@ export function Select<T extends string>({ label, value, options, onChange, sear
                   selected ? "font-bold text-cream" : "font-semibold text-cream-300",
                 )}
               >
-                <Check size={15} strokeWidth={2.6} className={cn("shrink-0 text-ember", !selected && "invisible")} aria-hidden="true" />
+                <Sparkle className={cn("size-3.5 shrink-0 text-ember", !selected && "invisible")} />
                 <span className="min-w-0 flex-1 truncate">{option.label}</span>
                 {option.note && <span className="shrink-0 text-xs font-semibold text-mute-2">{option.note}</span>}
               </button>

@@ -4,6 +4,7 @@ import { m } from "motion/react";
 import { Ghost } from "../components/brand/Ghost";
 import { EditInstanceDialog } from "../components/instances/EditInstanceDialog";
 import { InstanceAvatar } from "../components/instances/InstanceAvatar";
+import { InstanceLabel } from "../components/instances/VersionTag";
 import { describeLaunch, type LaunchView } from "../components/launch/describe";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -13,7 +14,7 @@ import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { openInstanceFolder } from "../data/api";
 import type { Instance } from "../data/types";
 import { cn } from "../lib/cn";
-import { instanceLabel, loaderName, timeAgo } from "../lib/format";
+import { loaderName, timeAgo } from "../lib/format";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 
@@ -46,7 +47,7 @@ export function InstancesPage() {
       {instances === null ? (
         <Loading label="Loading instances" className={GRID}>
           {[0, 1, 2].map((index) => (
-            <div key={index} className="flex flex-col gap-4 rounded-[22px] border border-cream/7 bg-ink-800 p-4">
+            <div key={index} className="wisp-card flex flex-col gap-4 p-4">
               <div className="flex items-center gap-3.5">
                 <Skeleton className="size-14 rounded-xl" />
                 <div className="flex flex-1 flex-col gap-2">
@@ -124,12 +125,14 @@ interface InstanceCardProps {
 function InstanceCard({ instance, now, view, onPlay, onStop, onOpenFolder, onEdit }: InstanceCardProps) {
   const busy = view.kind === "busy";
   return (
-    <article className="group flex h-full flex-col gap-4 rounded-[22px] border border-cream/8 bg-ink-800 p-4 transition-colors duration-300 hover:border-cream/18">
+    <article className="wisp-card lift lit group flex h-full flex-col gap-4 p-4">
       <div className="flex items-center gap-3.5">
         <InstanceAvatar instance={instance} className="size-14 text-2xl transition-transform duration-500 ease-out-expo group-hover:-rotate-6 group-hover:scale-105" />
         <div className="min-w-0 flex-1">
           <h3 className="truncate font-display text-lg font-bold leading-tight">{instance.name}</h3>
-          <p className="mt-0.5 truncate text-[13px] text-mute">{instanceLabel(instance)}</p>
+          <p className="mt-0.5 truncate text-[13px] text-mute">
+            <InstanceLabel instance={instance} />
+          </p>
           {instance.modpack && (
             <p className="mt-0.5 flex items-center gap-1 truncate text-xs text-mute-2">
               <Package size={11} aria-hidden="true" />
@@ -169,15 +172,18 @@ function InstanceCard({ instance, now, view, onPlay, onStop, onOpenFolder, onEdi
           aria-disabled={busy}
           aria-label={view.kind === "running" ? `Stop ${instance.name}` : busy ? `${instance.name}: ${view.label}` : `Play ${instance.name}`}
           className={cn(
-            "relative flex h-10 flex-1 items-center justify-center gap-2 overflow-hidden rounded-full text-sm font-bold transition-transform duration-200 ease-out-expo",
+            "relative flex h-10 flex-1 items-center justify-center gap-2 rounded-full text-sm font-bold transition-transform duration-200 ease-out-expo",
             view.kind === "running"
               ? "border border-moss/40 bg-moss/12 text-moss-soft hover:bg-moss/20"
-              : "bg-cream text-ink-900 shadow-[0_10px_30px_-10px_rgba(244,238,228,0.45)]",
+              : "tail bg-cream text-ink-900 shadow-[0_10px_30px_-10px_rgba(244,238,228,0.45)] [--tail:20px]",
             !busy && "hover:scale-[1.02] active:scale-[0.97]",
+            view.kind !== "running" && !busy && "wag",
           )}
         >
           {busy && view.progress !== null && (
-            <span aria-hidden="true" className="absolute inset-0 origin-left bg-cream-400/80 transition-transform duration-150" style={{ transform: `scaleX(${view.progress})` }} />
+            <span aria-hidden="true" className="absolute inset-0 overflow-hidden rounded-[inherit]">
+              <span className="absolute inset-0 origin-left bg-cream-400/80 transition-transform duration-150" style={{ transform: `scaleX(${view.progress})` }} />
+            </span>
           )}
           <span className="relative flex items-center gap-2 tabular-nums">
             {busy ? (

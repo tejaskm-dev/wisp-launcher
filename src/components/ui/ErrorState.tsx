@@ -8,7 +8,7 @@ export function ErrorState({ title, body, onRetry }: { title: string; body: stri
       role="alert"
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-[20px] border border-cream/8 bg-ink-800 p-4"
+      className="wisp-surface flex flex-wrap items-center gap-x-4 gap-y-3 rounded-[20px] p-4"
     >
       <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-coral/10 text-coral">
         <WifiOff size={20} aria-hidden="true" />

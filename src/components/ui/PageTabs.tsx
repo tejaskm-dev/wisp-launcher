@@ -28,8 +28,8 @@ export function PageTabs({ tabs, current, label }: { tabs: PageTab[]; current: P
                 if (!active) navigate(tab.id);
               }}
               className={cn(
-                "flex items-center gap-2 rounded-full px-4 py-1.5 text-[13px] font-bold transition-colors duration-200",
-                active ? "bg-cream text-ink-900 shadow-[0_6px_18px_-8px_rgba(244,238,228,0.6)]" : "text-cream-300 hover:bg-cream/8 hover:text-cream",
+                "relative flex items-center gap-2 rounded-full px-4 py-1.5 text-[13px] font-bold transition-colors duration-200",
+                active ? "tail bg-cream text-ink-900 shadow-[0_6px_18px_-8px_rgba(244,238,228,0.6)] [--tail:16px]" : "text-cream-300 hover:bg-cream/8 hover:text-cream",
               )}
             >
               {tab.label}

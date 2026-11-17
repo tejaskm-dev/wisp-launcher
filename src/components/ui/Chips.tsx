@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { cn } from "../../lib/cn";
+import { Sparkle } from "../brand/Sparkle";
 
 export interface ChipOption<T extends string> {
   value: T;
   label: string;
 }
 
-/** A single-choice row of filter chips: every option visible, the chosen one filled in. */
+/** A single-choice row of filter chips: every option visible, the chosen one filled in and marked with the spark. */
 export function Chips<T extends string>({
   label,
   value,
@@ -30,10 +31,11 @@ export function Chips<T extends string>({
             aria-checked={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-9 rounded-full border px-3.5 text-[13px] font-bold transition-colors duration-200",
-              selected ? "border-cream bg-cream text-ink-900" : "border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
+              "flex h-9 items-center gap-1.5 rounded-full border px-3.5 text-[13px] font-bold transition-colors duration-200",
+              selected ? "border-cream bg-cream text-ink-900" : "lit border-cream/12 text-cream-300 hover:border-cream/30 hover:text-cream",
             )}
           >
+            {selected && <Sparkle className="-ml-0.5 size-2.5 text-ember" />}
             {option.label}
           </button>
         );

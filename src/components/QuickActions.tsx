@@ -25,7 +25,7 @@ export function QuickActions({ onAction }: { onAction: (id: QuickActionId) => vo
               <button
                 type="button"
                 onClick={() => onAction(action.id)}
-                className="group flex w-full items-center gap-3.5 rounded-2xl border border-cream/7 bg-ink-800 px-3.5 py-2.5 text-left transition-colors duration-200 hover:border-cream/15 hover:bg-ink-700"
+                className="wisp-surface lit group flex w-full items-center gap-3.5 rounded-2xl px-3.5 py-2.5 text-left transition-colors duration-200 hover:bg-ink-750"
               >
                 <span className={cn("grid size-9 shrink-0 place-items-center rounded-xl transition-transform duration-300 ease-out-expo group-hover:scale-110", action.tone)}>
                   <Icon size={18} strokeWidth={1.9} aria-hidden="true" />
