@@ -3,7 +3,8 @@
 //! watch it until it closes. Game files are shared, so a second instance of a version downloads
 //! nothing.
 
-mod download;
+pub mod class_cache;
+pub(crate) mod download;
 mod installer;
 pub(crate) mod java;
 pub mod macos;
@@ -41,6 +42,24 @@ const QUILT_META: &str = "https://meta.quiltmc.org/v3/versions/loader";
 const RESOURCES: &str = "https://resources.download.minecraft.net";
 /// How many lines of the game's output to keep for a crash report.
 const LOG_TAIL: usize = 400;
+/// authlib-injector, the Java agent that sends the game's skin questions to Wisp's skin server
+/// for offline accounts. Pinned to this build (file, address, SHA-1, size), checked on download;
+/// its own site and GitHub release carry the same file.
+const AUTHLIB_INJECTOR: (&str, &str, &str, u64) = (
+    "authlib-injector-1.2.8.jar",
+    "https://authlib-injector.yushi.moe/artifact/56/authlib-injector-1.2.8.jar",
+    "0e0e66d8a4f91a26f33b9c09f5cdffce4a11f0b8",
+    349_681,
+);
+/// The garbage collector settings Mojang's own launcher starts the game with.
+const GC_FLAGS: [&str; 6] = [
+    "-XX:+UnlockExperimentalVMOptions",
+    "-XX:+UseG1GC",
+    "-XX:G1NewSizePercent=20",
+    "-XX:G1ReservePercent=20",
+    "-XX:MaxGCPauseMillis=50",
+    "-XX:G1HeapRegionSize=32M",
+];
 /// Lines that mean the game window is up.
 const WINDOW_UP_MARKERS: [&str; 3] = [
     "Backend library",
@@ -199,6 +218,9 @@ pub struct LaunchOptions {
     pub hooks: Hooks,
     /// A world or server to go straight into.
     pub quick_play: Option<QuickPlay>,
+    /// For an offline account: Wisp's skin server, which the game asks for skins through
+    /// authlib-injector (see `skin_server`).
+    pub skin_server: Option<crate::skin_server::SkinServer>,
 }
 
 /// Where the game goes as soon as it opens.
@@ -369,6 +391,16 @@ pub async fn prepare(
         .ok_or_else(|| LaunchError::BadVersion("no asset index listed".into()))?;
     let assets = AssetIndex::load(client, &files.assets(), &asset_ref).await?;
     downloads.extend(assets.downloads(&files.assets()));
+    let injector = files.root.join("authlib-injector").join(AUTHLIB_INJECTOR.0);
+    if options.skin_server.is_some() {
+        downloads.push(Download {
+            url: AUTHLIB_INJECTOR.1.to_string(),
+            path: injector.clone(),
+            sha1: Some(AUTHLIB_INJECTOR.2.to_string()),
+            size: Some(AUTHLIB_INJECTOR.3),
+            executable: false,
+        });
+    }
 
     let (java_binary, runtime_plan) = match java_ready.or(custom_java) {
         Some(java) => (java, None),
@@ -469,12 +501,19 @@ pub async fn prepare(
     ]);
 
     let (game_raw, jvm_raw) = version.raw_arguments(&env);
-    let mut jvm_args = vec![
-        format!("-Xmx{}M", options.memory_mb),
-        "-XX:+UseG1GC".to_string(),
-        "-XX:MaxGCPauseMillis=50".to_string(),
-    ];
+    let mut jvm_args = vec![format!("-Xmx{}M", options.memory_mb)];
+    // The official launcher's garbage collector settings: short, even pauses, so frames don't hitch.
+    jvm_args.extend(GC_FLAGS.iter().map(|flag| flag.to_string()));
+    // Classes Java has already parsed and checked, mapped straight in (see class_cache).
+    class_cache::ensure_base_archive(&java_binary, &files.runtimes()).await;
+    if let Some(flag) = class_cache::flag(&options.game_dir, &java_binary, java_major, instance.loader, &classpath) {
+        jvm_args.push(flag);
+    }
     // The player's own come after Wisp's defaults, so theirs win (Java takes the last -Xmx).
+    // Skins for offline accounts, from Wisp's skin server.
+    if let Some(server) = &options.skin_server {
+        jvm_args.extend(server.jvm_args(&injector));
+    }
     jvm_args.extend(options.jvm_args.iter().cloned());
     jvm_args.extend(jvm_raw.iter().map(|argument| substitute(argument, &values)));
     let mut game_args: Vec<String> = game_raw

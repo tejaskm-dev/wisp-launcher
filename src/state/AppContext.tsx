@@ -45,7 +45,14 @@ export interface AppContextValue {
   /** Modpack installs running in the background, by job id. */
   installs: Record<string, InstallEvent>;
   startModpackInstall: (target: InstallTarget) => void;
+  /** Installs a modpack file (a .mrpack, or a CurseForge zip) as a new instance, in the background. */
+  startModpackFileInstall: (path: string, title: string) => void;
   dismissInstall: (jobId: string) => void;
+  /**
+   * Brings in files you have (dropped, or from a file picker when none are given): modpacks become
+   * instances, mods and packs go into one (`instanceId` comes first in the list when given).
+   */
+  importFiles: (files?: string[] | null, instanceId?: string | null) => void;
   /** Goes up whenever the journal changes, so pages showing it reload. */
   journalVersion: number;
   now: number;

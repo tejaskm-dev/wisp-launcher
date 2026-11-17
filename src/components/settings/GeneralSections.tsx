@@ -18,13 +18,13 @@ const START_PAGES: { value: StartPage; label: string }[] = [
 const WHILE_PLAYING: { value: WhilePlaying; label: string }[] = [
   { value: "keep-open", label: "Keep it open" },
   { value: "minimize", label: "Minimize it" },
-  { value: "hide", label: "Hide it" },
+  { value: "hide", label: "Close it" },
 ];
 
 const WHILE_PLAYING_NOTES: Record<WhilePlaying, string> = {
   "keep-open": "Wisp stays where it is, so you can watch a download or start another instance.",
   minimize: "Wisp tucks itself away while you play and comes back when the game closes.",
-  hide: "Wisp's window closes to leave the game more memory, and comes back when you quit so your worlds can sync.",
+  hide: "Wisp closes while you play, leaving the game the memory it used, and opens again where you were when you quit, backing up and syncing your worlds. Its tray icon brings it back sooner.",
 };
 
 const INTRO_MODES: SegmentOption<IntroMode>[] = [

@@ -46,8 +46,8 @@ export function useLatest<T>(value: T) {
   return ref;
 }
 
-/** Tracks whether a horizontal scroller has more content before or after the visible part. */
-export function useScrollEdges<T extends HTMLElement>() {
+/** Tracks whether a scroller (sideways by default) has more content before or after the visible part. */
+export function useScrollEdges<T extends HTMLElement>(axis: "x" | "y" = "x") {
   const ref = useRef<T>(null);
   const [edges, setEdges] = useState({ start: false, end: false });
 
@@ -55,19 +55,22 @@ export function useScrollEdges<T extends HTMLElement>() {
     const el = ref.current;
     if (!el) return;
     const update = () => {
-      const start = el.scrollLeft > 4;
-      const end = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
+      const [offset, size, total] = axis === "x" ? [el.scrollLeft, el.clientWidth, el.scrollWidth] : [el.scrollTop, el.clientHeight, el.scrollHeight];
+      const start = offset > 4;
+      const end = offset + size < total - 4;
       setEdges((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
     };
     update();
     el.addEventListener("scroll", update, { passive: true });
+    // Its size changing, or what's inside it (instances coming and going), can move the edges.
     const observer = new ResizeObserver(update);
     observer.observe(el);
+    for (const child of el.children) observer.observe(child);
     return () => {
       el.removeEventListener("scroll", update);
       observer.disconnect();
     };
-  }, []);
+  }, [axis]);
 
   return { ref, edges };
 }

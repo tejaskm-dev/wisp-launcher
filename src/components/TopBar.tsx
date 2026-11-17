@@ -38,6 +38,7 @@ export function TopBar({ sync, onOpenSync, revealed, query, onQueryChange }: Top
   return (
     <m.header
       data-tauri-drag-region
+      data-top-bar
       initial={false}
       animate={revealed ? { opacity: 1, y: 0 } : { opacity: 0, y: -8 }}
       transition={{ duration: 0.45, ease: "easeOut", delay: revealed ? 0.12 : 0 }}

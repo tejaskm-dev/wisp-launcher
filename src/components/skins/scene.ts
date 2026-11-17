@@ -28,13 +28,15 @@ import {
   RingGeometry,
   ShaderMaterial,
   SphereGeometry,
+  type Sprite,
+  type SpriteMaterial,
   type Material,
   type Texture,
 } from "three";
 import type { SkinViewer } from "skinview3d";
 import { WispGhost, type Playmate } from "./ghost";
 import { ParticleSystem } from "./particles";
-import { BLOCK, GROUND, World, at, blockMaterial, box, cross, cutoutMaterial, glowMaterial, makeTextures, paint, seeded } from "./voxel";
+import { BLOCK, GROUND, World, at, blobShadow, blockMaterial, box, cross, cutoutMaterial, glowMaterial, halo, makeTextures, paint, seeded } from "./voxel";
 
 export { BLOCK, GROUND };
 export type StageMode = "scene" | "void";
@@ -72,6 +74,8 @@ function noise(x: number, y: number, z: number, seed = 1): number {
 const STATUE = { x: 0, z: -11, rx: 3.1, rz: 2.6, height: 7 };
 /** The ember sparkle at the statue's upper left, where it sits on the logo. */
 const SPARKLE = { x: -4.6, y: 6.6, z: -11 };
+/** How strongly the moon glows at night (the glow fades out with the island). */
+const MOON_GLOW = 0.5;
 
 /** Everything that isn't a full block: plants, chains, slabs, hanging lights. */
 interface Decor {
@@ -308,6 +312,10 @@ export class StageScene {
   private readonly motes = new ParticleSystem("motes", 2);
   private readonly lights: { light: DirectionalLight | PointLight | HemisphereLight; scene: number; void: number }[] = [];
   private readonly fog: Fog;
+  private readonly floor: Mesh;
+  private readonly moonGlow: Sprite;
+  private readonly playerShadow = blobShadow(26);
+  private readonly ghostShadow = blobShadow(18);
   readonly ghost = new WispGhost();
   private mode: StageMode = "scene";
   /** 0 on the island, 1 in the void; eases between. */
@@ -336,8 +344,8 @@ export class StageScene {
       deepslate: plain(t.deepslate),
       deepslateTiles: plain(t.deepslateTiles),
       mossyCobble: plain(t.mossyCobble),
-      calcite: keep(new MeshLambertMaterial({ map: t.calcite, emissive: new Color("#f4eee4"), emissiveMap: t.calcite, emissiveIntensity: 0.04 })),
-      calcitePolished: keep(new MeshLambertMaterial({ map: t.calcitePolished, emissive: new Color("#f4eee4"), emissiveMap: t.calcitePolished, emissiveIntensity: 0.04 })),
+      calcite: plain(t.calcite),
+      calcitePolished: plain(t.calcitePolished),
       calciteMossy: plain(t.calciteMossy),
       moonstone: plain(t.moonstone),
       log: [logSide, logSide, logTop, logTop, logSide, logSide],
@@ -357,12 +365,11 @@ export class StageScene {
     buildIslet(far, 38, -3, -52, 5, 52, false);
     buildIslet(far, 26, 6, -30, 3, 53, false);
     const see = new Set(["leavesCrimson", "leavesEmber", "leavesGold", "water"]);
-    const cast = new Set(["log", "leavesCrimson", "leavesEmber", "leavesGold", "calcite", "calcitePolished", "calciteMossy", "deepslate", "deepslateTiles", "lantern", "moss", "mossyCobble", "stone", "andesite"]);
-    world.build(this.island, materials, { see, cast });
-    far.build(this.island, materials, { see, cast: new Set() });
+    world.build(this.island, materials, { see });
+    far.build(this.island, materials, { see });
 
     // ── Decor: plants, vines, chains, hanging lights, lantern roofs ──
-    const instanced = (geometry: BufferGeometry, material: Material, list: { x: number; y: number; z: number; turn?: number }[], offset: [number, number, number], shadow = false) => {
+    const instanced = (geometry: BufferGeometry, material: Material, list: { x: number; y: number; z: number; turn?: number }[], offset: [number, number, number]) => {
       if (list.length === 0) return;
       const mesh = new InstancedMesh(geometry, material, list.length);
       const matrix = new Matrix4();
@@ -371,18 +378,11 @@ export class StageScene {
         matrix.makeRotationY(item.turn ?? 0).setPosition(x + offset[0], y + offset[1], z + offset[2]);
         mesh.setMatrixAt(index, matrix);
       });
-      mesh.castShadow = shadow;
-      mesh.receiveShadow = true;
       this.island.add(mesh);
     };
     const plantShape = cross(BLOCK);
     for (const kind of ["tallGrass", "fern", "moonBlossom", "emberFlower"] as const) {
-      const map = t[kind];
-      const material =
-        kind === "moonBlossom"
-          ? keep(new MeshLambertMaterial({ map, alphaTest: 0.5, side: DoubleSide, emissive: new Color("#fff4e0"), emissiveMap: map, emissiveIntensity: 0.6 }))
-          : keep(cutoutMaterial(map));
-      instanced(plantShape, material, decor.plants.filter((plant) => plant.kind === kind), [0, -BLOCK / 2, 0]);
+      instanced(plantShape, keep(cutoutMaterial(t[kind])), decor.plants.filter((plant) => plant.kind === kind), [0, -BLOCK / 2, 0]);
     }
     const vineMaterial = keep(cutoutMaterial(t.vines));
     for (const length of [1, 2, 3]) {
@@ -390,11 +390,20 @@ export class StageScene {
       instanced(shape, vineMaterial, decor.vines.filter((vine) => vine.length === length), [0, -BLOCK / 2 - (BLOCK * length) / 2, 0]);
     }
     instanced(cross(4, BLOCK), keep(cutoutMaterial(t.chain)), decor.chains, [0, -BLOCK / 2, 0]);
-    instanced(box(8, 9, 8), keep(glowMaterial(t.wispLight, 1.3)), decor.hanging, [0, 3, 0], true);
-    instanced(box(BLOCK + 4, 6, BLOCK + 4), keep(blockMaterial(t.darkPlanks)), decor.slabs, [0, -BLOCK / 2 + 3, 0], true);
+    instanced(box(BLOCK + 4, 6, BLOCK + 4), keep(blockMaterial(t.darkPlanks)), decor.slabs, [0, -BLOCK / 2 + 3, 0]);
+    // The hanging lights, each glowing. There are only a couple, so they're plain meshes: those
+    // share the glowing blocks' shader, where an instanced pair would need one of its own.
+    const lightShape = box(8, 9, 8);
+    const lightMaterial = keep(glowMaterial(t.wispLight, 1.15));
+    for (const light of decor.hanging) {
+      const [x, y, z] = at(light.x, light.y, light.z);
+      const lamp = new Mesh(lightShape, lightMaterial);
+      lamp.position.set(x, y + 3, z);
+      this.island.add(lamp, this.glow("#fff1dc", 54, 0.42, x, y + 3, z));
+    }
 
     // ── The ember sparkle beside the statue: a four-point star of glowing blocks ──
-    const emberMaterial = keep(glowMaterial(t.ember, 1.3));
+    const emberMaterial = keep(glowMaterial(t.ember, 1.15));
     const cube = new BoxGeometry(BLOCK * 0.8, BLOCK * 0.8, BLOCK * 0.8);
     const arms: [number, number][] = [
       [0, 0],
@@ -412,9 +421,9 @@ export class StageScene {
       const scale = ax === 0 && ay === 0 ? 1.35 : Math.abs(ax) === 2 || Math.abs(ay) === 2 ? 0.65 : 1;
       piece.scale.setScalar(scale);
       piece.position.set(ax * BLOCK * 0.8, ay * BLOCK * 0.8, 0);
-      piece.castShadow = true;
       this.sparkle.add(piece);
     }
+    this.sparkle.add(this.glow("#ff5a4a", 150, 0.42));
     const [sx, sy, sz] = at(SPARKLE.x, SPARKLE.y, SPARKLE.z);
     this.sparkle.position.set(sx, sy, sz);
     this.island.add(this.sparkle);
@@ -429,17 +438,19 @@ export class StageScene {
       const glow = new PointLight("#ff8a5c", 0, 140, 2);
       const [lx, ly, lz] = at(side * 3, 2, -2);
       glow.position.set(lx, ly, lz + 10);
-      this.island.add(glow);
+      this.island.add(glow, this.glow("#ff8a5c", 78, 0.5, lx, ly, lz + 2));
       this.lights.push({ light: glow, scene: 700, void: 0 });
     }
 
     // ── Will-o'-wisps drifting over the island ──
-    const wispGlow = keep(new MeshBasicMaterial({ color: new Color(2.2, 2.1, 1.9), fog: false }));
-    const emberGlow = keep(new MeshBasicMaterial({ color: new Color(2.4, 0.9, 0.7), fog: false }));
+    const wispGlow = keep(new MeshBasicMaterial({ color: new Color("#fffaf0"), fog: false }));
+    const emberGlow = keep(new MeshBasicMaterial({ color: new Color("#ff9a7a"), fog: false }));
     const wispShape = new BoxGeometry(3, 3, 3);
     const drift = seeded(77);
     for (let index = 0; index < 11; index += 1) {
-      const mesh = new Mesh(wispShape, index % 4 === 3 ? emberGlow : wispGlow);
+      const ember = index % 4 === 3;
+      const mesh = new Mesh(wispShape, ember ? emberGlow : wispGlow);
+      mesh.add(this.glow(ember ? "#ff7a5c" : "#fff2dc", 30, 0.6));
       this.wisps.push({ mesh, seed: drift() * 100, radius: 50 + drift() * 110, height: 10 + drift() * 70, speed: 0.08 + drift() * 0.12 });
       this.island.add(mesh);
     }
@@ -529,16 +540,19 @@ export class StageScene {
       }),
     );
     this.textures.push(moonTexture);
-    this.moonMaterial = keep(new MeshBasicMaterial({ map: moonTexture, transparent: true, fog: false, depthWrite: false, color: new Color(1.4, 1.36, 1.3) }));
+    this.moonMaterial = keep(new MeshBasicMaterial({ map: moonTexture, transparent: true, fog: false, depthWrite: false }));
     const moon = new Mesh(new PlaneGeometry(190, 190), this.moonMaterial);
     moon.position.set(217, 568, -1500);
     moon.lookAt(0, 0, 0);
     moon.renderOrder = -8;
-    this.sky.add(moon);
+    // The moon's glow, standing in for the bloom it used to get; most of it is behind the disc.
+    this.moonGlow = this.glow("#e8e4ff", 640, MOON_GLOW, 217, 568, -1510);
+    this.moonGlow.renderOrder = -8.5;
+    this.sky.add(this.moonGlow, moon);
     this.root.add(this.sky);
 
     // ── A sea of clouds below, drifting ──
-    const cloudMaterial = keep(new MeshLambertMaterial({ map: t.cloud, color: new Color("#b9b4d6"), transparent: true, opacity: 0.92 }));
+    const cloudMaterial = keep(new MeshLambertMaterial({ map: t.cloud, color: new Color("#b9b4d6") }));
     const cells: [number, number][] = [];
     for (let x = -36; x <= 36; x += 1) for (let z = -36; z <= 24; z += 1) if (noise(x * 0.18, 9, z * 0.18, 61) > 0.52) cells.push([x, z]);
     this.clouds = new InstancedMesh(new BoxGeometry(48, 14, 48), cloudMaterial, cells.length);
@@ -566,21 +580,18 @@ export class StageScene {
       blending: AdditiveBlending,
       fog: false,
     });
-    const floor = new Mesh(new RingGeometry(0.01, 60, 64, 1), this.floorMaterial);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = GROUND - 0.05;
-    this.root.add(floor);
+    // Hidden on the island, so its shader is only compiled the first time free roam opens.
+    this.floor = new Mesh(new RingGeometry(0.01, 60, 64, 1), this.floorMaterial);
+    this.floor.rotation.x = -Math.PI / 2;
+    this.floor.position.y = GROUND - 0.05;
+    this.floor.visible = false;
+    this.root.add(this.floor);
 
-    // ── Light: moonlight with shadows, a night sky fill, studio lights for the void ──
+    // ── Light: moonlight, a night sky fill, studio lights for the void. No shadow maps: like the
+    // game, mobs get a soft spot on the ground instead (blobShadow), and corners get shading. ──
     const moonlight = new DirectionalLight("#c4d0ff", 0);
     moonlight.position.set(-160, 280, 200);
     moonlight.target.position.set(0, GROUND, -80);
-    moonlight.castShadow = true;
-    moonlight.shadow.mapSize.set(2048, 2048);
-    Object.assign(moonlight.shadow.camera, { left: -200, right: 200, top: 220, bottom: -200, near: 40, far: 900 });
-    moonlight.shadow.camera.updateProjectionMatrix();
-    moonlight.shadow.bias = -0.0005;
-    moonlight.shadow.normalBias = 0.8;
     this.root.add(moonlight, moonlight.target);
     this.lights.push({ light: moonlight, scene: 1.25, void: 0 });
     const night = new HemisphereLight("#7380c8", "#2c2430", 0);
@@ -601,14 +612,15 @@ export class StageScene {
     }
     this.root.add(this.effectLight);
 
-    this.root.add(this.ghost.object);
+    this.root.add(this.ghost.object, this.playerShadow, this.ghostShadow);
+    keep(this.playerShadow.material as Material);
+    keep(this.ghostShadow.material as Material);
     this.leaves.attach(this.island);
     this.motes.attach(this.island);
 
     this.fog = new Fog("#241a33", 500, 2100);
     viewer.scene.fog = this.fog;
     viewer.scene.add(this.root);
-    viewer.renderer.shadowMap.enabled = true;
     // The light riding with the camera keeps the skin readable at any distance.
     viewer.cameraLight.decay = 0;
     this.applyMode(0);
@@ -654,6 +666,26 @@ export class StageScene {
       system.update(dt);
     }
     this.ghost.update(dt, { ...playmate, roaming: this.mode === "void" });
+
+    // Spots on the ground under the player and the ghost, smaller and fainter the higher they are.
+    const head = playmate.head;
+    const playerLift = Math.max(0, head.y - 12);
+    this.playerShadow.position.set(head.x, GROUND + 0.05, head.z);
+    this.playerShadow.scale.setScalar(Math.max(0.55, 1 - playerLift / 40));
+    (this.playerShadow.material as MeshBasicMaterial).opacity = Math.max(0, 1 - playerLift / 22);
+    const ghost = this.ghost.object.position;
+    const ghostLift = Math.max(0, ghost.y - GROUND);
+    this.ghostShadow.position.set(ghost.x, GROUND + 0.05, ghost.z);
+    this.ghostShadow.scale.setScalar(Math.max(0.6, 1.25 - ghostLift / 80));
+    (this.ghostShadow.material as MeshBasicMaterial).opacity = Math.max(0, 0.85 - ghostLift / 70);
+  }
+
+  /** A soft glow sprite (in place of bloom), kept for disposal; positioned if given. */
+  private glow(color: string, size: number, strength: number, x = 0, y = 0, z = 0) {
+    const sprite = halo(color, size, strength);
+    sprite.position.set(x, y, z);
+    this.materials.push(sprite.material);
+    return sprite;
   }
 
   private applyMode(amount: number) {
@@ -665,7 +697,9 @@ export class StageScene {
     this.skyMaterial.uniforms.fade.value = 1 - k;
     this.starMaterial.uniforms.fade.value = 1 - k;
     this.moonMaterial.opacity = 1 - k;
+    (this.moonGlow.material as SpriteMaterial).opacity = MOON_GLOW * (1 - k);
     this.floorMaterial.uniforms.fade.value = k;
+    this.floor.visible = k > 0.001;
     this.fog.near = 500 + k * 1e5;
     this.fog.far = 2100 + k * 1e5;
     for (const { light, scene, void: inVoid } of this.lights) light.intensity = scene + (inVoid - scene) * k;

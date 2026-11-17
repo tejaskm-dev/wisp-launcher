@@ -1,7 +1,7 @@
 //! Installing a modpack as a new instance: read its index (Modrinth's `.mrpack` or CurseForge's
 //! zip with a `manifest.json`), make an instance with the pack's Minecraft version and loader,
 //! download every file it lists (checked against its SHA-1) and unpack its overrides (configs and
-//! the like).
+//! the like). The pack comes from Modrinth or CurseForge, or is a file you already have.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -75,6 +75,10 @@ pub enum ModpackError {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PackIndex {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version_id: Option<String>,
     files: Vec<PackFile>,
     dependencies: HashMap<String, String>,
 }
@@ -245,6 +249,137 @@ pub async fn install(
     })
 }
 
+/// What a modpack file makes, read from its index without installing anything.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSummary {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub game_version: String,
+    pub loader: Loader,
+    pub from: PackFormat,
+}
+
+/// Whose format a modpack file is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackFormat {
+    Modrinth,
+    CurseForge,
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Result<T, ModpackError> {
+    let mut entry = archive
+        .by_name(name)
+        .map_err(|_| ModpackError::BadPack(format!("no {name}")))?;
+    let mut text = String::new();
+    entry.read_to_string(&mut text)?;
+    serde_json::from_str(&text).map_err(|error| ModpackError::BadPack(error.to_string()))
+}
+
+/// Reads a modpack file's index: None when it isn't a modpack at all.
+pub fn summarize(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Result<PackSummary, ModpackError>> {
+    if archive.index_for_name("modrinth.index.json").is_some() {
+        return Some(read_json::<PackIndex>(archive, "modrinth.index.json").and_then(|index| {
+            let (game_version, loader, _) = target(&index.dependencies)?;
+            Ok(PackSummary { name: index.name, version: index.version_id, game_version, loader, from: PackFormat::Modrinth })
+        }));
+    }
+    if archive.index_for_name("manifest.json").is_some() {
+        // Other things ship a manifest.json too; a CurseForge pack's names a Minecraft version.
+        let manifest = read_json::<CurseManifest>(archive, "manifest.json").ok()?;
+        return Some(curse_target(&manifest.minecraft).map(|(loader, _)| PackSummary {
+            name: manifest.name,
+            version: manifest.version,
+            game_version: manifest.minecraft.version,
+            loader,
+            from: PackFormat::CurseForge,
+        }));
+    }
+    None
+}
+
+/// A modpack file to install as a new instance: Modrinth's `.mrpack`, or a CurseForge zip.
+pub struct FileRequest<'a> {
+    pub path: &'a Path,
+    pub concurrency: usize,
+    pub now_ms: i64,
+    /// Needed for a CurseForge pack, whose files come from CurseForge.
+    pub curseforge_key: Option<&'a str>,
+}
+
+/// Installs a modpack file as a new instance. A pack published on Modrinth (found by the file's
+/// SHA-1) is linked to its project, so it shows its icon and can update like one installed from
+/// Discover; any other keeps the name in its index. On failure, the half-made instance goes.
+pub async fn install_file(
+    client: &HttpClient,
+    instances: &InstanceStore,
+    request: FileRequest<'_>,
+    report: &(dyn Fn(InstallUpdate) + Send + Sync),
+) -> Result<Installed, ModpackError> {
+    report(InstallUpdate::Preparing);
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(request.path)?)
+        .map_err(|error| ModpackError::BadPack(error.to_string()))?;
+    let summary = summarize(&mut archive).ok_or_else(|| {
+        ModpackError::BadPack("it has neither Modrinth's modrinth.index.json nor CurseForge's manifest.json".into())
+    })??;
+    let file_name = request
+        .path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Modpack".into());
+    let name = summary.name.clone().filter(|name| !name.trim().is_empty()).unwrap_or(file_name);
+
+    if summary.from == PackFormat::CurseForge {
+        let key = request.curseforge_key.ok_or(ModpackError::NoCurseForgeKey)?;
+        let manifest: CurseManifest = read_json(&mut archive, "manifest.json")?;
+        let (loader, loader_version) = curse_target(&manifest.minecraft)?;
+        let instance = instances.create_with(
+            NewInstance { name, game_version: manifest.minecraft.version.clone(), loader, loader_version: loader_version.clone(), icon: None },
+            loader_version,
+            None,
+            request.now_ms,
+        )?;
+        return match fill_curseforge(client, key, instances, &instance, &manifest, &mut archive, request.concurrency, report).await {
+            Ok(skipped) => Ok(Installed { instance, skipped }),
+            Err(error) => {
+                let _ = instances.delete(&instance.id);
+                Err(error)
+            }
+        };
+    }
+
+    let index: PackIndex = read_json(&mut archive, "modrinth.index.json")?;
+    let (game_version, loader, loader_version) = target(&index.dependencies)?;
+    let published = match crate::snapshots::hash_file(request.path) {
+        Ok(sha1) => match modrinth::version_by_hash(client, &sha1).await {
+            Ok(Some(version)) => modrinth::project(client, &version.project_id).await.ok().map(|project| (project, version)),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+    .filter(|(project, _)| project.project_type == ProjectType::Modpack);
+    let (name, icon, origin) = match published {
+        Some((project, version)) => (
+            project.title.clone(),
+            project.icon_url.clone(),
+            Some(ModpackOrigin { project_id: project.id, version_id: version.id, title: project.title, version_number: version.version_number }),
+        ),
+        None => (name, None, None),
+    };
+    let instance = instances.create_with(
+        NewInstance { name, game_version, loader, loader_version: loader_version.clone(), icon },
+        loader_version,
+        origin,
+        request.now_ms,
+    )?;
+    if let Err(error) = fill(client, instances, &instance, &index, &mut archive, request.concurrency, report).await {
+        let _ = instances.delete(&instance.id);
+        return Err(error);
+    }
+    Ok(Installed { instance, skipped: Vec::new() })
+}
+
 async fn fill(
     client: &HttpClient,
     instances: &InstanceStore,
@@ -327,6 +462,10 @@ fn unpack_overrides(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CurseManifest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
     minecraft: CurseMinecraft,
     #[serde(default)]
     files: Vec<CurseFileRef>,

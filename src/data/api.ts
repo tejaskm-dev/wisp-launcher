@@ -11,7 +11,10 @@ import type {
   HomeSnapshot,
   Instance,
   InstallEvent,
+  AddedFile,
+  InspectedFile,
   InstalledContent,
+  SpedUp,
   InstalledRuntime,
   JavaProbe,
   JournalEntry,
@@ -123,6 +126,27 @@ export const getCurseforgeCategories = (projectType: ProjectType) =>
 /** Starts a modpack install in the background; progress arrives through `onInstallEvent`. */
 export const installModpack = (projectId: string, versionId: string | null, title: string) =>
   call<string>("install_modpack", { projectId, versionId, title }, (p) => p.needsDesktop("Installing modpacks"));
+/** Installs a modpack file (a .mrpack, or a CurseForge zip) as a new instance; returns the job id. */
+export const installModpackFile = (path: string, title: string) =>
+  call<string>("install_modpack_file", { path, title }, (p) => p.needsDesktop("Installing modpack files"));
+/** Adds the performance mods to an instance (moving a vanilla one to Fabric first). */
+export const speedUpInstance = (instanceId: string) => call<SpedUp>("speed_up_instance", { instanceId }, (p) => p.needsDesktop("Speeding up instances"));
+/** A file picker for modpacks, mods and packs: the files picked, none if cancelled. */
+export const pickImportFiles = () => call<string[]>("pick_import_files", undefined, (p) => p.needsDesktop("Adding files"));
+/** What each file is, before anything is done with it. */
+export const inspectImportFiles = (paths: string[]) => call<InspectedFile[]>("inspect_import_files", { paths }, () => Promise.resolve(paths.map(guessFile)));
+
+/** The browser preview can't open files: it goes by the name alone. */
+function guessFile(path: string): InspectedFile {
+  const fileName = path.split(/[\\/]/).pop() ?? path;
+  const extension = fileName.split(".").pop()?.toLowerCase();
+  const kind = extension === "mrpack" ? "modpack" : extension === "jar" ? "mod" : "unknown";
+  const pack = kind === "modpack" ? { name: fileName.replace(/\.mrpack$/i, ""), version: null, gameVersion: "1.21.1", loader: "fabric" as const, from: "modrinth" as const } : null;
+  return { path, fileName, kind, name: null, version: null, loaders: kind === "mod" ? ["fabric"] : [], pack, problem: null };
+}
+/** Adds mods, resource packs and shader packs to an instance. */
+export const addContentFiles = (instanceId: string, files: string[]) =>
+  call<AddedFile[]>("add_content_files", { instanceId, files }, (p) => p.needsDesktop("Adding files"));
 export const getInstalls = () => call<InstallEvent[]>("get_installs", undefined, () => Promise.resolve([]));
 
 // ── Worlds ──

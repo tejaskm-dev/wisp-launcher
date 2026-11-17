@@ -1,4 +1,4 @@
-import { ChevronDown, Info, Search } from "lucide-react";
+import { ChevronDown, Info, PackagePlus, Search } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { createInstance, getLoaderGameVersions, getLoaderVersions, getVersions } from "../../data/api";
 import type { Loader, LoaderVersion } from "../../data/types";
@@ -65,7 +65,7 @@ function supportedVersions(loader: Loader) {
 
 /** Mount it fresh for each use (App keys it), so every open starts from a clean form. */
 export function NewInstanceDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { refreshHome, notify, navigate } = useApp();
+  const { refreshHome, notify, navigate, importFiles } = useApp();
   const [versions, retryVersions] = useResource(getVersions);
   const [name, setName] = useState("");
   const [loader, setLoader] = useState<Loader>("vanilla");
@@ -164,6 +164,17 @@ export function NewInstanceDialog({ open, onClose }: { open: boolean; onClose: (
       description="Its own Minecraft, with a version, mods and settings of its own."
       footer={
         <>
+          <button
+            type="button"
+            onClick={() => {
+              onClose();
+              importFiles();
+            }}
+            className="mr-auto flex items-center gap-2 rounded-full px-2 text-[13px] font-semibold text-cream-300 underline-offset-4 transition-colors hover:text-cream hover:underline"
+          >
+            <PackagePlus size={15} aria-hidden="true" />
+            From a modpack file
+          </button>
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>

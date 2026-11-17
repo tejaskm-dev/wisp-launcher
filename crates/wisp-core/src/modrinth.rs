@@ -696,6 +696,20 @@ pub async fn version(client: &HttpClient, id: &str) -> Result<ProjectVersion, Er
     Ok(raw.into())
 }
 
+/// The Modrinth version a file belongs to, found by the file's SHA-1; None if Modrinth doesn't
+/// have it (a file made by hand, or from somewhere else).
+pub async fn version_by_hash(client: &HttpClient, sha1: &str) -> Result<Option<ProjectVersion>, Error> {
+    let response = client
+        .get(format!("{API}/version_file/{}?algorithm=sha1", url_encode(sha1)))
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let raw: RawVersion = response.error_for_status()?.json().await?;
+    Ok(Some(raw.into()))
+}
+
 /// A Modrinth category, for the filter sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

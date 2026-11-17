@@ -1,4 +1,4 @@
-import { FolderOpen, LoaderCircle, Package, Pencil, Play, Plus, RotateCw, Square } from "lucide-react";
+import { FolderOpen, LoaderCircle, Package, PackagePlus, Pencil, Play, Plus, RotateCw, Square } from "lucide-react";
 import { useState } from "react";
 import { m } from "motion/react";
 import { Ghost } from "../components/brand/Ghost";
@@ -21,7 +21,7 @@ import { useApp } from "../state/AppContext";
 const GRID = "grid grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-4";
 
 export function InstancesPage() {
-  const { home, now, openNewInstance, notify, launches, play, stop } = useApp();
+  const { home, now, openNewInstance, importFiles, notify, launches, play, stop } = useApp();
   const [editing, setEditing] = useState<{ instance: Instance; open: boolean; session: number } | null>(null);
   const instances = home?.instances ?? null;
 
@@ -37,9 +37,14 @@ export function InstancesPage() {
         subtitle="Each instance is its own Minecraft: a game version, a mod loader, and the mods and settings that go with them."
         actions={
           instances && instances.length > 0 ? (
-            <Button icon={Plus} onClick={openNewInstance}>
-              New instance
-            </Button>
+            <>
+              <Button variant="secondary" icon={PackagePlus} onClick={() => importFiles()} title="A .mrpack or CurseForge modpack becomes a new instance; mods and packs go into one">
+                Add files
+              </Button>
+              <Button icon={Plus} onClick={openNewInstance}>
+                New instance
+              </Button>
+            </>
           ) : undefined
         }
       />
@@ -66,9 +71,14 @@ export function InstancesPage() {
           title="No instances yet"
           body="Make one to pick a Minecraft version and, if you like, a mod loader. Keep as many as you want, each with its own mods."
           actions={
-            <Button icon={Plus} onClick={openNewInstance}>
-              New instance
-            </Button>
+            <>
+              <Button icon={Plus} onClick={openNewInstance}>
+                New instance
+              </Button>
+              <Button variant="secondary" icon={PackagePlus} onClick={() => importFiles()}>
+                Add a modpack file
+              </Button>
+            </>
           }
         />
       ) : (

@@ -100,6 +100,7 @@ async fn main() {
             post_exit: env("WISP_POST"),
         },
         quick_play: env("WISP_WORLD").map(wisp_core::launch::QuickPlay::World),
+        skin_server: None,
     };
 
     let started = Instant::now();

@@ -10,3 +10,6 @@ src-tauri/gen/
 .DS_Store
 .idea/
 *.log
+
+# Written by the release workflow when updates are set up.
+src-tauri/tauri.updates.conf.json

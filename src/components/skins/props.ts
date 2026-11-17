@@ -20,7 +20,7 @@ import {
 } from "three";
 import { AURA_BURST_AT, DANCE_BEAT, THRONE_Z, clamp01, smooth } from "./emotes";
 import { ParticleSystem } from "./particles";
-import { BLOCK, GROUND, blockMaterial, box, cross, glowMaterial, makeTextures, seeded, type Textures } from "./voxel";
+import { BLOCK, GROUND, blockMaterial, box, cross, glowMaterial, halo, makeTextures, seeded, type Textures } from "./voxel";
 
 export interface Prop {
   readonly object: Object3D;
@@ -90,6 +90,7 @@ export class ThroneProp implements Prop {
   private readonly puff = new ParticleSystem("puff");
   private readonly spark = new ParticleSystem("spark", 1.7);
   private readonly crest = new Group();
+  private readonly crestGlow = halo("#ff6a52", 64, 0.5);
   private readonly light: PointLight | null;
   private time = 0;
   private leaving: number | null = null;
@@ -125,8 +126,6 @@ export class ThroneProp implements Prop {
     for (const block of blocks) {
       const mesh = new Mesh(this.shape(box(...block.size)), materials[block.kind]);
       mesh.position.set(block.x, block.y, block.z);
-      mesh.castShadow = block.size[1] > 1;
-      mesh.receiveShadow = true;
       this.place(mesh);
     }
 
@@ -145,9 +144,9 @@ export class ThroneProp implements Prop {
     for (const [x, y, size, depth] of star) {
       const mesh = new Mesh(this.shape(box(size, size, depth)), materials.ember);
       mesh.position.set(x, y, 0);
-      mesh.castShadow = true;
       this.crest.add(mesh);
     }
+    this.crest.add(this.crestGlow);
     this.crest.position.set(0, top + 4 + 9, back);
     this.place(this.crest);
 
@@ -237,6 +236,7 @@ export class ThroneProp implements Prop {
     this.puff.dispose();
     this.spark.dispose();
     for (const geometry of this.geometries) geometry.dispose();
+    this.crestGlow.material.dispose();
     if (this.light) this.light.intensity = 0;
   }
 }
@@ -301,6 +301,7 @@ export class AuraProp implements Prop {
   private readonly materials: MeshBasicMaterial[] = [];
   private readonly shape: BufferGeometry;
   private readonly embers = new ParticleSystem("embers", 1.8);
+  private readonly glow = halo("#ff6a3a", 120, 0);
   private readonly spark = new ParticleSystem("spark", 1.8);
   private readonly puff = new ParticleSystem("puff");
   private readonly light: PointLight | null;
@@ -334,6 +335,8 @@ export class AuraProp implements Prop {
     this.embers.area = { x: 0, y: GROUND, z: 0, spread: RING_IN };
     this.embers.emitting = false;
     for (const system of [this.embers, this.spark, this.puff]) system.attach(this.object);
+    this.glow.position.set(0, GROUND + 10, 0);
+    this.object.add(this.glow);
     this.light = context.light;
   }
 
@@ -384,6 +387,9 @@ export class AuraProp implements Prop {
       this.light.position.set(0, -8, 12);
       this.light.intensity = ((since < 0 ? 60 + 140 * smooth(t / AURA_BURST_AT) : 340) + Math.sin(t * 13) * 40 + flash) * fading;
     }
+    // The glow at the feet, standing in for bloom: it gathers, flares at the burst, then burns on.
+    this.glow.material.opacity = ((since < 0 ? 0.12 + 0.2 * smooth(t / AURA_BURST_AT) : 0.32) + flare * 0.45 + Math.sin(t * 11) * 0.03) * fading;
+    this.glow.scale.setScalar(radius * 4.6);
     return this.leaving === null || t - this.leaving < 0.45 || this.embers.alive || this.spark.alive;
   }
 
@@ -399,6 +405,7 @@ export class AuraProp implements Prop {
     this.object.removeFromParent();
     for (const system of [this.embers, this.spark, this.puff]) system.dispose();
     this.shape.dispose();
+    this.glow.material.dispose();
     for (const material of this.materials) material.dispose();
     for (const texture of this.textures) texture.dispose();
     if (this.light) this.light.intensity = 0;

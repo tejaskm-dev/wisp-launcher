@@ -1,6 +1,5 @@
-import { useEffect, useRef } from "react";
-import { DepthTexture, FloatType, HalfFloatType, Vector2, Vector3, WebGLRenderTarget } from "three";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { useEffect, useRef, useState } from "react";
+import { Vector3 } from "three";
 import { FunctionAnimation, SkinViewer, type PlayerObject } from "skinview3d";
 import type { SkinModel } from "../../data/types";
 import { cn } from "../../lib/cn";
@@ -31,6 +30,8 @@ interface SkinStageProps {
   replay?: number;
   /** Changing it eases the camera back to where it started. */
   recenter?: number;
+  /** Called once the first frame is drawn (the stage fades in then). */
+  onReady?: () => void;
 }
 
 /** Seconds to ease from one emote into the next. */
@@ -121,12 +122,29 @@ function limits(viewer: SkinViewer, framing: Framing) {
   controls.enablePan = framing.pan;
 }
 
+/** A SkinViewer that says when it has drawn its first frame. */
+class StageViewer extends SkinViewer {
+  onFirstFrame: (() => void) | null = null;
+
+  override render() {
+    super.render();
+    const first = this.onFirstFrame;
+    this.onFirstFrame = null;
+    first?.();
+  }
+}
+
 /**
  * The player in 3D: standing on a little island at night (or in free roam's void), emoting, or
  * sitting on a throne. One WebGL view: it stops drawing while Wisp is in the background and is
  * freed when it leaves the page.
  */
-export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = null, onViewer, className, zoom = 0.86, setting = "plain", replay = 0, recenter = 0 }: SkinStageProps) {
+export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = null, onViewer, className, zoom = 0.86, setting = "plain", replay = 0, recenter = 0, onReady }: SkinStageProps) {
+  const [shown, setShown] = useState(false);
+  // Whether the stage has started drawing (it waits for the page to show first).
+  const drawing = useRef(false);
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const holder = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewerRef = useRef<SkinViewer | null>(null);
@@ -142,14 +160,22 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
     const element = canvas.current;
     const box = holder.current;
     if (!element || !box) return;
-    const viewer = new SkinViewer({
+    const viewer = new StageViewer({
       canvas: element,
       width: Math.max(1, box.clientWidth),
       height: Math.max(1, box.clientHeight),
       pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       fov: 40,
       zoom,
+      renderPaused: true,
     });
+    viewer.onFirstFrame = () => {
+      setShown(true);
+      onReadyRef.current?.();
+    };
+    // Checking each shader as it's built costs a round trip to the GPU apiece; development keeps
+    // the check for its error messages.
+    viewer.renderer.debug.checkShaderErrors = import.meta.env.DEV;
     viewer.globalLight.intensity = 2.4;
     viewer.cameraLight.intensity = 0.9;
     viewer.controls.enablePan = false;
@@ -159,18 +185,8 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
     viewerRef.current = viewer;
 
     let stage: StageScene | null = null;
-    let bloom: UnrealBloomPass | null = null;
-    let target: WebGLRenderTarget | null = null;
     if (scenic.current) {
       stage = new StageScene(viewer);
-      // Buffers that hold light brighter than white, so only lanterns, ember and fire bloom.
-      const size = viewer.renderer.getDrawingBufferSize(new Vector2());
-      target = new WebGLRenderTarget(size.x, size.y, { type: HalfFloatType, depthTexture: new DepthTexture(size.x, size.y, FloatType) });
-      viewer.composer.reset(target);
-      bloom = new UnrealBloomPass(new Vector2(size.x, size.y), 0.42, 0.32, 1.1);
-      viewer.composer.insertPass(bloom, 1);
-      const parts = viewer.playerObject.skin;
-      for (const part of [parts.head, parts.body, parts.rightArm, parts.leftArm, parts.rightLeg, parts.leftLeg]) part.innerLayer.castShadow = true;
       const framing = setting === "void" ? FRAMES.void : FRAMES.scene;
       viewer.camera.position.copy(framing.position);
       viewer.controls.target.copy(framing.target);
@@ -241,12 +257,23 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
     // Stop drawing while Wisp isn't the focused window (the rest of the app pauses then too).
     const root = document.documentElement;
     const idle = new MutationObserver(() => {
-      viewer.renderPaused = root.hasAttribute("data-idle");
+      if (drawing.current) viewer.renderPaused = root.hasAttribute("data-idle");
     });
     idle.observe(root, { attributes: true, attributeFilter: ["data-idle"] });
-    viewer.renderPaused = root.hasAttribute("data-idle");
+    // The first frame builds the stage's shaders, which holds everything up for a moment. So it
+    // waits until the page has painted: the page shows at once and the stage fades in after.
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        drawing.current = true;
+        viewer.renderPaused = root.hasAttribute("data-idle");
+        // In the background it shows one still frame.
+        if (viewer.renderPaused) viewer.render();
+      });
+    });
 
     return () => {
+      cancelAnimationFrame(frame);
+      drawing.current = false;
       resize.disconnect();
       idle.disconnect();
       viewer.controls.removeEventListener("start", stopGlide);
@@ -255,10 +282,8 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
       run.props = { current: null, leaving: [] };
       stage?.dispose();
       stageRef.current = null;
-      bloom?.dispose();
       viewerRef.current = null;
       viewer.dispose();
-      target?.dispose();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -297,9 +322,10 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
     const viewer = viewerRef.current;
     if (!viewer || !skin) return;
     const options = { model: model === "slim" ? ("slim" as const) : ("default" as const) };
-    // Paused (Wisp in the background), the stage doesn't move but still shows the skin.
+    // Paused (Wisp in the background), the stage doesn't move but still shows the skin; before it
+    // starts drawing, its first frame will.
     const still = () => {
-      if (viewerRef.current === viewer && viewer.renderPaused) viewer.render();
+      if (viewerRef.current === viewer && drawing.current && viewer.renderPaused) viewer.render();
     };
     if (typeof skin === "string") void viewer.loadSkin(skin, options).then(still, () => {});
     else {
@@ -361,7 +387,10 @@ export function SkinStage({ skin, model, emote, autoRotate = false, nameTag = nu
 
   return (
     <div ref={holder} className={cn("relative size-full", className)}>
-      <canvas ref={canvas} className="absolute inset-0 size-full touch-none outline-none" />
+      <canvas
+        ref={canvas}
+        className={cn("absolute inset-0 size-full touch-none outline-none transition-opacity duration-500 ease-out", !shown && "opacity-0")}
+      />
     </div>
   );
 }

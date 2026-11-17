@@ -2,6 +2,7 @@ import { LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings } fro
 import { m, type Variants } from "motion/react";
 import { useEffect, useState, type FocusEvent, type PointerEvent } from "react";
 import { cn } from "../../lib/cn";
+import { useScrollEdges } from "../../lib/hooks";
 import { instanceLabel, timeAgo } from "../../lib/format";
 import { easeOutExpo } from "../../lib/motion";
 import { isMac, modKey } from "../../lib/platform";
@@ -48,6 +49,15 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
   const { page, navigate, home, settings, updateSettings } = useApp();
   const collapsed = settings?.sidebarCollapsed ?? false;
   const [tip, setTip] = useState<RailTip | null>(null);
+  const middle = useScrollEdges<HTMLDivElement>("y");
+  const middleMask =
+    middle.edges.start && middle.edges.end
+      ? "linear-gradient(to bottom, transparent, black 28px, black calc(100% - 44px), transparent)"
+      : middle.edges.end
+        ? "linear-gradient(to bottom, black calc(100% - 44px), transparent)"
+        : middle.edges.start
+          ? "linear-gradient(to bottom, transparent, black 28px)"
+          : undefined;
 
   // A tooltip left over from before the sidebar changed size would point at the wrong place.
   useEffect(() => setTip(null), [collapsed]);
@@ -108,8 +118,13 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
           </a>
         </div>
 
-        {/* The middle scrolls on short windows; the account row stays put. */}
-        <div className="no-scrollbar mt-6 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overflow-x-hidden px-4 pb-6">
+        {/* The middle scrolls on short windows; the account row stays put. Its scrollbar is hidden,
+            so an edge with more beyond it fades out instead. */}
+        <div
+          ref={middle.ref}
+          style={{ maskImage: middleMask, WebkitMaskImage: middleMask }}
+          className="no-scrollbar mt-6 flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto overflow-x-hidden px-4 pb-6"
+        >
           <m.nav aria-label="Main" variants={navList} initial="hidden" animate={revealed ? "show" : "hidden"} className="relative flex flex-col gap-1">
             {activeIndex >= 0 && (
               <m.span

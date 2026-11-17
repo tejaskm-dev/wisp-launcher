@@ -105,18 +105,38 @@ jobs:
             echo 'WISP_RELEASE_NOTES'
           } >> "$GITHUB_OUTPUT"
 
+      # Self-updating builds: once the repository has the variables WISP_UPDATER_PUBKEY (the public
+      # half of the key from `pnpm tauri signer generate`) and WISP_UPDATES_URL (where latest.json
+      # will be, publicly reachable), plus the secrets TAURI_SIGNING_PRIVATE_KEY and
+      # TAURI_SIGNING_PRIVATE_KEY_PASSWORD, builds are signed and the release gets a latest.json
+      # that installed copies check. Without them, builds are made as before and don't update.
+      - name: Turn on updates
+        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.WISP_UPDATER_PUBKEY }}
+          URL: ${{ vars.WISP_UPDATES_URL }}
+        run: |
+          # Pasted values often carry a trailing newline, which would break the JSON.
+          PUBKEY=$(printf '%s' "$PUBKEY" | tr -d '[:space:]')
+          URL=$(printf '%s' "$URL" | tr -d '[:space:]')
+          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["%s"]}}}' "$PUBKEY" "$URL" > src-tauri/tauri.updates.conf.json
+
       - name: Build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: pnpm tauri
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && ' --config src-tauri/tauri.updates.conf.json' || '' }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Wisp {0}', github.ref_name) || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: true
+          includeUpdaterJson: ${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' }}
 
       - name: Keep the installers
         if: github.ref_type != 'tag'
@@ -142,3 +162,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      # Installed copies of Wisp look for new versions in one fixed place (WISP_UPDATES_URL):
+      # releases/download/updater/latest.json. Each release copies its latest.json there, pre-
+      # releases included (GitHub's "latest release" link skips those).
+      - name: Point installed copies at this release
+        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater
+          if ! gh release view updater --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create updater --repo "$GITHUB_REPOSITORY" --prerelease --title "Wisp updates" \
+              --notes "Where installed copies of Wisp look for new versions. Nothing to download here: get Wisp from the newest release."
+          fi
+          gh release upload updater updater/latest.json --repo "$GITHUB_REPOSITORY" --clobber

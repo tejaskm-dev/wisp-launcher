@@ -31,7 +31,8 @@ pub enum StartPage {
 pub enum WhilePlaying {
     KeepOpen,
     Minimize,
-    /// Hide the window (it comes back when the game closes), leaving the game more memory.
+    /// Close the window while the game runs, leaving the game the memory it used (Wisp keeps
+    /// running behind it and opens the window again when the game closes). Shown as "Close it".
     #[default]
     Hide,
 }

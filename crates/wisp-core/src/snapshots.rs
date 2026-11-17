@@ -107,7 +107,8 @@ fn modified_ms(metadata: &std::fs::Metadata) -> i64 {
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
-fn hash_file(path: &Path) -> std::io::Result<String> {
+/// A file's SHA-1, as lowercase hex.
+pub(crate) fn hash_file(path: &Path) -> std::io::Result<String> {
     let mut reader = BufReader::with_capacity(1 << 16, std::fs::File::open(path)?);
     let mut hasher = Sha1::new();
     let mut buffer = vec![0u8; 1 << 16];

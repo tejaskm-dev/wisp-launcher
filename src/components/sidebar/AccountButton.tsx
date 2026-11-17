@@ -4,6 +4,7 @@ import { canAddOfflineAccounts, getSkins, removeAccount } from "../../data/api";
 import type { Account } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { modKey } from "../../lib/platform";
+import { preloadSkinsPage } from "../../lib/preload";
 import { useApp } from "../../state/AppContext";
 import { Ghost } from "../brand/Ghost";
 import { SkinFace } from "../skins/SkinDoll";
@@ -78,6 +79,9 @@ export function AccountButton({ collapsed }: { collapsed: boolean }) {
         aria-expanded={open}
         aria-label={collapsed ? (account ? `${account.name}, account menu` : "Sign in") : undefined}
         aria-current={here ? "page" : undefined}
+        // Skins opens from this menu: its 3D stage starts loading on the way there.
+        onPointerEnter={preloadSkinsPage}
+        onFocus={preloadSkinsPage}
         onClick={() => setOpen((isOpen) => !isOpen)}
         className={cn(
           "flex items-center gap-2.5 rounded-2xl p-1.5 text-left transition-colors duration-200",
