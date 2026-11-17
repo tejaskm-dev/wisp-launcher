@@ -6559,10 +6559,11 @@ dependencies = [
 
 [[package]]
 name = "wisp"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -6576,7 +6577,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64 0.22.1",
  "flate2",
