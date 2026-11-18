@@ -30,4 +30,4 @@ If you have 0.1.6, Wisp offers this update by itself: it installs and restarts w
 
 ---
 
-NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT. Wisp is made by its own developers, who answer for it. Contact: wisplaunchercontact@gmail.com

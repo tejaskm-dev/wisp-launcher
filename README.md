@@ -1,6 +1,7 @@
 # Wisp
 
 > NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+> Wisp is made by its own developers, who answer for it. Contact: wisplaunchercontact@gmail.com
 
 A fast Minecraft: Java Edition launcher whose worlds, keybinds and settings follow you between computers.
 
