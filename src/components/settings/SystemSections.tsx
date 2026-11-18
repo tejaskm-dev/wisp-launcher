@@ -155,7 +155,7 @@ export function PrivacySection({ settings, update }: SectionProps) {
   );
 }
 
-export function AboutSection({ update }: SectionProps) {
+export function AboutSection({ settings, update }: SectionProps) {
   const { notify } = useApp();
   const [confirming, setConfirming] = useState(false);
   const reset = () => {
@@ -183,7 +183,7 @@ export function AboutSection({ update }: SectionProps) {
             Reset…
           </Button>
         </Row>
-        <Note>Custom Java paths, launch hooks, Java arguments and your CurseForge key are cleared too.</Note>
+        <Note>{settings.curseforgeApiKey.trim() ? "Custom Java paths, launch hooks, Java arguments and your CurseForge key are cleared too." : "Custom Java paths, launch hooks and Java arguments are cleared too."}</Note>
       </Panel>
 
       <Dialog

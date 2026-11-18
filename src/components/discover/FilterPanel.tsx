@@ -88,6 +88,7 @@ export function FilterPanel(props: FilterPanelProps) {
       </div>
 
       <div className="flex flex-col gap-6 overflow-y-auto overscroll-contain px-4 pb-5 pt-4">
+        {curseforgeReady && (
         <Section title="Source">
           <div role="radiogroup" aria-label="Where to search" className="grid grid-cols-2 gap-1 rounded-2xl border border-cream/8 bg-ink-900/60 p-1">
             {SOURCES.map(({ value }) => {
@@ -123,6 +124,7 @@ export function FilterPanel(props: FilterPanelProps) {
             </button>
           )}
         </Section>
+        )}
 
         <Section title="Content type">
           <div role="radiogroup" aria-label="What to browse" className="flex flex-wrap gap-1.5">
@@ -133,7 +135,7 @@ export function FilterPanel(props: FilterPanelProps) {
               );
             })}
           </div>
-          {filters.source === "modrinth" && <Hint>Worlds (maps) are only on CurseForge.</Hint>}
+          {filters.source === "modrinth" && curseforgeReady && <Hint>Worlds (maps) are only on CurseForge.</Hint>}
         </Section>
 
         {filters.tab !== "modpack" && instances.length > 0 && (

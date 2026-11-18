@@ -13,6 +13,7 @@ import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { cn } from "../lib/cn";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
+import { useCurseforge } from "../state/curseforge";
 import { takeRequestedSettingsSection } from "../state/settingsSection";
 import { Sparkle } from "../components/brand/Sparkle";
 
@@ -60,18 +61,23 @@ let rememberedSection: SectionId = "general";
 
 export function SettingsPage() {
   const { settings, updateSettings } = useApp();
-  // Another page may ask for a section (Discover's "Add a CurseForge key", say).
+  // Another page may ask for a section (the import dialog's "Add a key" for a CurseForge modpack, say).
+  const [requested] = useState(takeRequestedSettingsSection);
   const [current, setCurrent] = useState<SectionId>(() => {
-    const requested = takeRequestedSettingsSection();
     const found = SECTIONS.find((section) => section.id === requested);
     if (found) rememberedSection = found.id;
     return rememberedSection;
   });
+  // Without a CurseForge key there's nothing to set about mod sources (Modrinth needs nothing), so
+  // that section only shows with a key, or when something asked for it.
+  const curseforge = useCurseforge();
+  const groups = GROUPS.map((group) => ({ ...group, sections: group.sections.filter((entry) => entry.id !== "sources" || curseforge === true || requested === "sources") }));
+  const sections = groups.flatMap((group) => group.sections);
   const open = (id: SectionId) => {
     rememberedSection = id;
     setCurrent(id);
   };
-  const section = SECTIONS.find((candidate) => candidate.id === current) ?? SECTIONS[0];
+  const section = sections.find((candidate) => candidate.id === current) ?? sections[0];
   const View = section.view;
 
   return (
@@ -80,7 +86,7 @@ export function SettingsPage() {
 
       <m.div variants={fadeUp} className="grid items-start gap-6 md:grid-cols-[208px_minmax(0,1fr)]">
         <nav aria-label="Settings sections" className="flex flex-col gap-4 md:sticky md:top-24">
-          {GROUPS.map((group) => (
+          {groups.map((group) => (
             <div key={group.title}>
               <p className="mb-1.5 px-3 text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">{group.title}</p>
               <ul className="flex flex-col gap-0.5">

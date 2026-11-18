@@ -5,6 +5,8 @@ import type { ImportKind, InspectedFile } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { loaderName } from "../../lib/format";
 import { useApp } from "../../state/AppContext";
+import { useCurseforge } from "../../state/curseforge";
+import { requestSettingsSection } from "../../state/settingsSection";
 import { Sparkle } from "../brand/Sparkle";
 import { InstanceAvatar } from "../instances/InstanceAvatar";
 import { InstanceLabel, VersionTag } from "../instances/VersionTag";
@@ -34,7 +36,15 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : St
  * resource packs and shader packs go into the instance you pick. Mount it fresh for each use.
  */
 export function ImportDialog({ files, instanceId, open, onClose }: { files: string[] | null; instanceId: string | null; open: boolean; onClose: () => void }) {
-  const { home, notify, startModpackFileInstall, importWorlds, openNewInstance } = useApp();
+  const { home, notify, startModpackFileInstall, importWorlds, openNewInstance, navigate } = useApp();
+  // A CurseForge modpack lists its mods by CurseForge's numbers, which only CurseForge's API (with
+  // a key) turns into downloads.
+  const curseforge = useCurseforge() === true;
+  const addKey = () => {
+    requestSettingsSection("sources");
+    navigate("settings");
+    onClose();
+  };
   const [paths, setPaths] = useState<string[] | null>(files);
   const [inspected, setInspected] = useState<InspectedFile[] | null>(null);
   const [states, setStates] = useState<Record<string, FileState>>({});
@@ -153,17 +163,22 @@ export function ImportDialog({ files, instanceId, open, onClose }: { files: stri
                       ) : file.pack ? (
                         <>
                           {loaderName(file.pack.loader)} · <VersionTag version={file.pack.gameVersion} />
-                          {file.pack.from === "curse-forge" ? " · from CurseForge" : ""}
+                          {file.pack.from === "curse-forge" ? (curseforge ? " · from CurseForge" : " · from CurseForge, which needs an API key to download its mods") : ""}
                         </>
                       ) : null
                     }
                     action={
                       !file.problem &&
-                      state.phase === "idle" && (
+                      state.phase === "idle" &&
+                      (file.pack?.from === "curse-forge" && !curseforge ? (
+                        <Button size="md" variant="secondary" onClick={addKey} className="h-9 px-4 text-[13px]">
+                          Add a key
+                        </Button>
+                      ) : (
                         <Button size="md" onClick={() => install(file)} className="h-9 px-4 text-[13px]">
                           Install
                         </Button>
-                      )
+                      ))
                     }
                   />
                 );

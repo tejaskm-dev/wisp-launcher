@@ -17,7 +17,8 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Pagination } from "../components/ui/Pagination";
 import { Select, type SelectOption } from "../components/ui/Select";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
-import { getCategories, getCurseforgeCategories, getCurseforgeStatus, getLoaderTags, getVersions, searchProjects } from "../data/api";
+import { getCategories, getCurseforgeCategories, getLoaderTags, getVersions, searchProjects } from "../data/api";
+import { useCurseforge } from "../state/curseforge";
 import type { Category, Project, ProjectType, SearchSort, Source } from "../data/types";
 import { cn } from "../lib/cn";
 import { formatCount, hexColor, loaderName, timeAgo } from "../lib/format";
@@ -69,6 +70,7 @@ const curseforgeCategories = new Map<Tab, Category[]>();
 /** Discover: content from Modrinth and CurseForge, or public servers to join. */
 export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQuery: () => void }) {
   const { importFiles } = useApp();
+  const curseforge = useCurseforge() === true;
   const [mode, setModeState] = useState(readDiscoverMode);
   const setMode = (next: "content" | "servers") => {
     setModeState(next);
@@ -81,7 +83,9 @@ export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQu
         subtitle={
           mode === "servers"
             ? "Public servers to join, with who's online right now. Type in the search bar above to narrow them down."
-            : "Modpacks, mods, resource packs, shaders, data packs and worlds from Modrinth and CurseForge. Type in the search bar above to find something."
+            : curseforge
+              ? "Modpacks, mods, resource packs, shaders, data packs and worlds from Modrinth and CurseForge. Type in the search bar above to find something."
+              : "Modpacks, mods, resource packs, shaders and data packs from Modrinth. Type in the search bar above to find something."
         }
         actions={
           <div className="flex items-center gap-2.5">
@@ -108,7 +112,7 @@ export function DiscoverPage({ query, onClearQuery }: { query: string; onClearQu
 }
 
 function ContentBrowser({ query, onClearQuery }: { query: string; onClearQuery: () => void }) {
-  const { comingSoon, now, home, openProject, requestInstall, settings, navigate } = useApp();
+  const { comingSoon, now, home, openProject, requestInstall, navigate } = useApp();
   const [filters, setFilterState] = useState(rememberedFilters);
   const setFilters = (patch: Partial<Filters>) =>
     setFilterState((current) => {
@@ -129,8 +133,14 @@ function ContentBrowser({ query, onClearQuery }: { query: string; onClearQuery: 
   const [versions] = useResource(getVersions);
   const [categories, retryCategories] = useResource(getCategories);
   const [loaderTags] = useResource(getLoaderTags);
-  const [curseforge] = useResource(getCurseforgeStatus);
-  const curseforgeReady = (curseforge.status === "ready" && curseforge.data.builtIn) || Boolean(settings?.curseforgeApiKey.trim());
+  const curseforge = useCurseforge();
+  const curseforgeReady = curseforge === true;
+  // Without a key, CurseForge isn't offered at all; a remembered CurseForge search goes back to Modrinth.
+  useEffect(() => {
+    if (curseforge === false && filters.source === "curseforge") setFilters({ source: "modrinth" });
+    // setFilters is a fresh function each render; this only reacts to the source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curseforge, filters.source]);
   const blocked = filters.source === "curseforge" && !curseforgeReady;
 
   // CurseForge's categories differ per kind; fetch them when that kind is first shown.
