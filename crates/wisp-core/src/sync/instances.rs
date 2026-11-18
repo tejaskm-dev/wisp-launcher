@@ -14,7 +14,7 @@ use super::merge::{LOCAL_CONFIGS, apply_options, merge_maps, merge_servers, port
 use super::remote::{Commit, ItemKind, Remote, sha1_hex};
 use super::state::HashCache;
 use super::worlds::Who;
-use super::{Fetch, SyncError};
+use super::{Fetch, FetchError, SyncError};
 use crate::content::{ContentIndex, InstalledContent, safe_join};
 use crate::instances::{GAME_DIR, Instance, InstanceStore, Loader, ModpackOrigin, NewInstance};
 use crate::servers::{self, ListedServer};
@@ -246,6 +246,9 @@ pub struct Applied {
     /// Files that couldn't be fetched yet (still arriving in the sync folder, or offline).
     pub waiting: u32,
     pub bytes: u64,
+    /// Files Modrinth listed but doesn't serve any more: a computer that has them is asked to
+    /// copy them into the sync folder instead.
+    pub wanted: Vec<String>,
 }
 
 /// Makes the instance on this computer match `wanted`, in the sections this computer syncs.
@@ -306,7 +309,16 @@ pub fn apply(
     progress(0, total);
     for (target, file) in fetches {
         let fetched = match &file.url {
-            Some(url) => fetch.download(url, &file.hash, &target).is_ok() || remote.extract_to(&file.hash, &target)?,
+            Some(url) => match fetch.download(url, &file.hash, &target) {
+                Ok(()) => true,
+                Err(why) => {
+                    let copied = remote.extract_to(&file.hash, &target)?;
+                    if !copied && why == FetchError::Gone {
+                        applied.wanted.push(file.hash.clone());
+                    }
+                    copied
+                }
+            },
             None => remote.extract_to(&file.hash, &target)?,
         };
         if fetched {
@@ -436,6 +448,26 @@ pub fn links(manifest: &InstanceManifest) -> HashMap<String, String> {
         .flat_map(|files| files.values())
         .filter_map(|file| Some((file.hash.clone(), file.url.clone()?)))
         .collect()
+}
+
+/// Copies files other computers asked for (Modrinth stopped serving them) into the sync folder,
+/// from this instance's copies. Each is checked before it goes, so a file that changed since it
+/// was hashed isn't sent under the wrong name. Returns how many were copied.
+pub fn serve_wanted(remote: &Remote, game_dir: &Path, manifest: &InstanceManifest, wanted: &std::collections::HashSet<String>) -> std::io::Result<u32> {
+    let mut copied = 0;
+    for (_, files) in manifest.file_sections() {
+        for (path, file) in files.into_iter().flatten() {
+            if !wanted.contains(&file.hash) || remote.has(&file.hash) {
+                continue;
+            }
+            let Some(source) = safe_join(game_dir, path) else { continue };
+            if crate::snapshots::hash_file(&source).ok().as_deref() == Some(file.hash.as_str()) {
+                remote.put_file(&file.hash, &source)?;
+                copied += 1;
+            }
+        }
+    }
+    Ok(copied)
 }
 
 #[cfg(test)]

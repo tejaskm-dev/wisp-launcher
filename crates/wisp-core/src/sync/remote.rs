@@ -100,6 +100,9 @@ pub struct DeviceRecord {
     /// Instances it's playing right now.
     #[serde(default)]
     pub playing: Vec<Playing>,
+    /// Files it needs that Modrinth stopped serving (by SHA-1): whoever has one copies it in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wants: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

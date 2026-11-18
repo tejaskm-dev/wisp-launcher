@@ -12,7 +12,7 @@ use wisp_core::device::DeviceInfo;
 use wisp_core::instances::{GAME_DIR, InstanceStore};
 use wisp_core::settings::SyncPrefs;
 use wisp_core::snapshots::Snapshots;
-use wisp_core::sync::{self, Activity, Context, Fetch, ItemState, Overview, Scope};
+use wisp_core::sync::{self, Activity, Context, Fetch, FetchError, ItemState, Overview, Scope};
 use wisp_core::{HttpClient, http_client, modrinth};
 
 struct Net {
@@ -21,13 +21,13 @@ struct Net {
 }
 
 impl Fetch for Net {
-    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), String> {
-        let bytes = self.runtime.block_on(async { self.client.get(url).send().await?.error_for_status()?.bytes().await }).map_err(|error| error.to_string())?;
+    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), FetchError> {
+        let bytes = self.runtime.block_on(async { self.client.get(url).send().await?.error_for_status()?.bytes().await }).map_err(|_| FetchError::Unreachable)?;
         if sync::sha1_of(&bytes) != sha1 {
-            return Err("checksum".into());
+            return Err(FetchError::Gone);
         }
-        std::fs::create_dir_all(target.parent().unwrap()).map_err(|error| error.to_string())?;
-        std::fs::write(target, &bytes).map_err(|error| error.to_string())
+        std::fs::create_dir_all(target.parent().unwrap()).map_err(|_| FetchError::Unreachable)?;
+        std::fs::write(target, &bytes).map_err(|_| FetchError::Unreachable)
     }
 
     fn known(&self, sha1s: &[String]) -> Option<HashMap<String, String>> {

@@ -237,7 +237,7 @@ pub fn disconnect(ctx: &Context) -> Result<Overview, SyncError> {
         // Tell the other computers this one has stopped playing anything.
         let remote = Remote::new(&folder.path, &state.device_id);
         if remote.reachable() {
-            let _ = remote.write_device(&DeviceRecord { id: state.device_id.clone(), name: ctx.device.name.clone(), os: ctx.device.os.clone(), seen: (ctx.now)(), playing: Vec::new() });
+            let _ = remote.write_device(&DeviceRecord { id: state.device_id.clone(), name: ctx.device.name.clone(), os: ctx.device.os.clone(), seen: (ctx.now)(), playing: Vec::new(), wants: Vec::new() });
         }
     }
     state.folder = None;
@@ -280,7 +280,8 @@ fn write_record(ctx: &Context, remote: &Remote, state: &State, playing: &[String
             Some(Playing { item: key, name: instance.name, since })
         })
         .collect();
-    remote.write_device(&DeviceRecord { id: state.device_id.clone(), name: ctx.device.name.clone(), os: ctx.device.os.clone(), seen: now, playing })?;
+    let wants = state.wanted.iter().cloned().collect();
+    remote.write_device(&DeviceRecord { id: state.device_id.clone(), name: ctx.device.name.clone(), os: ctx.device.os.clone(), seen: now, playing, wants })?;
     Ok(())
 }
 
@@ -304,6 +305,10 @@ struct Run<'a, 'c> {
     /// Instances being played on other computers: item key to computer name.
     elsewhere: HashMap<String, String>,
     waiting: u32,
+    /// Files other computers can't get from Modrinth any more; this one copies in any it has.
+    others_want: HashSet<String>,
+    /// Files this computer couldn't get from Modrinth this time.
+    wanted: BTreeSet<String>,
 }
 
 impl Run<'_, '_> {
@@ -430,6 +435,9 @@ impl Run<'_, '_> {
         self.state.known_files = known;
         cache.save();
         let (current, resolved) = current?;
+        if !self.others_want.is_empty() {
+            let _ = instances::serve_wanted(&self.remote, &dir.join(GAME_DIR), &current, &self.others_want);
+        }
         let (parents, theirs) = match &cloud {
             Some((live, manifest)) => (live.iter().map(|commit| commit.id.clone()).collect::<Vec<_>>(), Some(manifest)),
             None => (Vec::new(), None),
@@ -445,6 +453,7 @@ impl Run<'_, '_> {
             let progress = reporter(self.ctx, key, &name, Direction::Down);
             let applied = instances::apply(self.ctx.instances, &instance.id, &current, &merged, &self.remote, self.ctx.fetch, &progress)?;
             (self.ctx.activity)(None);
+            self.wanted.extend(applied.wanted);
             if applied.waiting > 0 {
                 self.waiting += applied.waiting;
                 return Ok(ItemState::Waiting { files: applied.waiting });
@@ -649,7 +658,8 @@ pub fn run(ctx: &Context, scope: Scope, busy: &HashSet<String>, asked: &HashSet<
         .filter(|record| now - record.seen < PLAYING_FRESH_MS)
         .flat_map(|record| record.playing.iter().map(|play| (play.item.clone(), record.name.clone())))
         .collect();
-    let mut run = Run { ctx, store, state, remote, now, busy, asked, elsewhere, waiting: 0 };
+    let others_want: HashSet<String> = others.iter().flat_map(|record| record.wants.iter().cloned()).collect();
+    let mut run = Run { ctx, store, state, remote, now, busy, asked, elsewhere, waiting: 0, others_want, wanted: BTreeSet::new() };
     let busy_list: Vec<String> = busy.iter().cloned().collect();
     write_record(ctx, &run.remote, &run.state, &busy_list)?;
     run.link_instances();
@@ -717,6 +727,17 @@ pub fn run(ctx: &Context, scope: Scope, busy: &HashSet<String>, asked: &HashSet<
         run.tidy();
     }
     let mut state = run.state;
+    // Ask the other computers for whatever Modrinth wouldn't give this time (a full run starts the
+    // list afresh; one instance's run only adds to it).
+    let wanted_before = state.wanted.clone();
+    if scope == Scope::Everything {
+        state.wanted = run.wanted;
+    } else {
+        state.wanted.extend(run.wanted);
+    }
+    if state.wanted != wanted_before {
+        let _ = write_record(ctx, &run.remote, &state, &busy_list);
+    }
     let phase = if run.waiting > 0 { Phase::Waiting } else { Phase::Idle };
     if run.waiting == 0 {
         state.last_synced = Some(now);
@@ -840,7 +861,7 @@ pub fn resolve(ctx: &Context, key: &str, resolution: Resolution, busy: &HashSet<
     let dir = game_dir.join(crate::worlds::SAVES).join(&folder_name);
     let name = local.as_ref().map(|world| world.name.clone()).unwrap_or_else(|| folder_name.clone());
     let nothing_asked = HashSet::new();
-    let mut run = Run { ctx, store, state, remote, now, busy, asked: &nothing_asked, elsewhere: HashMap::new(), waiting: 0 };
+    let mut run = Run { ctx, store, state, remote, now, busy, asked: &nothing_asked, elsewhere: HashMap::new(), waiting: 0, others_want: HashSet::new(), wanted: BTreeSet::new() };
     let world = World { key, instance_id: &instance.id, instance_sync: &sync_id, folder: &folder_name, dir: &dir, name: &name };
     let chosen = |commit: &str| tips.iter().find(|tip| tip.id == commit).cloned().ok_or_else(|| SyncError::Other("that version isn't there any more".into()));
     match resolution {
@@ -904,6 +925,7 @@ mod tests {
 
     use super::*;
     use crate::instances::{Loader, NewInstance};
+    use crate::sync::FetchError;
     use crate::servers::{ListedServer, listed, set_listed};
 
     static CLOCK: AtomicI64 = AtomicI64::new(1_700_000_000_000);
@@ -915,8 +937,8 @@ mod tests {
     /// Modrinth has none of the test files, and there's no internet to download from.
     struct NoMods;
     impl Fetch for NoMods {
-        fn download(&self, _url: &str, _sha1: &str, _target: &Path) -> Result<(), String> {
-            Err("no internet in tests".into())
+        fn download(&self, _url: &str, _sha1: &str, _target: &Path) -> Result<(), FetchError> {
+            Err(FetchError::Unreachable)
         }
         fn known(&self, _sha1s: &[String]) -> Option<HashMap<String, String>> {
             Some(HashMap::new())
@@ -1123,6 +1145,52 @@ mod tests {
         laptop.with(|ctx| disconnect(ctx).unwrap());
         assert_eq!(overview(&laptop.data).phase, Phase::Off);
         assert!(cloud.join("wisp-sync.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Modrinth "has" every jar (by a made-up link) but serves none of them any more.
+    struct TakenDown;
+    impl Fetch for TakenDown {
+        fn download(&self, _url: &str, _sha1: &str, _target: &Path) -> Result<(), FetchError> {
+            Err(FetchError::Gone)
+        }
+        fn known(&self, sha1s: &[String]) -> Option<HashMap<String, String>> {
+            Some(sha1s.iter().map(|hash| (hash.clone(), format!("https://cdn.modrinth.com/data/x/{hash}.jar"))).collect())
+        }
+    }
+
+    #[test]
+    fn a_mod_taken_off_modrinth_comes_through_the_folder() {
+        let root = std::env::temp_dir().join(format!("wisp-sync-gone-mod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cloud = root.join("Dropbox/Wisp");
+        let laptop = Computer::new(&root, "Laptop");
+        let desktop = Computer::new(&root, "Desktop");
+        let quiet = |_: Option<Activity>| {};
+        let with = |computer: &Computer, act: &dyn Fn(&Context) -> Overview| {
+            let ctx = Context { data: &computer.data, instances: &computer.instances, snapshots: &computer.snapshots, prefs: &computer.prefs, device: &computer.device, fetch: &TakenDown, activity: &quiet, now: tick };
+            act(&ctx)
+        };
+        laptop
+            .instances
+            .create(NewInstance { name: "Modded".into(), game_version: "1.21.1".into(), loader: Loader::Fabric, loader_version: None, icon: None }, None, tick())
+            .unwrap();
+        std::fs::create_dir_all(laptop.game().join("mods")).unwrap();
+        std::fs::write(laptop.game().join("mods/vanished.jar"), b"PK a mod Modrinth dropped").unwrap();
+
+        // Recorded as a Modrinth download, so nothing of it is copied at first.
+        with(&laptop, &|ctx| connect(ctx, &cloud).unwrap());
+        let objects_before = crate::storage::dir_size(&cloud.join("objects"));
+        // The desktop can't download it: it waits, and asks for it.
+        let first = with(&desktop, &|ctx| connect(ctx, &cloud).unwrap());
+        assert!(matches!(state_of(&first, "Modded"), ItemState::Waiting { .. }), "{first:#?}");
+        assert!(!desktop.game().join("mods/vanished.jar").exists());
+        // The laptop sees the request and copies its jar in; then the desktop has it.
+        with(&laptop, &|ctx| run(ctx, Scope::Everything, &HashSet::new(), &HashSet::new()).unwrap());
+        assert!(crate::storage::dir_size(&cloud.join("objects")) > objects_before);
+        let second = with(&desktop, &|ctx| run(ctx, Scope::Everything, &HashSet::new(), &HashSet::new()).unwrap());
+        assert!(synced(state_of(&second, "Modded")), "{second:#?}");
+        assert_eq!(std::fs::read(desktop.game().join("mods/vanished.jar")).unwrap(), b"PK a mod Modrinth dropped");
         std::fs::remove_dir_all(root).unwrap();
     }
 

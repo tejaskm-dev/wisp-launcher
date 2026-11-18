@@ -42,11 +42,20 @@ pub enum SyncError {
     Other(String),
 }
 
+/// Why a download didn't happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchError {
+    /// The server says the file isn't there any more (or sent something else): it was taken down.
+    Gone,
+    /// It couldn't be asked: no internet, or the server didn't answer.
+    Unreachable,
+}
+
 /// What sync needs from the internet: mods are downloaded from Modrinth rather than copied
 /// through the sync folder. Implemented by the app (and by tests, without any internet).
 pub trait Fetch {
     /// Downloads `url` into `target`, checking the file's SHA-1.
-    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), String>;
+    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), FetchError>;
     /// Which of these files Modrinth has, by SHA-1, with where to download each. None when
     /// Modrinth can't be asked right now.
     fn known(&self, sha1s: &[String]) -> Option<HashMap<String, String>>;
@@ -61,8 +70,8 @@ pub fn sha1_of(bytes: &[u8]) -> String {
 pub struct Offline;
 
 impl Fetch for Offline {
-    fn download(&self, _url: &str, _sha1: &str, _target: &Path) -> Result<(), String> {
-        Err("offline".into())
+    fn download(&self, _url: &str, _sha1: &str, _target: &Path) -> Result<(), FetchError> {
+        Err(FetchError::Unreachable)
     }
 
     fn known(&self, _sha1s: &[String]) -> Option<HashMap<String, String>> {

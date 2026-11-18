@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use wisp_core::device::DeviceInfo;
-use wisp_core::sync::{self, Activity, CloudFolder, Context, Fetch, LaunchCheck, Overview, Phase, Resolution, Scope};
+use wisp_core::sync::{self, Activity, CloudFolder, Context, Fetch, FetchError, LaunchCheck, Overview, Phase, Resolution, Scope};
 use wisp_core::{HttpClient, modrinth};
 
 use crate::{Launches, Network, Paths, SettingsState, current_settings, now_ms};
@@ -41,23 +41,29 @@ struct AppFetch {
 }
 
 impl Fetch for AppFetch {
-    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), String> {
+    fn download(&self, url: &str, sha1: &str, target: &Path) -> Result<(), FetchError> {
         if !url.starts_with("https://cdn.modrinth.com/") {
-            return Err("only Modrinth downloads are fetched".into());
+            return Err(FetchError::Gone);
         }
         let bytes = tauri::async_runtime::block_on(async {
-            let response = self.client.get(url).send().await.and_then(|response| response.error_for_status()).map_err(|error| error.to_string())?;
-            response.bytes().await.map_err(|error| error.to_string())
+            let response = self.client.get(url).send().await.map_err(|_| FetchError::Unreachable)?;
+            // Modrinth answering "not here" means the file was taken down; anything else is a
+            // hiccup worth trying again later.
+            if response.status().is_client_error() {
+                return Err(FetchError::Gone);
+            }
+            let response = response.error_for_status().map_err(|_| FetchError::Unreachable)?;
+            response.bytes().await.map_err(|_| FetchError::Unreachable)
         })?;
         if sync::sha1_of(&bytes) != sha1 {
-            return Err("the download wasn't the file expected".into());
+            return Err(FetchError::Gone);
         }
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|_| FetchError::Unreachable)?;
         }
         let temp = target.with_extension("wisp-sync");
-        std::fs::write(&temp, &bytes).map_err(|error| error.to_string())?;
-        std::fs::rename(&temp, target).map_err(|error| error.to_string())
+        std::fs::write(&temp, &bytes).map_err(|_| FetchError::Unreachable)?;
+        std::fs::rename(&temp, target).map_err(|_| FetchError::Unreachable)
     }
 
     fn known(&self, sha1s: &[String]) -> Option<HashMap<String, String>> {

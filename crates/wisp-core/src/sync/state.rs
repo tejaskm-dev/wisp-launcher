@@ -54,6 +54,8 @@ pub struct State {
     pub last_tidy: i64,
     /// When this computer last finished a sync.
     pub last_synced: Option<i64>,
+    /// Files this computer couldn't get from Modrinth any more, asked of the other computers.
+    pub wanted: BTreeSet<String>,
 }
 
 pub struct Store {
