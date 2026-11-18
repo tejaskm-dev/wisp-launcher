@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: Settings = {
   curseforgeApiKey: "",
   hooks: { preLaunch: "", wrapper: "", postExit: "" },
   newInstances: { copyOptionsFrom: null, skipWelcome: false, skipTutorial: false, autoJumpOff: false },
+  shareOptions: true,
   concurrentDownloads: 16,
   externalImages: true,
   sync: { worlds: true, instances: true, options: true, servers: true, resourcePacks: true, screenshots: false },

@@ -1,11 +1,13 @@
-import { AppWindow, CircleAlert, CircleCheck, Coffee, CopyPlus, LoaderCircle, MemoryStick, SquareTerminal, Trash2 } from "lucide-react";
+import { AppWindow, CircleAlert, CircleCheck, Coffee, CopyPlus, LoaderCircle, MemoryStick, SlidersHorizontal, SquareTerminal, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { deleteJavaRuntime, getJavaRuntimes, getSystemMemory, testJava } from "../../data/api";
+import { deleteJavaRuntime, getJavaRuntimes, getSystemMemory, shareInstanceSettings, testJava } from "../../data/api";
 import type { InstalledRuntime, JavaProbe, WindowMode } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { formatBytes, instanceLabel } from "../../lib/format";
+import { sharesSettings } from "../../lib/sharedSettings";
 import { useResource } from "../../lib/useResource";
 import { useApp } from "../../state/AppContext";
+import { Button } from "../ui/Button";
 import { Panel } from "../ui/Page";
 import { Select, type SelectOption } from "../ui/Select";
 import { Loading, Skeleton } from "../ui/Skeleton";
@@ -29,7 +31,7 @@ const WINDOW_PRESETS = [
 ] as const;
 
 export function GameSection({ settings, update }: SectionProps) {
-  const { home } = useApp();
+  const { home, notify } = useApp();
   const [memory] = useResource(getSystemMemory);
   const total = memory.status === "ready" ? memory.data : null;
   // Leave the computer at least 2 GB; never offer less than 2 GB or more than 32 GB.
@@ -43,6 +45,25 @@ export function GameSection({ settings, update }: SectionProps) {
     ...(home?.instances ?? []).map((instance) => ({ value: instance.id, label: instance.name, note: instanceLabel(instance) })),
   ];
   const copySource = home?.instances.some((instance) => instance.id === options.copyOptionsFrom) ? (options.copyOptionsFrom ?? "") : "";
+
+  // Giving every instance all of one instance's settings, for setups made before sharing was on.
+  const shareable = (home?.instances ?? []).filter((instance) => sharesSettings(instance.gameVersion));
+  const [shareFrom, setShareFrom] = useState("");
+  const [sharingAll, setSharingAll] = useState(false);
+  const shareSource = shareable.find((instance) => instance.id === shareFrom) ?? shareable[0];
+  const shareChoices: SelectOption<string>[] = shareable.map((instance) => ({ value: instance.id, label: instance.name, note: instanceLabel(instance) }));
+  const shareAll = async () => {
+    if (!shareSource) return;
+    setSharingAll(true);
+    try {
+      await shareInstanceSettings(shareSource.id);
+      notify({ tone: "success", title: `Shared ${shareSource.name}'s settings`, body: "Every instance takes them the next time it starts." });
+    } catch (error) {
+      notify({ tone: "info", title: "Couldn't share them", body: failure(error) });
+    } finally {
+      setSharingAll(false);
+    }
+  };
 
   return (
     <>
@@ -97,6 +118,36 @@ export function GameSection({ settings, update }: SectionProps) {
             </div>
           )}
         </Row>
+      </Panel>
+
+      <Panel
+        title="Settings between instances"
+        icon={<SlidersHorizontal size={19} aria-hidden="true" />}
+        description="Minecraft keeps settings separately in every instance. Wisp can keep them in step."
+      >
+        <Toggle
+          label="Share settings between instances"
+          description="Change FOV, keybinds, volume or video settings in one instance, and the others take them the next time they start."
+          checked={settings.shareOptions}
+          onChange={(shareOptions) => update({ shareOptions })}
+        />
+        {settings.shareOptions && shareable.length > 1 && shareSource && (
+          <>
+            <Divider />
+            <Row label="Share one instance's settings with all" description="Every instance takes all of its settings the next time it starts. Handy for ones you set up before sharing was on." stacked>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select label="Instance to share settings from" value={shareSource.id} options={shareChoices} onChange={setShareFrom} className="w-[200px]" />
+                <Button variant="secondary" disabled={sharingAll} onClick={() => void shareAll()} className="h-10 shrink-0 px-4 text-[13px]">
+                  {sharingAll ? "Sharing…" : "Share with all"}
+                </Button>
+              </div>
+            </Row>
+          </>
+        )}
+        <Note>
+          Each instance keeps its own resource packs. Instances on Minecraft 1.13 to 1.18 share only with each other, and 1.12 and older keep their own settings. To keep any instance
+          apart, open Edit on it.
+        </Note>
       </Panel>
 
       <Panel title="New instances" icon={<CopyPlus size={19} aria-hidden="true" />} description="How instances you create from now on start out.">

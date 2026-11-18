@@ -7,6 +7,7 @@ mod imports;
 mod library;
 mod multiplayer;
 mod protocol;
+mod shared_options;
 mod skins;
 mod social;
 mod sync;
@@ -526,10 +527,10 @@ async fn launch_instance(
             },
         );
     }
-    // Offline accounts can wear their Wisp skin in game through the skin server, but it's off until
-    // it has been tried in game: start a developer build with WISP_SKIN_SERVER=1 to turn it on.
+    // Offline accounts wear their Wisp skin in game through the skin server (Microsoft accounts get
+    // theirs from Mojang). WISP_SKIN_SERVER=0 leaves it out, to rule it out when a game won't start.
     let skin_server = match account.kind {
-        wisp_core::accounts::AccountKind::Offline if std::env::var_os("WISP_SKIN_SERVER").is_some_and(|value| value == "1") => {
+        wisp_core::accounts::AccountKind::Offline if std::env::var_os("WISP_SKIN_SERVER").is_none_or(|value| value != "0") => {
             skins_state.0.get_or_init(|| start_skin_server(paths.data.clone())).await.clone()
         }
         _ => None,
@@ -693,6 +694,12 @@ async fn play(
     };
     let store = app.try_state::<Paths>().map(|paths| paths.instances());
     let instance_dir = store.as_ref().and_then(|store| store.dir_of(&id));
+    // Settings the player changed in their other instances come along (Settings > Game).
+    let share_options = settings.share_options;
+    if share_options && let Some(paths) = app.try_state::<Paths>() {
+        let (data, instances, id) = (paths.data.clone(), paths.instances(), id.clone());
+        let _ = tauri::async_runtime::spawn_blocking(move || game_options::before_launch(&data, &instances, &id)).await;
+    }
     let system_mb = tauri::async_runtime::spawn_blocking(device::total_memory_mb).await.ok().flatten();
     let curseforge_key = curseforge::api_key(&settings.curseforge_api_key);
 
@@ -716,7 +723,7 @@ async fn play(
         if let Some(store) = &store
             && !problems.is_empty()
         {
-            report(LaunchUpdate::Fixing { message: fixing_message(problems.len()) });
+            report(LaunchUpdate::Fixing { message: fixing_message(doctor::count(&problems)) });
             let fixer = doctor::Fixer {
                 client: &client,
                 store,
@@ -862,6 +869,14 @@ async fn play(
                     });
                 })
                 .await;
+            }
+            // Settings the player changed while it ran go to their other instances.
+            if started > 0
+                && share_options
+                && let Some(paths) = app.try_state::<Paths>()
+            {
+                let (data, instances, id) = (paths.data.clone(), paths.instances(), id.clone());
+                let _ = tauri::async_runtime::spawn_blocking(move || game_options::after_game(&data, &instances, &id)).await;
             }
             report(LaunchUpdate::Exited {
                 code,
@@ -1674,6 +1689,9 @@ fn main() {
             multiplayer::remove_server,
             fixes::undo_fix,
             fixes::apply_fix,
+            shared_options::get_instances_keeping_settings,
+            shared_options::set_instance_keeps_settings,
+            shared_options::share_instance_settings,
             sync::get_sync,
             sync::get_sync_folders,
             sync::pick_sync_folder,

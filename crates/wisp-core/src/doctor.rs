@@ -66,11 +66,42 @@ pub struct ModInfo {
     pub provides: Vec<String>,
     /// The loaders it carries metadata for. Empty for jars that aren't mods Wisp can read.
     pub loaders: Vec<Platform>,
-    /// Mods it can't run without, each with the versions it accepts as the jar writes them.
-    pub requires: Vec<(String, String)>,
+    /// Mods it can't run without, from each loader's metadata in it.
+    pub requires: Vec<Requirement>,
+}
+
+/// A mod a jar can't run without, as one loader's metadata in it says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Requirement {
+    pub id: String,
+    /// The versions it accepts, as the jar writes them.
+    pub versions: String,
+    /// Whose metadata says so. A jar made for several loaders lists each one's needs apart: its
+    /// NeoForge half needing NeoForge says nothing about a Fabric game.
+    pub platform: Platform,
+}
+
+/// The metadata a loader reads from a jar, in the order it looks: Quilt falls back to Fabric's,
+/// and NeoForge (for 1.20.1) to Forge's.
+fn reads(loader: Loader) -> &'static [Platform] {
+    match loader {
+        Loader::Fabric => &[Platform::Fabric],
+        Loader::Quilt => &[Platform::Quilt, Platform::Fabric],
+        Loader::Forge => &[Platform::Forge],
+        Loader::NeoForge => &[Platform::NeoForge, Platform::Forge],
+        Loader::Vanilla => &[],
+    }
 }
 
 impl ModInfo {
+    /// What it needs where this loader runs it: only the metadata that loader reads. A jar the
+    /// loader runs through a bridge (Connector, Kilt) keeps its own first set.
+    fn needs(&self, loader: Loader) -> impl Iterator<Item = &Requirement> {
+        let platform = reads(loader).iter().copied().find(|platform| self.loaders.contains(platform)).or_else(|| self.loaders.first().copied());
+        self.requires.iter().filter(move |requirement| Some(requirement.platform) == platform)
+    }
+
     fn display(&self) -> String {
         if !self.name.is_empty() {
             self.name.clone()
@@ -81,7 +112,7 @@ impl ModInfo {
         }
     }
 
-    fn answers_to(&self, id: &str) -> bool {
+    pub(crate) fn answers_to(&self, id: &str) -> bool {
         self.id == id || self.provides.iter().any(|provided| provided == id)
     }
 }
@@ -155,7 +186,8 @@ fn entry_text<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> O
     Some(String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}').to_string())
 }
 
-/// JSON as mod authors write it: sometimes with comments or a trailing comma.
+/// JSON as mod authors write it and Fabric's own reader takes it: sometimes with comments, a
+/// trailing comma, or a line break typed straight into a description.
 fn lenient_json(text: &str) -> Option<Value> {
     if let Ok(value) = serde_json::from_str(text) {
         return Some(value);
@@ -165,12 +197,24 @@ fn lenient_json(text: &str) -> Option<Value> {
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
         if in_string {
-            cleaned.push(character);
             match character {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
+                _ if escaped => {
+                    escaped = false;
+                    cleaned.push(character);
+                }
+                '\\' => {
+                    escaped = true;
+                    cleaned.push(character);
+                }
+                '"' => {
+                    in_string = false;
+                    cleaned.push(character);
+                }
+                '\n' => cleaned.push_str("\\n"),
+                '\r' => cleaned.push_str("\\r"),
+                '\t' => cleaned.push_str("\\t"),
+                control if control < ' ' => cleaned.push_str(&format!("\\u{:04x}", u32::from(control))),
+                _ => cleaned.push(character),
             }
             continue;
         }
@@ -186,6 +230,25 @@ fn lenient_json(text: &str) -> Option<Value> {
                         break;
                     }
                 }
+            }
+            '#' => {
+                for next in characters.by_ref() {
+                    if next == '\n' {
+                        cleaned.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if characters.peek() == Some(&'*') => {
+                characters.next();
+                let mut previous = ' ';
+                for next in characters.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+                cleaned.push(' ');
             }
             _ => cleaned.push(character),
         }
@@ -232,7 +295,7 @@ fn read_fabric(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<St
                 Value::Array(items) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" || "),
                 _ => "*".to_string(),
             };
-            info.requires.push((dependency.clone(), versions));
+            info.requires.push(Requirement { id: dependency.clone(), versions, platform: Platform::Fabric });
         }
     }
 }
@@ -269,12 +332,12 @@ fn read_quilt(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<Str
     }
     for dependency in loader.get("depends").and_then(Value::as_array).into_iter().flatten() {
         match dependency {
-            Value::String(id) => info.requires.push((plain_id(id).to_string(), "*".to_string())),
+            Value::String(id) => info.requires.push(Requirement { id: plain_id(id).to_string(), versions: "*".to_string(), platform: Platform::Quilt }),
             Value::Object(fields) => {
                 let optional = fields.get("optional").and_then(Value::as_bool) == Some(true) || fields.contains_key("unless");
                 if let (false, Some(id)) = (optional, fields.get("id").and_then(Value::as_str)) {
                     let versions = fields.get("versions").and_then(Value::as_str).unwrap_or("*");
-                    info.requires.push((plain_id(id).to_string(), versions.to_string()));
+                    info.requires.push(Requirement { id: plain_id(id).to_string(), versions: versions.to_string(), platform: Platform::Quilt });
                 }
             }
             _ => {}
@@ -285,6 +348,13 @@ fn read_quilt(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<Str
 /// Quilt allows "group:id"; the id is the part after the colon.
 fn plain_id(id: &str) -> &str {
     id.rsplit(':').next().unwrap_or(id)
+}
+
+/// A mods.toml dependency the mod can't run without: Forge's `mandatory = true`, NeoForge's
+/// `type = "required"`.
+fn required(dependency: &toml::Value) -> bool {
+    dependency.get("mandatory").and_then(toml::Value::as_bool).unwrap_or(false)
+        || dependency.get("type").and_then(toml::Value::as_str).is_some_and(|kind| kind.eq_ignore_ascii_case("required"))
 }
 
 fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) {
@@ -301,9 +371,12 @@ fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) 
         return;
     }
     let dependencies = table.get("dependencies").and_then(toml::Value::as_table);
-    // NeoForge for 1.20.1 to 1.20.4 used mods.toml too; depending on "neoforge" gives it away.
+    // NeoForge for 1.20.1 to 1.20.4 used mods.toml too; requiring "neoforge" gives it away. A jar
+    // made for both lists Forge and NeoForge as optional, and is a Forge jar as much as any.
     let depends_on_neoforge = dependencies.is_some_and(|all| {
-        all.values().flat_map(|list| list.as_array().into_iter().flatten()).any(|dependency| dependency.get("modId").and_then(toml::Value::as_str) == Some("neoforge"))
+        all.values()
+            .flat_map(|list| list.as_array().into_iter().flatten())
+            .any(|dependency| dependency.get("modId").and_then(toml::Value::as_str) == Some("neoforge") && required(dependency))
     });
     let platform = if platform == Platform::Forge && depends_on_neoforge { Platform::NeoForge } else { platform };
     if !info.loaders.contains(&platform) {
@@ -329,12 +402,10 @@ fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) 
             let Some(dependency_id) = dependency.get("modId").and_then(toml::Value::as_str) else {
                 continue;
             };
-            let required = dependency.get("mandatory").and_then(toml::Value::as_bool).unwrap_or(false)
-                || dependency.get("type").and_then(toml::Value::as_str).is_some_and(|kind| kind.eq_ignore_ascii_case("required"));
             let server_only = dependency.get("side").and_then(toml::Value::as_str).is_some_and(|side| side.eq_ignore_ascii_case("server"));
-            if required && !server_only {
+            if required(dependency) && !server_only {
                 let range = dependency.get("versionRange").and_then(toml::Value::as_str).unwrap_or("");
-                info.requires.push((dependency_id.to_string(), range.to_string()));
+                info.requires.push(Requirement { id: dependency_id.to_string(), versions: range.to_string(), platform });
             }
         }
     }
@@ -342,8 +413,13 @@ fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) 
 
 // ── Scanning mods/ ──
 
+/// Goes up whenever what's read from a jar changes, so caches from before are read afresh.
+const CACHE_VERSION: u32 = 2;
+
 #[derive(Default, Serialize, Deserialize)]
 struct Cache {
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     jars: HashMap<String, Cached>,
 }
@@ -370,7 +446,11 @@ pub fn scan(instance_dir: &Path) -> Vec<ModInfo> {
         return Vec::new();
     };
     let cache_path = instance_dir.join(CACHE);
-    let mut cache: Cache = std::fs::read(&cache_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+    let mut cache: Cache = std::fs::read(&cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Cache>(&bytes).ok())
+        .filter(|cache| cache.version == CACHE_VERSION)
+        .unwrap_or(Cache { version: CACHE_VERSION, jars: HashMap::new() });
     let mut found = Vec::new();
     let mut unread: Vec<(String, PathBuf, u64, i64)> = Vec::new();
     let mut present = HashSet::new();
@@ -423,8 +503,8 @@ pub fn scan(instance_dir: &Path) -> Vec<ModInfo> {
 /// Something that stops (or stopped) the game.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Problem {
-    /// A mod needs another that isn't installed.
-    Missing { id: String, needed_by: String },
+    /// Mods need another that isn't installed (every mod that needs it, by name).
+    Missing { id: String, needed_by: Vec<String> },
     /// A mod needs another at a version that isn't the one installed.
     WrongVersion { id: String, needed_by: String, wanted: String, found: String },
     /// A jar made for another loader (a Fabric mod in a Forge instance, say).
@@ -452,8 +532,8 @@ impl Problem {
     /// The problem in a sentence, for the player.
     pub fn describe(&self, loader: Loader) -> String {
         match self {
-            Self::Missing { id, needed_by } => format!("{needed_by} needs {id}, which isn't installed."),
-            Self::WrongVersion { id, needed_by, wanted, found } => format!("{needed_by} needs {wanted} of {id}, but {found} is installed."),
+            Self::Missing { id, needed_by } => format!("{} {} {}, which isn't installed.", names(needed_by), need(needed_by), dependency_name(id)),
+            Self::WrongVersion { id, needed_by, wanted, found } => format!("{needed_by} needs {wanted} of {}, but {found} is installed.", dependency_name(id)),
             Self::WrongLoader { name, made_for, .. } => format!("{name} is made for {}, not {}.", made_for.label(), loader.display_name()),
             Self::Duplicate { name, .. } => format!("{name} is installed more than once."),
             Self::LoaderTooOld { needed_by, .. } => format!("{needed_by} needs a newer {}.", loader.display_name()),
@@ -466,6 +546,39 @@ impl Problem {
             Self::Culprit { name, .. } => format!("The crash points at {name}."),
         }
     }
+}
+
+/// "Sodium", "Sodium and Iris", "Sodium, Iris and Lithium", "Sodium, Iris and 4 other mods".
+fn names(list: &[String]) -> String {
+    match list {
+        [] => "A mod".into(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} other mods", rest.len()),
+    }
+}
+
+/// "needs" after one name, "need" after several.
+fn need(list: &[String]) -> &'static str {
+    if list.len() > 1 { "need" } else { "needs" }
+}
+
+/// One of the forty-odd ids Fabric API's jar answers to (its modules, and its old name).
+fn is_fabric_api_part(id: &str) -> bool {
+    let module = id.starts_with("fabric-") && id.rsplit('-').next().is_some_and(|tail| tail.len() == 2 && tail.starts_with('v') && tail[1..].chars().all(|c| c.is_ascii_digit()));
+    module || matches!(id, "fabric-api" | "fabric" | "fabric-api-base")
+}
+
+/// A mod id the way players know it: Fabric API's modules are just Fabric API.
+fn dependency_name(id: &str) -> String {
+    if is_fabric_api_part(id) { "Fabric API".into() } else { id.to_string() }
+}
+
+/// Ids that name a mod loader rather than a mod. Never something to look for in mods/: a
+/// universal jar's NeoForge half needs NeoForge, which a Fabric game ignores.
+fn names_a_loader(id: &str) -> bool {
+    matches!(id, "forge" | "neoforge" | "fml" | "javafml" | "lowcodefml" | "fabricloader" | "fabric-loader" | "quilt_loader")
 }
 
 /// Ids every instance of a loader answers to without a mod for them.
@@ -527,6 +640,12 @@ fn below_minimum(requirement: &str, current: &str) -> bool {
     })
 }
 
+/// How many problems these are to a player: Fabric API's modules missing together are one.
+pub fn count(problems: &[Problem]) -> usize {
+    let missing: Vec<Problem> = problems.iter().filter(|problem| matches!(problem, Problem::Missing { .. })).cloned().collect();
+    problems.len() - missing.len() + families(missing).len()
+}
+
 /// Problems the mods folder shows before the game starts. Cheap enough for every launch.
 pub fn check(instance: &Instance, instance_dir: &Path) -> Vec<Problem> {
     if instance.loader == Loader::Vanilla {
@@ -578,26 +697,44 @@ fn check_mods(instance: &Instance, mods: &[ModInfo]) -> Vec<Problem> {
     duplicates.sort_by_key(|problem| format!("{problem:?}"));
     problems.extend(duplicates);
 
-    let present: HashSet<&str> = usable.iter().filter(|info| !extras.contains(&info.file)).flat_map(|info| info.provides.iter().map(String::as_str)).collect();
+    let present = provided(instance, mods, &extras);
     let mut loader_noted = false;
+    let mut missing: Vec<(String, Vec<String>)> = Vec::new();
     for info in usable.iter().filter(|info| !extras.contains(&info.file)) {
-        for (dependency, versions) in &info.requires {
-            let dependency = plain_id(dependency);
+        for requirement in info.needs(instance.loader) {
+            let dependency = plain_id(&requirement.id);
             if is_builtin(dependency, instance.loader) {
-                let outdated = is_loader_id(dependency) && instance.loader_version.as_deref().is_some_and(|current| below_minimum(versions, current));
+                let outdated = is_loader_id(dependency) && instance.loader_version.as_deref().is_some_and(|current| below_minimum(&requirement.versions, current));
                 if outdated && !loader_noted {
                     loader_noted = true;
-                    problems.push(Problem::LoaderTooOld { needed_by: info.display(), wanted: versions.clone() });
+                    problems.push(Problem::LoaderTooOld { needed_by: info.display(), wanted: requirement.versions.clone() });
                 }
                 continue;
             }
-            let noted = problems.iter().any(|problem| matches!(problem, Problem::Missing { id, .. } if id == dependency));
-            if !present.contains(dependency) && !noted {
-                problems.push(Problem::Missing { id: dependency.to_string(), needed_by: info.display() });
+            if names_a_loader(dependency) || present.contains(dependency) {
+                continue;
+            }
+            let name = info.display();
+            match missing.iter_mut().find(|(id, _)| id == dependency) {
+                Some((_, needed_by)) if !needed_by.contains(&name) => needed_by.push(name),
+                Some(_) => {}
+                None => missing.push((dependency.to_string(), vec![name])),
             }
         }
     }
+    problems.extend(missing.into_iter().map(|(id, needed_by)| Problem::Missing { id, needed_by }));
     problems
+}
+
+/// Every id the jars that run in this instance answer to, leaving out the files in `skip` (the
+/// extra copies of a mod that are about to be turned off).
+fn provided(instance: &Instance, mods: &[ModInfo], skip: &HashSet<String>) -> HashSet<String> {
+    let bridged = mods.iter().any(|info| info.answers_to("connector") || info.answers_to("kilt"));
+    mods.iter()
+        .filter(|info| !skip.contains(&info.file))
+        .filter(|info| info.loaders.is_empty() || bridged || info.loaders.iter().any(|platform| fits(*platform, instance.loader)))
+        .flat_map(|info| info.provides.iter().cloned())
+        .collect()
 }
 
 // ── Reading a crash ──
@@ -679,15 +816,27 @@ fn diagnose_lines(instance: &Instance, lines: &[String], mods: &[ModInfo]) -> Ve
             problems.push(problem);
         }
     }
+    // One problem per missing id, naming every mod that needs it. A loader's own id is never a
+    // mod to add.
+    let missing = |problems: &mut Vec<Problem>, id: &str, needed_by: String| {
+        if is_builtin(id, instance.loader) || names_a_loader(id) {
+            return;
+        }
+        match problems.iter_mut().find_map(|problem| match problem {
+            Problem::Missing { id: known, needed_by } if known == id => Some(needed_by),
+            _ => None,
+        }) {
+            Some(names) if !names.contains(&needed_by) => names.push(needed_by),
+            Some(_) => {}
+            None => problems.push(Problem::Missing { id: id.to_string(), needed_by: vec![needed_by] }),
+        }
+    };
     let name_of = |id: &str, fallback: &str| mods.iter().find(|info| info.answers_to(id)).map_or(fallback.to_string(), ModInfo::display);
     let joined = lines.join("\n");
 
     for (index, line) in lines.iter().enumerate() {
         if let Some(found) = patterns.fabric_missing.captures(line) {
-            let dependency = &found["dep"];
-            if !is_builtin(dependency, instance.loader) {
-                push(&mut problems, Problem::Missing { id: dependency.to_string(), needed_by: found["name"].to_string() });
-            }
+            missing(&mut problems, &found["dep"], found["name"].to_string());
         } else if let Some(found) = patterns.fabric_wrong.captures(line) {
             let (name, id, dependency, what) = (&found["name"], &found["id"], &found["dep"], &found["what"]);
             match dependency {
@@ -714,7 +863,7 @@ fn diagnose_lines(instance: &Instance, lines: &[String], mods: &[ModInfo]) -> Ve
             let (dependency, by, range, actual) = (&found["dep"], &found["by"], &found["range"], &found["actual"]);
             let needed_by = name_of(by, by);
             if actual.contains("MISSING") {
-                push(&mut problems, Problem::Missing { id: dependency.to_string(), needed_by });
+                missing(&mut problems, dependency, needed_by);
             } else if dependency == "minecraft" {
                 if let Some(file) = file_for(mods, by) {
                     push(&mut problems, Problem::WrongGame { file, name: needed_by, wanted: range.to_string() });
@@ -734,9 +883,7 @@ fn diagnose_lines(instance: &Instance, lines: &[String], mods: &[ModInfo]) -> Ve
                 .take(3)
                 .find_map(|earlier| patterns.neo_requires.captures(earlier).filter(|requires| requires["dep"] == dependency).map(|requires| name_of(&requires["by"], &requires["by"])))
                 .unwrap_or_else(|| "A mod".to_string());
-            if !is_builtin(&dependency, instance.loader) {
-                push(&mut problems, Problem::Missing { id: dependency, needed_by });
-            }
+            missing(&mut problems, &dependency, needed_by);
         }
         if let Some(found) = patterns.class_version.captures(line)
             && let Ok(version) = found["version"].parse::<u32>()
@@ -860,21 +1007,64 @@ impl Fixer<'_> {
     /// Fixes what it safely can and reports the rest.
     pub async fn repair(&self, problems: Vec<Problem>) -> Report {
         let mut report = Report::default();
-        let Some(instance_dir) = self.store.dir_of(self.instance_id) else {
+        let (Some(instance_dir), Some(instance)) = (self.store.dir_of(self.instance_id), self.store.get(self.instance_id)) else {
             return report;
         };
-        for problem in problems {
+        // What answered before any fix. An id the game missed though a jar here answers to it
+        // still gets a look; one a fix below brings along doesn't.
+        let before = provided(&instance, &scan(&instance_dir), &HashSet::new());
+        let (wanted, others): (Vec<Problem>, Vec<Problem>) = problems.into_iter().partition(|problem| matches!(problem, Problem::Missing { .. }));
+        for problem in others {
             let Some(instance) = self.store.get(self.instance_id) else {
-                break;
+                return report;
             };
             report.found.push(problem.describe(instance.loader));
             self.fix(&instance, &instance_dir, problem, &mut report).await;
         }
+        for family in families(wanted) {
+            let Some(instance) = self.store.get(self.instance_id) else {
+                return report;
+            };
+            let ids = still_missing(&family.ids, &before, &provided(&instance, &scan(&instance_dir), &HashSet::new()));
+            if !ids.is_empty() {
+                self.fix_missing(&instance, &instance_dir, Family { ids, ..family }, &mut report).await;
+            }
+        }
         report
     }
 
-    async fn fix(&self, instance: &Instance, instance_dir: &Path, problem: Problem, report: &mut Report) {
+    /// Adds what a group of mods is missing, or says what's left to do.
+    async fn fix_missing(&self, instance: &Instance, instance_dir: &Path, family: Family, report: &mut Report) {
+        let (who, verb, name) = (names(&family.needed_by), need(&family.needed_by), family.name());
+        report.found.push(format!("{who} {verb} {name}, which isn't installed."));
         let game = format!("{} {}", instance.loader.display_name(), instance.game_version);
+        // A search that came up empty a little while ago would only hold up Play again.
+        let key = format!("{game}|{}", family.ids[0]);
+        let missed = missed_lately(instance_dir, &key);
+        let outcome = if missed { Err(Lookup::NotFound) } else { self.install_providing(instance, instance_dir, &family.ids[0]).await };
+        let them = match family.needed_by.as_slice() {
+            [one] => one.clone(),
+            _ => "them".into(),
+        };
+        match outcome {
+            Ok(change) => {
+                remember_miss(instance_dir, &key, false);
+                if let Change::Added { title, version, .. } = &change {
+                    report.fixed.push(format!("Added {title} {version}, which {who} {verb}."));
+                }
+                report.changes.push(change);
+            }
+            Err(Lookup::NotFound) => {
+                if !missed {
+                    remember_miss(instance_dir, &key, true);
+                }
+                report.unsolved.push(format!("{who} {verb} {name}, and Wisp couldn't find it for {game}. Add it from Discover, or turn {them} off."));
+            }
+            Err(Lookup::Unreachable) => report.unsolved.push(format!("{who} {verb} {name}, and Wisp couldn't reach Modrinth to add it. Press Play again once you're online, or turn {them} off.")),
+        }
+    }
+
+    async fn fix(&self, instance: &Instance, instance_dir: &Path, problem: Problem, report: &mut Report) {
         match problem {
             Problem::WrongLoader { file, name, made_for } => match disable(instance_dir, &file) {
                 Ok(()) => {
@@ -894,24 +1084,18 @@ impl Fixer<'_> {
                     }
                 }
             }
-            Problem::Missing { id, needed_by } => match self.install_providing(instance, instance_dir, &id).await {
-                Some(change) => {
-                    if let Change::Added { title, version, .. } = &change {
-                        report.fixed.push(format!("Added {title} {version}: {needed_by} needs it."));
-                    }
-                    report.changes.push(change);
-                }
-                None => report.unsolved.push(format!("{needed_by} needs {id}, and Wisp couldn't find it for {game}. Look for it on Modrinth or CurseForge, or turn {needed_by} off.")),
-            },
+            // `repair` sends these to `fix_missing` in groups; one on its own goes the same way.
+            Problem::Missing { id, needed_by } => self.fix_missing(instance, instance_dir, Family { ids: vec![id], needed_by }, report).await,
             Problem::WrongVersion { id, needed_by, wanted, .. } => {
                 let wants_newer = wanted.contains("or later") || wanted.contains(">=") || wanted.ends_with(",)") || wanted.contains("above");
                 let changed = if wants_newer { self.update_providing(instance, instance_dir, &id).await } else { None };
+                let name = dependency_name(&id);
                 match changed {
                     Some(changes) => {
-                        report.fixed.push(format!("Updated {id}: {needed_by} needs {wanted}."));
+                        report.fixed.push(format!("Updated {name}: {needed_by} needs {wanted}."));
                         report.changes.extend(changes);
                     }
-                    None => report.unsolved.push(format!("{needed_by} needs {wanted} of {id}. Install that version, or turn {needed_by} off.")),
+                    None => report.unsolved.push(format!("{needed_by} needs {wanted} of {name}. Install that version, or turn {needed_by} off.")),
                 }
             }
             Problem::LoaderTooOld { needed_by, .. } => match self.update_loader(instance).await {
@@ -988,34 +1172,51 @@ impl Fixer<'_> {
         }
     }
 
-    /// Finds and installs the project whose jar provides a mod id, checking that it really does.
-    async fn install_providing(&self, instance: &Instance, instance_dir: &Path, id: &str) -> Option<Change> {
-        let index = ContentIndex::new(instance_dir);
-        for candidate in candidates(self.client, instance, id).await {
-            if index.list().iter().any(|item| item.project_id == candidate) {
-                continue;
-            }
-            let request = InstallRequest { project_id: &candidate, version_id: None, world: None, concurrency: self.concurrency, curseforge_key: self.curseforge_key };
-            let Ok(installed) = content::install(self.client, instance, instance_dir, request).await else {
+    /// Finds the project whose jar provides a mod id and installs it. Each guess is downloaded
+    /// and read before anything goes into the instance, and only a jar that really answers to
+    /// the id is installed (that very version), so a wrong guess never touches mods/.
+    async fn install_providing(&self, instance: &Instance, instance_dir: &Path, id: &str) -> Result<Change, Lookup> {
+        if names_a_loader(id) || is_builtin(id, instance.loader) {
+            return Err(Lookup::NotFound);
+        }
+        let loaders = content::compatible_loaders(instance.loader, ProjectType::Mod).ok_or(Lookup::NotFound)?;
+        let mut outcome = Lookup::NotFound;
+        for candidate in candidates(self.client, instance, id).await.ok_or(Lookup::Unreachable)? {
+            let version = match content::best_version(self.client, None, &candidate, &loaders, Some(&instance.game_version)).await {
+                Ok(Some(version)) => version,
+                Ok(None) => continue,
+                Err(_) => {
+                    outcome = Lookup::Unreachable;
+                    continue;
+                }
+            };
+            let Some(file) = version.primary_file() else {
                 continue;
             };
-            let game_dir = instance_dir.join(GAME_DIR);
-            if installed.iter().any(|item| read_jar(&game_dir.join(&item.file)).answers_to(id)) {
-                mark_dependencies(&index, &installed);
-                let main = installed.iter().find(|item| item.project_id == candidate).or(installed.first())?;
-                return Some(Change::Added {
-                    project_id: main.project_id.clone(),
-                    title: main.title.clone(),
-                    version: main.version_number.clone(),
-                    files: installed.iter().map(|item| item.file.clone()).collect(),
-                });
+            match jar_at(self.client, &file.url).await {
+                Some(info) if info.answers_to(id) => {}
+                Some(_) => continue,
+                None => {
+                    outcome = Lookup::Unreachable;
+                    continue;
+                }
             }
-            // Not the mod that was asked for: take it back out.
-            for item in &installed {
-                let _ = index.remove(&item.project_id, None);
-            }
+            // Listed as installed already doesn't stop it: its jar may be gone or turned off.
+            let request = InstallRequest { project_id: &version.project_id, version_id: Some(&version.id), world: None, concurrency: self.concurrency, curseforge_key: self.curseforge_key };
+            let Ok(installed) = content::install(self.client, instance, instance_dir, request).await else {
+                outcome = Lookup::Unreachable;
+                continue;
+            };
+            mark_dependencies(&ContentIndex::new(instance_dir), &installed);
+            let main = installed.iter().find(|item| item.project_id == version.project_id).or(installed.first()).ok_or(Lookup::NotFound)?;
+            return Ok(Change::Added {
+                project_id: main.project_id.clone(),
+                title: main.title.clone(),
+                version: main.version_number.clone(),
+                files: installed.iter().map(|item| item.file.clone()).collect(),
+            });
         }
-        None
+        Err(outcome)
     }
 
     /// Updates whatever provides a mod id to its newest build for this instance.
@@ -1026,7 +1227,11 @@ impl Fixer<'_> {
             return Some(vec![change]);
         }
         // Not from Modrinth: add the right one, then turn the old jar off.
-        let added = self.install_providing(instance, instance_dir, id).await?;
+        let added = self.install_providing(instance, instance_dir, id).await.ok()?;
+        // Unless the newest build is that very file.
+        if matches!(&added, Change::Added { files, .. } if files.iter().any(|path| *path == format!("mods/{file}"))) {
+            return Some(vec![added]);
+        }
         let name = mods.iter().find(|info| info.file == file).map(ModInfo::display).unwrap_or_else(|| file.clone());
         disable(instance_dir, &file).ok()?;
         Some(vec![added, Change::Disabled { file, name }])
@@ -1067,16 +1272,127 @@ impl Fixer<'_> {
     }
 }
 
+/// Missing ids one project brings, with every mod that needs them.
+struct Family {
+    ids: Vec<String>,
+    needed_by: Vec<String>,
+}
+
+impl Family {
+    fn name(&self) -> String {
+        dependency_name(&self.ids[0])
+    }
+}
+
+/// Missing mods gathered by what brings them: one line for Fabric API, not one per module.
+fn families(problems: Vec<Problem>) -> Vec<Family> {
+    let mut families: Vec<Family> = Vec::new();
+    for problem in problems {
+        let Problem::Missing { id, needed_by } = problem else {
+            continue;
+        };
+        let fabric = is_fabric_api_part(&id);
+        match families.iter_mut().find(|family| if fabric { is_fabric_api_part(&family.ids[0]) } else { family.ids[0] == id }) {
+            Some(family) => {
+                if !family.ids.contains(&id) {
+                    family.ids.push(id);
+                }
+                for name in needed_by {
+                    if !family.needed_by.contains(&name) {
+                        family.needed_by.push(name);
+                    }
+                }
+            }
+            None => families.push(Family { ids: vec![id], needed_by }),
+        }
+    }
+    families
+}
+
+/// The ids of a group still to look for: those nothing answers to now, and those something
+/// answered to before any fix (the game missed them all the same). One a fix brought is done.
+fn still_missing(ids: &[String], before: &HashSet<String>, now: &HashSet<String>) -> Vec<String> {
+    ids.iter().filter(|id| !now.contains(*id) || before.contains(*id)).cloned().collect()
+}
+
+/// Why a missing mod wasn't added.
+enum Lookup {
+    /// Modrinth answered, and nothing it has for this instance answers to the id.
+    NotFound,
+    /// Modrinth couldn't be asked, or a download didn't finish.
+    Unreachable,
+}
+
+/// Where the fixer notes the mods it looked for and couldn't find, next to `instance.json`.
+const MISSES: &str = "fix-misses.json";
+/// How long an empty search is trusted: long enough that Play isn't held up by the same search
+/// on every launch, short enough to catch a build published since.
+const MISS_FOR_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as i64)
+}
+
+fn read_misses(instance_dir: &Path) -> HashMap<String, i64> {
+    std::fs::read(instance_dir.join(MISSES)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+/// True when a search for this ("Fabric 26.2|frozenlib") came up empty within the last day.
+fn missed_lately(instance_dir: &Path, key: &str) -> bool {
+    read_misses(instance_dir).get(key).is_some_and(|at| now_ms() - at < MISS_FOR_MS)
+}
+
+/// Notes that a search came up empty, or forgets it once the mod is found.
+fn remember_miss(instance_dir: &Path, key: &str, missed: bool) {
+    let mut misses = read_misses(instance_dir);
+    let now = now_ms();
+    let before = misses.len();
+    misses.retain(|_, at| now - *at < MISS_FOR_MS);
+    let changed = if missed {
+        misses.insert(key.to_string(), now);
+        true
+    } else {
+        misses.remove(key).is_some() || misses.len() != before
+    };
+    if !changed {
+        return;
+    }
+    let path = instance_dir.join(MISSES);
+    if misses.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else if let Ok(bytes) = serde_json::to_vec(&misses) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// The biggest jar Wisp downloads only to read what it is.
+const MAX_GUESS: u64 = 128 * 1024 * 1024;
+
+/// What a jar on the web says about itself, read in memory: how a guess is checked before it
+/// goes anywhere near mods/. None when it couldn't be downloaded.
+async fn jar_at(client: &HttpClient, url: &str) -> Option<ModInfo> {
+    let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let mut info = ModInfo::default();
+    if response.content_length().is_some_and(|length| length > MAX_GUESS) {
+        return Some(info);
+    }
+    let bytes = response.bytes().await.ok()?;
+    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes)) {
+        read_archive(&mut archive, &mut info, 0);
+    }
+    Some(info)
+}
+
 fn gigabytes(mb: u32) -> String {
     let gb = f64::from(mb) / 1024.0;
     if gb.fract() == 0.0 { format!("{gb:.0} GB") } else { format!("{gb:.1} GB") }
 }
 
 /// Modrinth projects that may be the mod with this id: the id as a slug first (with a few
-/// well-known names that differ), then a search.
-async fn candidates(client: &HttpClient, instance: &Instance, id: &str) -> Vec<String> {
+/// well-known names that differ), then a search. None when Modrinth couldn't be asked at all.
+async fn candidates(client: &HttpClient, instance: &Instance, id: &str) -> Option<Vec<String>> {
     let Some(loaders) = content::compatible_loaders(instance.loader, ProjectType::Mod) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let mut slugs: Vec<String> = Vec::new();
     for slug in [alias(id).map(str::to_string), Some(id.to_string()), Some(id.replace('_', "-"))].into_iter().flatten() {
@@ -1102,23 +1418,26 @@ async fn candidates(client: &HttpClient, instance: &Instance, id: &str) -> Vec<S
         "limit": 4,
     }))
     .ok();
-    if let Some(query) = query
-        && let Ok(results) = modrinth::search(client, &query).await
-    {
-        for hit in results.hits {
-            if !found.contains(&hit.id) {
-                found.push(hit.id);
+    if let Some(query) = query {
+        match modrinth::search(client, &query).await {
+            Ok(results) => {
+                for hit in results.hits {
+                    if !found.contains(&hit.id) {
+                        found.push(hit.id);
+                    }
+                }
             }
+            Err(_) if found.is_empty() => return None,
+            Err(_) => {}
         }
     }
     found.truncate(5);
-    found
+    Some(found)
 }
 
 /// Mod ids whose Modrinth project goes by another name.
 fn alias(id: &str) -> Option<&'static str> {
-    let fabric_module = id.starts_with("fabric-") && id.rsplit('-').next().is_some_and(|tail| tail.len() == 2 && tail.starts_with('v') && tail[1..].chars().all(|c| c.is_ascii_digit()));
-    if fabric_module || id == "fabric" || id == "fabric-api-base" {
+    if is_fabric_api_part(id) {
         return Some("fabric-api");
     }
     Some(match id {
@@ -1294,15 +1613,15 @@ mod tests {
         assert!(api.answers_to("fabric") && api.answers_to("fabric-networking-api-v1"));
         assert_eq!(api.loaders, vec![Platform::Fabric]);
         let menu = by_file("menu.jar");
-        assert_eq!(menu.requires.iter().find(|(id, _)| id == "minecraft").unwrap().1, "1.21 || 1.21.1");
+        assert_eq!(menu.requires.iter().find(|requirement| requirement.id == "minecraft").unwrap().versions, "1.21 || 1.21.1");
         let quilt = by_file("quilt.jar");
         assert_eq!((quilt.name.as_str(), quilt.requires.len()), ("Q", 1));
         assert!(quilt.answers_to("other"));
         let rei = by_file("rei.jar");
         assert_eq!((rei.id.as_str(), rei.version.as_str(), rei.loaders.clone()), ("rei", "", vec![Platform::Forge]));
-        assert_eq!(rei.requires, vec![("architectury".to_string(), "[9.1,)".to_string())]);
-        // The second look comes from the cache.
-        assert!(dir.join(CACHE).exists());
+        assert_eq!(rei.requires, vec![Requirement { id: "architectury".into(), versions: "[9.1,)".into(), platform: Platform::Forge }]);
+        // The second look comes from the cache, which says what reads it.
+        assert!(std::fs::read_to_string(dir.join(CACHE)).unwrap().contains(&format!("\"version\":{CACHE_VERSION}")));
         assert_eq!(scan(&dir), found);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1315,7 +1634,7 @@ mod tests {
             version: version.into(),
             provides: vec![id.into()],
             loaders: loaders.to_vec(),
-            requires: requires.iter().map(|(id, range)| (id.to_string(), range.to_string())).collect(),
+            requires: requires.iter().map(|(id, range)| Requirement { id: id.to_string(), versions: range.to_string(), platform: loaders.first().copied().unwrap_or(Platform::Fabric) }).collect(),
         }
     }
 
@@ -1332,7 +1651,7 @@ mod tests {
         let problems = check_mods(&fabric, &mods);
         assert!(problems.contains(&Problem::WrongLoader { file: "jei-forge.jar".into(), name: "jei".into(), made_for: Platform::Forge }));
         assert!(problems.contains(&Problem::Duplicate { name: "sodium".into(), keep: "sodium-0.6.jar".into(), extra: vec!["sodium-0.5.jar".into()] }));
-        assert!(problems.contains(&Problem::Missing { id: "fabric-api".into(), needed_by: "modmenu".into() }));
+        assert!(problems.contains(&Problem::Missing { id: "fabric-api".into(), needed_by: vec!["modmenu".into()] }));
         // The old copy wanted a newer loader, but it's the one being turned off.
         assert!(!problems.iter().any(|problem| matches!(problem, Problem::LoaderTooOld { .. })));
         assert_eq!(problems.len(), 3);
@@ -1345,6 +1664,138 @@ mod tests {
         assert!(check_mods(&instance(Loader::Quilt, None), &[info("a.jar", "a", "1", &[Platform::Fabric], &[])]).is_empty());
         let bridged = [info("connector.jar", "connector", "1", &[Platform::NeoForge], &[]), info("a.jar", "a", "1", &[Platform::Fabric], &[])];
         assert!(check_mods(&instance(Loader::NeoForge, None), &bridged).is_empty());
+    }
+
+    #[test]
+    fn a_universal_jar_needs_only_what_its_loader_reads() {
+        let dir = temp_instance("universal");
+        let mods = dir.join(GAME_DIR).join("mods");
+        jar(&mods.join("api.jar"), &[("fabric.mod.json", br#"{"id": "fabric-api", "version": "0.100.0"}"#.to_vec())]);
+        // One jar for Fabric, Forge and NeoForge, each half needing its own loader.
+        jar(
+            &mods.join("puzzle.jar"),
+            &[
+                ("fabric.mod.json", br#"{"id": "puzzle", "version": "2.3.1", "depends": {"fabricloader": ">=0.15", "fabric-api": "*", "minecraft": "26.2"}}"#.to_vec()),
+                (
+                    "META-INF/neoforge.mods.toml",
+                    b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"puzzle\"\n[[dependencies.puzzle]]\nmodId=\"neoforge\"\ntype=\"required\"\nversionRange=\"[21,)\"\n[[dependencies.puzzle]]\nmodId=\"puzzleslib\"\ntype=\"required\"\nversionRange=\"[1,)\"\n".to_vec(),
+                ),
+                ("META-INF/mods.toml", b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"puzzle\"\n[[dependencies.puzzle]]\nmodId=\"forge\"\nmandatory=true\nversionRange=\"[47,)\"\n".to_vec()),
+            ],
+        );
+        let found = scan(&dir);
+        assert_eq!(found.iter().find(|info| info.file == "puzzle.jar").unwrap().loaders, vec![Platform::Fabric, Platform::NeoForge, Platform::Forge]);
+        assert_eq!(check_mods(&instance(Loader::Fabric, Some("0.16.0")), &found), vec![]);
+        // On NeoForge the same jar needs what its NeoForge half says, and nothing of Fabric's.
+        let missing: Vec<Problem> = check_mods(&instance(Loader::NeoForge, Some("21.1.0")), &found).into_iter().filter(|problem| matches!(problem, Problem::Missing { .. })).collect();
+        assert_eq!(missing, vec![Problem::Missing { id: "puzzleslib".into(), needed_by: vec!["puzzle".into()] }]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reads_jars_the_way_their_loaders_do() {
+        let dir = temp_instance("lenient");
+        let mods = dir.join(GAME_DIR).join("mods");
+        // A line break typed into the description, a tab and a block comment: Fabric takes all three.
+        jar(
+            &mods.join("frozenlib.jar"),
+            &[("fabric.mod.json", b"{\n  \"id\": \"frozenlib\", /* a library */\n  \"provides\": [\"frozenblocklib\"],\n  \"description\": \"Tools for modders.\nAnd more.\tTabs too.\",\n  \"version\": \"1.9.3\"\n}".to_vec())],
+        );
+        // One jar for Fabric, Forge and NeoForge whose Forge half lists NeoForge as optional.
+        jar(
+            &mods.join("packetfixer.jar"),
+            &[
+                ("fabric.mod.json", br#"{"id": "packetfixer", "version": "3.1.4", "depends": {"fabricloader": "*"}}"#.to_vec()),
+                (
+                    "META-INF/mods.toml",
+                    b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"packetfixer\"\n[[dependencies.packetfixer]]\nmodId=\"forge\"\nmandatory=false\nversionRange=\"[0,)\"\n[[dependencies.packetfixer]]\nmodId=\"neoforge\"\nmandatory=false\nversionRange=\"[0,)\"\n".to_vec(),
+                ),
+                ("META-INF/neoforge.mods.toml", b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"packetfixer\"\n".to_vec()),
+            ],
+        );
+        let found = scan(&dir);
+        let frozen = found.iter().find(|info| info.file == "frozenlib.jar").unwrap();
+        assert_eq!((frozen.id.as_str(), frozen.version.as_str()), ("frozenlib", "1.9.3"));
+        assert!(frozen.answers_to("frozenblocklib"));
+        let fixer = found.iter().find(|info| info.file == "packetfixer.jar").unwrap();
+        assert_eq!(fixer.loaders, vec![Platform::Fabric, Platform::NeoForge, Platform::Forge]);
+        assert_eq!(check_mods(&instance(Loader::Forge, Some("43.5.1")), std::slice::from_ref(fixer)), vec![]);
+        assert_eq!(check_mods(&instance(Loader::Fabric, Some("0.16.0")), &found), vec![]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remembers_a_search_that_came_up_empty_for_a_day() {
+        let dir = temp_instance("misses");
+        let key = "Fabric 1.20.1|frozenlib";
+        assert!(!missed_lately(&dir, key));
+        remember_miss(&dir, key, true);
+        assert!(missed_lately(&dir, key));
+        assert!(!missed_lately(&dir, "Fabric 1.21.1|frozenlib"));
+        remember_miss(&dir, key, false);
+        assert!(!missed_lately(&dir, key));
+        assert!(!dir.join(MISSES).exists());
+        // One from more than a day ago doesn't count.
+        std::fs::write(dir.join(MISSES), format!("{{\"{key}\": {}}}", now_ms() - MISS_FOR_MS - 1)).unwrap();
+        assert!(!missed_lately(&dir, key));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_loader_is_never_a_missing_mod() {
+        let fabric = instance(Loader::Fabric, None);
+        let mods = vec![info("odd.jar", "odd", "1", &[Platform::Fabric], &[("forge", "*"), ("neoforge", "[21,)"), ("javafml", "*")])];
+        assert_eq!(check_mods(&fabric, &mods), vec![]);
+        let lines: Vec<String> = ["\t - Mod 'Odd' (odd) 1 requires any version of neoforge, which is missing!"].iter().map(|line| clean(line)).collect();
+        assert_eq!(diagnose_lines(&fabric, &lines, &mods), vec![]);
+    }
+
+    #[test]
+    fn gathers_what_is_missing_by_what_brings_it() {
+        let fabric = instance(Loader::Fabric, None);
+        let mods = vec![
+            info("continuity.jar", "continuity", "1", &[Platform::Fabric], &[("fabric-api", "*")]),
+            info("optigui.jar", "optigui", "1", &[Platform::Fabric], &[("fabric-networking-api-v1", "*"), ("fabric-api", "*")]),
+            info("menu.jar", "modmenu", "1", &[Platform::Fabric], &[("fabric-api", "*"), ("cloth-config", "*")]),
+        ];
+        let problems = check_mods(&fabric, &mods);
+        assert_eq!(
+            problems,
+            vec![
+                Problem::Missing { id: "fabric-api".into(), needed_by: vec!["continuity".into(), "optigui".into(), "modmenu".into()] },
+                Problem::Missing { id: "fabric-networking-api-v1".into(), needed_by: vec!["optigui".into()] },
+                Problem::Missing { id: "cloth-config".into(), needed_by: vec!["modmenu".into()] },
+            ]
+        );
+        assert_eq!(problems[0].describe(Loader::Fabric), "continuity, optigui and modmenu need Fabric API, which isn't installed.");
+        assert_eq!(problems[2].describe(Loader::Fabric), "modmenu needs cloth-config, which isn't installed.");
+        // Fabric API and its modules are one thing to fix.
+        assert_eq!(count(&problems), 2);
+        let grouped = families(problems);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!((grouped[0].ids.clone(), grouped[0].name()), (vec!["fabric-api".to_string(), "fabric-networking-api-v1".to_string()], "Fabric API".to_string()));
+        assert_eq!(grouped[0].needed_by, vec!["continuity", "optigui", "modmenu"]);
+        assert_eq!(grouped[1].name(), "cloth-config");
+        assert_eq!(names(&["a".into(), "b".into(), "c".into(), "d".into()]), "a, b and 2 other mods");
+
+        // The crash names each module apart; they still come out as one.
+        let lines: Vec<String> = [
+            "\t - Mod 'Continuity' (continuity) 3.0.1 requires any version of fabric-api, which is missing!",
+            "\t - Mod 'OptiGUI' (optigui) 2.3.0 requires any version of fabric-networking-api-v1, which is missing!",
+            "\t - Mod 'LambDynamicLights' (lambdynlights) 4.1 requires any version of fabric-api, which is missing!",
+        ]
+        .iter()
+        .map(|line| clean(line))
+        .collect();
+        let problems = diagnose_lines(&fabric, &lines, &[]);
+        assert_eq!(problems[0], Problem::Missing { id: "fabric-api".into(), needed_by: vec!["Continuity".into(), "LambDynamicLights".into()] });
+        assert_eq!(count(&problems), 1);
+
+        // Once a fix brings Fabric API, its modules are done; what the game missed though a jar
+        // claimed it before any fix still gets a look.
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<HashSet<String>>();
+        let ids = vec!["fabric-networking-api-v1".to_string(), "cloth-config".to_string(), "sodium".to_string()];
+        assert_eq!(still_missing(&ids, &set(&["sodium"]), &set(&["fabric-networking-api-v1", "sodium"])), vec!["cloth-config", "sodium"]);
     }
 
     #[test]
@@ -1382,7 +1833,7 @@ mod tests {
         assert_eq!(
             problems,
             vec![
-                Problem::Missing { id: "fabric-api".into(), needed_by: "Mod Menu".into() },
+                Problem::Missing { id: "fabric-api".into(), needed_by: vec!["Mod Menu".into()] },
                 Problem::LoaderTooOld { needed_by: "Mod Menu".into(), wanted: "version 0.16.0 or later".into() },
                 Problem::WrongGame { file: "old.jar".into(), name: "Old Mod".into(), wanted: "1.20.1".into() },
                 Problem::WrongVersion { id: "cloth-config".into(), needed_by: "Mod Menu".into(), wanted: "version 2.0 or later".into(), found: "1.0".into() },
@@ -1404,7 +1855,7 @@ mod tests {
         .map(|line| clean(line))
         .collect();
         let problems = diagnose_lines(&forge, &lines, &[]);
-        assert!(problems.contains(&Problem::Missing { id: "architectury".into(), needed_by: "rei".into() }));
+        assert!(problems.contains(&Problem::Missing { id: "architectury".into(), needed_by: vec!["rei".into()] }));
         assert!(problems.contains(&Problem::LoaderTooOld { needed_by: "rei".into(), wanted: "[47.2,)".into() }));
         assert!(problems.contains(&Problem::NeedsJava { major: 21 }));
         assert!(problems.contains(&Problem::OutOfMemory));
@@ -1412,7 +1863,7 @@ mod tests {
 
         let neo = instance(Loader::NeoForge, None);
         let lines: Vec<String> = ["Mod §eJust Enough Items§r requires §6architectury§r 13.0.0 or above", "§rCurrently, §6architectury§r is §cnot installed"].iter().map(|line| clean(line)).collect();
-        assert_eq!(diagnose_lines(&neo, &lines, &[]), vec![Problem::Missing { id: "architectury".into(), needed_by: "Just Enough Items".into() }]);
+        assert_eq!(diagnose_lines(&neo, &lines, &[]), vec![Problem::Missing { id: "architectury".into(), needed_by: vec!["Just Enough Items".into()] }]);
 
         // With nothing clearer, the suspect a crash report names.
         let mods = vec![info("sodium.jar", "sodium", "1", &[Platform::Fabric], &[])];

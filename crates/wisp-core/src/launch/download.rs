@@ -76,6 +76,7 @@ pub async fn download_all(
     concurrency: usize,
     progress: &Arc<Progress>,
 ) -> Result<(), DownloadError> {
+    let items = distinct(items);
     progress
         .total_files
         .fetch_add(items.len() as u64, Ordering::Relaxed);
@@ -162,6 +163,8 @@ async fn fetch_once(
     }
 
     let partial = part_path(&item.path);
+    // Made before the file, so the file is closed first when a stopped download drops both.
+    let leftover = Leftover(Some(partial.clone()));
     let mut file = tokio::fs::File::create(&partial).await.map_err(io)?;
     let mut hasher = Sha1::new();
     while let Some(chunk) = response.chunk().await.map_err(http)? {
@@ -191,8 +194,35 @@ async fn fetch_once(
             .map_err(io)?;
     }
     tokio::fs::rename(&partial, &item.path).await.map_err(io)?;
+    leftover.finished();
     progress.done_files.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+/// Each file once: a list that names the same file twice (a modpack's index can) would have two
+/// downloads writing one partial file, and the second rename failing.
+fn distinct(items: Vec<Download>) -> Vec<Download> {
+    let mut seen = std::collections::HashSet::new();
+    items.into_iter().filter(|item| seen.insert(item.path.clone())).collect()
+}
+
+/// A partial file that goes away unless its download finished: one stopped half way (a launch
+/// cancelled, an install abandoned) or failed leaves nothing behind.
+struct Leftover(Option<PathBuf>);
+
+impl Leftover {
+    /// The download finished and the file has its real name.
+    fn finished(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn part_path(path: &Path) -> PathBuf {
@@ -242,5 +272,27 @@ mod tests {
             part_path(Path::new("/a/b/client.jar")),
             Path::new("/a/b/client.jar.part")
         );
+    }
+
+    #[test]
+    fn a_file_listed_twice_is_fetched_once() {
+        let item = |name: &str| Download { url: format!("https://example.invalid/{name}"), path: PathBuf::from(format!("/mods/{name}")), sha1: None, size: None, executable: false };
+        let names: Vec<PathBuf> = distinct(vec![item("a.jar"), item("b.jar"), item("a.jar")]).into_iter().map(|item| item.path).collect();
+        assert_eq!(names, [PathBuf::from("/mods/a.jar"), PathBuf::from("/mods/b.jar")]);
+    }
+
+    #[test]
+    fn a_stopped_download_takes_its_partial_file_with_it() {
+        let dir = std::env::temp_dir().join(format!("wisp-leftover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("a.jar.part");
+        std::fs::write(&partial, b"half").unwrap();
+        drop(Leftover(Some(partial.clone())));
+        assert!(!partial.exists());
+        let whole = dir.join("b.jar");
+        std::fs::write(&whole, b"whole").unwrap();
+        Leftover(Some(whole.clone())).finished();
+        assert!(whole.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

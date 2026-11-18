@@ -305,6 +305,15 @@ export const addServer = (instanceId: string, name: string, address: string) =>
   call<SavedServer>("add_server", { instanceId, name, address }, (p) => p.addServer(instanceId, name, address));
 export const removeServer = (instanceId: string, address: string) => call<void>("remove_server", { instanceId, address }, (p) => p.removeServer(instanceId, address));
 
+// ── Settings shared between instances ──
+
+/** Ids of the instances that keep their own settings instead of sharing them. */
+export const getInstancesKeepingSettings = () => call<string[]>("get_instances_keeping_settings", undefined, () => Promise.resolve([]));
+export const setInstanceKeepsSettings = (id: string, keep: boolean) =>
+  call<void>("set_instance_keeps_settings", { id, keep }, (p) => p.needsDesktop("Keeping an instance's settings apart"));
+/** Gives every other instance all of this one's settings, from their next start. Returns how many settings. */
+export const shareInstanceSettings = (id: string) => call<number>("share_instance_settings", { id }, (p) => p.needsDesktop("Sharing an instance's settings"));
+
 // ── Fixes ──
 
 export const undoFix = (entryId: string) => call<void>("undo_fix", { entryId }, (p) => p.needsDesktop("Undoing a fix"));

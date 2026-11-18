@@ -84,6 +84,9 @@ const AddAccountDialog = lazy(() =>
 
 const message = (failure: unknown) => (failure instanceof Error ? failure.message : String(failure));
 
+/** A toast's worth of a fix report: up to three lines, then how many more there are. */
+const brief = (lines: string[]) => (lines.length <= 3 ? lines : [...lines.slice(0, 2), `And ${lines.length - 2} more.`]).join("\n");
+
 function without<T>(record: Record<string, T>, key: string): Record<string, T> {
   const next = { ...record };
   delete next[key];
@@ -493,7 +496,7 @@ export default function App() {
           notify({
             tone: "success",
             title: report.fixed.length === 1 ? `Fixed a problem with ${name}` : `Fixed ${report.fixed.length} problems with ${name}`,
-            body: report.fixed.join("\n"),
+            body: brief(report.fixed),
             lifetimeMs: 14_000,
             action: entry
               ? {
@@ -507,7 +510,7 @@ export default function App() {
               : undefined,
           });
         }
-        if (report.unsolved.length > 0) notify({ tone: "info", title: `Something may stop ${name}`, body: report.unsolved.join("\n"), lifetimeMs: 14_000 });
+        if (report.unsolved.length > 0) notify({ tone: "info", title: `Something may stop ${name}`, body: brief(report.unsolved), lifetimeMs: 14_000 });
         void refreshHome();
       }),
     [notify, homeNow, refreshHome],

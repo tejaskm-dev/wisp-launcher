@@ -1,11 +1,13 @@
-import { PackagePlus, Trash2, Zap } from "lucide-react";
-import { useState, type FormEvent } from "react";
-import { deleteInstance, speedUpInstance, updateInstance } from "../../data/api";
+import { PackagePlus, SlidersHorizontal, Trash2, Zap } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { deleteInstance, getInstancesKeepingSettings, setInstanceKeepsSettings, speedUpInstance, updateInstance } from "../../data/api";
 import type { Instance, SpedUp } from "../../data/types";
 import { instanceLabel } from "../../lib/format";
+import { sharesSettings } from "../../lib/sharedSettings";
 import { useApp } from "../../state/AppContext";
 import { Button } from "../ui/Button";
 import { Dialog } from "../ui/Dialog";
+import { Toggle } from "../ui/Toggle";
 import { IconPicker } from "./IconPicker";
 import { InstanceAvatar } from "./InstanceAvatar";
 import { DEFAULT_ICONS, iconId } from "./icons";
@@ -14,7 +16,31 @@ const FORM_ID = "edit-instance";
 
 /** Rename an instance, change its icon, or delete it (after a second, explicit confirmation). */
 export function EditInstanceDialog({ instance, open, onClose }: { instance: Instance; open: boolean; onClose: () => void }) {
-  const { refreshHome, notify, importFiles } = useApp();
+  const { refreshHome, notify, importFiles, settings } = useApp();
+  // Whether this instance keeps its own settings instead of sharing them (null until known).
+  const shares = settings?.shareOptions === true && sharesSettings(instance.gameVersion);
+  const [keepsOwn, setKeepsOwn] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!open || !shares) return;
+    let live = true;
+    getInstancesKeepingSettings().then(
+      (ids) => live && setKeepsOwn(ids.includes(instance.id)),
+      () => live && setKeepsOwn(false),
+    );
+    return () => {
+      live = false;
+    };
+  }, [open, shares, instance.id]);
+  const keepOwn = async (keep: boolean) => {
+    setKeepsOwn(keep);
+    setError(null);
+    try {
+      await setInstanceKeepsSettings(instance.id, keep);
+    } catch (failure) {
+      setKeepsOwn(!keep);
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
   const [speeding, setSpeeding] = useState(false);
   const [sped, setSped] = useState<SpedUp | null>(null);
   const speedUp = async () => {
@@ -161,6 +187,21 @@ export function EditInstanceDialog({ instance, open, onClose }: { instance: Inst
               Add files
             </Button>
           </div>
+          {shares && keepsOwn !== null && (
+            <div className="flex items-center gap-3.5 rounded-[18px] bg-cream/4 px-3.5">
+              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-cream/8 text-cream-300">
+                <SlidersHorizontal size={18} aria-hidden="true" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <Toggle
+                  label="Keep its own settings"
+                  description="It stops sharing FOV, keybinds and other settings with your other instances, both ways. Handy for a heavy modpack that needs a lower render distance."
+                  checked={keepsOwn}
+                  onChange={(keep) => void keepOwn(keep)}
+                />
+              </div>
+            </div>
+          )}
         </div>
         {error && (
           <p role="alert" className="rounded-2xl border border-coral/25 bg-coral/10 px-4 py-3 text-sm font-semibold text-coral">

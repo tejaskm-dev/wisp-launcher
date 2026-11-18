@@ -596,6 +596,8 @@ export interface Settings {
   curseforgeApiKey: string;
   hooks: LaunchHooks;
   newInstances: NewInstanceOptions;
+  /** Settings changed in one instance reach the others on this computer when they next start. */
+  shareOptions: boolean;
   concurrentDownloads: number;
   externalImages: boolean;
   sync: SyncPrefs;
