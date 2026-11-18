@@ -325,8 +325,13 @@ export function onLaunchEvent(handler: (event: LaunchEvent) => void): () => void
   return () => void stop.then((unlisten) => unlisten());
 }
 
-/** Developer builds can make offline accounts for testing; release builds need Microsoft sign-in. */
-export const canAddOfflineAccounts = import.meta.env.DEV;
+/**
+ * A tester build: made for a closed group of people who own Minecraft, with offline accounts on
+ * and no self-updating (a public release would take offline accounts away). Never released.
+ */
+export const testerBuild = import.meta.env.VITE_WISP_TESTER === "1";
+/** Developer and tester builds can make offline accounts; public releases need Microsoft sign-in. */
+export const canAddOfflineAccounts = import.meta.env.DEV || testerBuild;
 
 /** Opens a web page in the default browser (never inside Wisp's own window). */
 export function openExternal(url: string): Promise<void> {

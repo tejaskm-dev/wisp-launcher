@@ -1,3 +1,4 @@
+import { testerBuild } from "../../data/api";
 import { LoaderCircle, PanelLeftClose, PanelLeftOpen, Play, Plus, Settings } from "lucide-react";
 import { m, type Variants } from "motion/react";
 import { useEffect, useState, type FocusEvent, type PointerEvent } from "react";
@@ -116,6 +117,11 @@ export function Sidebar({ revealed, logoVisible }: SidebarProps) {
             <Wordmark className={fade(collapsed)} />
             <Sparkle className={LOGO_SPARKLE} />
           </a>
+          {testerBuild && !collapsed && (
+            <p className="mt-1.5 w-fit rounded-full bg-ember/15 px-2.5 py-0.5 text-[11px] font-bold text-ember-soft" title="Offline accounts are on, and it doesn't update itself. For people who own Minecraft.">
+              Tester build
+            </p>
+          )}
         </div>
 
         {/* The middle scrolls on short windows; the account row stays put. Its scrollbar is hidden,

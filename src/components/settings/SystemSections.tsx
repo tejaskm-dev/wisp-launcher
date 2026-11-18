@@ -1,6 +1,6 @@
 import { ArrowUpCircle, Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { clearCache, getDataFolder, getStorageUsage, openDataFolder } from "../../data/api";
+import { clearCache, getDataFolder, getStorageUsage, openDataFolder, testerBuild } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
 import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
@@ -169,7 +169,11 @@ export function AboutSection({ settings, update }: SectionProps) {
         <div className="mt-2 flex items-center gap-4">
           <Ghost size={48} floating />
           <div className="text-[13px] leading-relaxed text-mute">
-            <p className="text-[15px] font-bold text-cream">Wisp {__APP_VERSION__}</p>
+            <p className="text-[15px] font-bold text-cream">
+              Wisp {__APP_VERSION__}
+              {testerBuild && <span className="ml-2 rounded-full bg-ember/15 px-2 py-0.5 align-middle text-[11px] font-bold text-ember-soft">Tester build</span>}
+            </p>
+            {testerBuild && <p>Made for testers who own Minecraft: offline accounts are on and it doesn't update itself. Please don't share it.</p>}
             <p>A Minecraft: Java Edition launcher that keeps your worlds on every computer.</p>
             <p className="mt-1 text-mute-2">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
           </div>
