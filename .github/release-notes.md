@@ -27,3 +27,7 @@ If you have 0.1.6, Wisp offers this update by itself: it installs and restarts w
 - **Switches shaped like Wisp's ghost**: the ghost dozes when a setting's off, and hops across and wakes up when you switch it on.
 - **CurseForge only shows up when there's a key for it**: without one, Discover browses Modrinth and nothing else mentions CurseForge. CurseForge modpack zips still open, and say what they need.
 - **Fixed**: games wouldn't start on offline accounts in developer builds.
+
+---
+
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
