@@ -503,9 +503,13 @@ async fn launch_instance(
             },
         );
     }
-    // Offline accounts get their Wisp skin in game through the skin server.
+    // Offline accounts can wear their Wisp skin in game through the skin server, but it's off until
+    // it has been tried in game: start a developer build with WISP_SKIN_SERVER=1 to turn it on.
     let skin_server = match account.kind {
-        wisp_core::accounts::AccountKind::Offline => skins_state.0.get_or_init(|| start_skin_server(paths.data.clone())).await.clone(),
+        wisp_core::accounts::AccountKind::Offline if std::env::var_os("WISP_SKIN_SERVER").is_some_and(|value| value == "1") => {
+            skins_state.0.get_or_init(|| start_skin_server(paths.data.clone())).await.clone()
+        }
+        _ => None,
     };
     let window = &settings.game_window;
     let hooks = &settings.hooks;
@@ -747,24 +751,6 @@ async fn play(
 
         // After a crash, or a load that failed: read what went wrong and fix what can be.
         let failed = !stop_pressed(&app, &id) && (exit.crashed || failed_to_load(&exit.output));
-        // Java refusing the class cache (see launch::class_cache): it goes, and the game starts again
-        // without it, once.
-        if failed && !exit.window_seen && !retried && launch::class_cache::switch_off_if_blamed(&options.game_dir, &exit.output) {
-            retried = true;
-            let (stop, receiver) = oneshot::channel();
-            if let Some(launches) = app.try_state::<Launches>()
-                && let Some(slot) = launches
-                    .0
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get_mut(&id)
-            {
-                slot.stop = Some(stop);
-            }
-            stop_requested = receiver;
-            report(LaunchUpdate::Fixing { message: "Starting again without the class cache…".into() });
-            continue;
-        }
         let (Some(store), Some(dir), true) = (&store, &instance_dir, failed) else {
             break Ok(Some((exit, None)));
         };

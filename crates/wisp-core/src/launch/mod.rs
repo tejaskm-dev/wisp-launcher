@@ -504,11 +504,9 @@ pub async fn prepare(
     let mut jvm_args = vec![format!("-Xmx{}M", options.memory_mb)];
     // The official launcher's garbage collector settings: short, even pauses, so frames don't hitch.
     jvm_args.extend(GC_FLAGS.iter().map(|flag| flag.to_string()));
-    // Classes Java has already parsed and checked, mapped straight in (see class_cache).
+    // Java's own library, already parsed and checked, mapped straight in (see class_cache).
     class_cache::ensure_base_archive(&java_binary, &files.runtimes()).await;
-    if let Some(flag) = class_cache::flag(&options.game_dir, &java_binary, java_major, instance.loader, &classpath) {
-        jvm_args.push(flag);
-    }
+    class_cache::forget(&options.game_dir);
     // The player's own come after Wisp's defaults, so theirs win (Java takes the last -Xmx).
     // Skins for offline accounts, from Wisp's skin server.
     if let Some(server) = &options.skin_server {
