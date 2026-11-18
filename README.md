@@ -2,7 +2,7 @@
 
 A fast Minecraft: Java Edition launcher whose worlds, keybinds and settings follow you between computers.
 
-> **Status:** early, but it plays. Create an instance with Vanilla, Fabric, Quilt, Forge or NeoForge, on any Minecraft version Mojang lists, and press Play: Wisp downloads the game, its libraries and assets and the right Java from Mojang, checks every file's SHA-1, and starts Minecraft. Mods, resource packs, shaders and modpacks install from Modrinth. Microsoft sign-in is next (it needs an Azure app ID that Mojang has approved); until then, **developer builds** can add an offline account for testing, and the installers on the Releases page can't start the game yet. CurseForge needs an API key from CurseForge first, and cloud sync comes later.
+> **Status:** early, but it plays. Create an instance with Vanilla, Fabric, Quilt, Forge or NeoForge, on any Minecraft version Mojang lists, and press Play: Wisp downloads the game, its libraries and assets and the right Java from Mojang, checks every file's SHA-1, and starts Minecraft. Mods, resource packs, shaders and modpacks install from Modrinth. Microsoft sign-in is next (it needs an Azure app ID that Mojang has approved); until then, **developer builds** can add an offline account for testing, and the installers on the Releases page can't start the game yet. CurseForge needs an API key from CurseForge first. Cloud sync works through a cloud folder you already have (iCloud Drive, OneDrive, Google Drive, Dropbox, Syncthing or any shared folder).
 
 ### Install
 
@@ -31,7 +31,7 @@ They aren't code-signed yet, so the first launch needs a nod: on macOS, choose O
 - **Journal**: your game's history drawn like a git graph, a lane per instance: play sessions (worlds, time, screenshots, crashes), notes, restore points, mods and modpacks coming and going, and every fix the mod fixer makes, with Undo. When a game closes Wisp asks for a note (shown on Home next time) and keeps a restore point of each world you played. Restore points are stored like git commits: each file once, by its SHA-1, so a session only adds the region files it touched. Restoring keeps the current world as a restore point first.
 - **Skins**: your skin in 3D (skinview3d) on the Wisp Hollow, a floating island built block by block in Minecraft's style: a calcite statue of Wisp, ember and gold trees, stone lanterns, will-o'-wisps, a moon over a sea of clouds. Every texture is drawn in code, and only the block faces you can see are meshed, with soft shading in the corners. Wisp's ghost lives there as a little mob: while you stand about it wanders, circles you, peeks over your shoulder, boops you and sits on your head, it joins in with every emote, and your head follows it. Five emotes, each easing into the next: Throne (a throne builds itself behind you, block by block, and you take your seat), Dance (on stained glass that lights up with the beat), Aura (fire gathers at your feet and bursts into a ring), T-pose and Crouch spam. Turntable turns you on the spot; Free roam drops the island away into a lit void where you can get close to every pixel, underneath included. Import PNGs (or drop them), grab any player's current skin by name, or paint your own on the model or the flat texture (pencil, eraser, fill, picker, mirror, base and overlay, undo) in layers, like a paint program, with ready-made ones so a skin isn't flat: shading, texture, outlines, and clothes in your colour. The skin you wear becomes your avatar in Wisp, shown in the sidebar (Wisp's own skin until you add one); wearing it in game needs Microsoft sign-in.
 - **Friends**: off until you turn it on. Wisp makes you a friend code (a Nostr key, kept on your computer); requests, presence ("playing Fabric 26.3 · Island") and party invites travel through public Nostr relays as NIP-59 gift wraps, end-to-end encrypted and sent from a throwaway key, so relays can't read them or see who sent them. Nobody at Wisp runs a server. Parties work today; chat comes later.
-- **Cloud sync**: storage choices, what syncs and what stays on each computer.
+- **Cloud sync**: pick a cloud folder already on the computer and your worlds, instances (mods download from Modrinth on each computer), options, keybinds and server lists follow you. The newest copy comes down before Play and changes go up when the game closes; a world changed on two computers is never merged (keep one copy, or both); worlds open on another computer are left alone. Screen and graphics settings stay on each computer.
 - **Settings**: memory, downloads, startup animation, sidebar, journal and restore points, data folder.
 - **Sidebar**: six pages (Servers sit with Worlds and Screenshots with the Journal, as tabs), recent instances for quick play, and an account menu with the face of the skin you wear, holding Skins, Cloud sync and Settings. It collapses to an icon rail.
 - **Startup animation**: a wisp of light bursts into the logo over moonlit art, then the logo docks in the sidebar as the art settles into the home hero. Full, Quick or Off; any key skips it.
@@ -77,7 +77,8 @@ Game files (versions, libraries, assets, Java runtimes) live once in Wisp's data
 
 ```
 crates/wisp-core/ launcher logic with no UI code: settings, instances, accounts, versions, launching
-                  (downloads, Java, arguments, the game process), Modrinth search, Mojang feeds
+                  (downloads, Java, arguments, the game process), Modrinth search, Mojang feeds,
+                  and cloud sync (sync/: an append-only folder of objects and commits; see sync/mod.rs)
 src-tauri/        Tauri app: commands the UI calls, feed caching, config, icons, permissions
 src/              React UI
   pages/          one file per page; every page but Home loads on first visit
@@ -93,7 +94,7 @@ src/              React UI
 - Pages other than Home load the first time you open them, so startup parses less code.
 - Release builds use LTO, one codegen unit, `panic = "abort"` and stripped symbols.
 - Ambient animations are GPU-only (no looping animations inside SVGs or with CSS variables in keyframes) and pause whenever Wisp isn't the focused window.
-- While Minecraft runs, Wisp will close its window and keep only a small Rust process alive to sync your world when the game exits.
+- While Minecraft runs, Wisp closes its window and keeps only its Rust process alive, which checks in with your other computers once a minute and syncs the worlds you played when the game exits.
 
 Measured on macOS with a release build (Activity Monitor's "Memory" figure, idle on the home screen), before the live Modrinth and Mojang feeds and the pages in this build. Due for a re-measure; in the background the current build sits at about 172 MB and 0% CPU:
 

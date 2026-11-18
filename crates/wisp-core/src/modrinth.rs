@@ -710,6 +710,23 @@ pub async fn version_by_hash(client: &HttpClient, sha1: &str) -> Result<Option<P
     Ok(Some(raw.into()))
 }
 
+/// The Modrinth versions many files belong to, found by their SHA-1s in one request. Files
+/// Modrinth doesn't have are left out of the answer.
+pub async fn versions_by_hashes(client: &HttpClient, sha1s: &[String]) -> Result<HashMap<String, ProjectVersion>, Error> {
+    if sha1s.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let raw: HashMap<String, RawVersion> = client
+        .post(format!("{API}/version_files"))
+        .json(&serde_json::json!({ "hashes": sha1s, "algorithm": "sha1" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(raw.into_iter().map(|(hash, version)| (hash, version.into())).collect())
+}
+
 /// A Modrinth category, for the filter sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -21,7 +21,7 @@ interface HomePageProps {
 }
 
 export function HomePage({ revealed, heroIntro }: HomePageProps) {
-  const { home, now, navigate, comingSoon, openNewInstance, launches, launchWorlds, play, stop, settings, openWorld, importWorlds, requestInstall } = useApp();
+  const { home, now, navigate, openNewInstance, launches, launchWorlds, play, stop, settings, openWorld, importWorlds, requestInstall } = useApp();
   const sections = settings?.home ?? { worlds: true, quickActions: true, modpacks: true, news: true };
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [instanceId, setInstanceId] = useState<string | null>(null);
@@ -97,7 +97,7 @@ export function HomePage({ revealed, heroIntro }: HomePageProps) {
         )}
       </m.div>
       <m.div variants={stagger} className="flex min-w-0 flex-col gap-7">
-        <SyncPanel home={home} onSetUp={(provider) => comingSoon(`Syncing with ${provider}`)} />
+        <SyncPanel home={home} onOpen={() => navigate("sync")} />
         {sections.worlds && <ServersSection servers={home?.servers ?? null} />}
         {sections.quickActions && <QuickActions onAction={onQuickAction} />}
         {sections.news && <NewsPanel />}

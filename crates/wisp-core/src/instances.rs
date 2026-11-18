@@ -59,6 +59,10 @@ pub struct Instance {
     /// A newer Java than Minecraft asks for, when a mod needs one (by major version).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub java_major: Option<u32>,
+    /// The same instance's id on every computer, once cloud sync has seen it (ids here are only
+    /// unique on one computer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -218,6 +222,7 @@ impl InstanceStore {
             modpack,
             memory_mb: None,
             java_major: None,
+            sync_id: None,
         };
         let json = serde_json::to_vec_pretty(&instance).map_err(std::io::Error::other)?;
         std::fs::write(dir.join(MANIFEST), json)?;

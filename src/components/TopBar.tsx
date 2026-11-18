@@ -1,4 +1,4 @@
-import { Bell, CloudOff, Search, X } from "lucide-react";
+import { Bell, CloudAlert, CloudCheck, CloudOff, Hourglass, Search, TriangleAlert, X, type LucideIcon } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import type { SyncStatus } from "../data/types";
@@ -81,20 +81,8 @@ export function TopBar({ sync, onOpenSync, revealed, query, onQueryChange }: Top
       </div>
 
       <div className="ml-auto flex items-center gap-2">
-        <AnimatePresence initial={false}>
-          {sync?.state === "off" && (
-            <m.button
-              type="button"
-              onClick={onOpenSync}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              className="flex h-9 items-center gap-2 rounded-full border border-cream/10 px-3.5 text-[13px] font-semibold text-cream-400 transition-colors hover:border-cream/25 hover:text-cream"
-            >
-              <CloudOff size={14} aria-hidden="true" />
-              Sync off
-            </m.button>
-          )}
+        <AnimatePresence initial={false} mode="popLayout">
+          {sync && <SyncChip key={chipKey(sync)} sync={sync} onOpen={onOpenSync} />}
         </AnimatePresence>
 
         <button
@@ -116,5 +104,41 @@ export function TopBar({ sync, onOpenSync, revealed, query, onQueryChange }: Top
         </Popover>
       </div>
     </m.header>
+  );
+}
+
+function chipKey(sync: SyncStatus): string {
+  return sync.state === "off" ? "off" : sync.conflicts > 0 ? "choose" : sync.phase;
+}
+
+/** Where sync stands, in a word, and the way to its page. */
+function SyncChip({ sync, onOpen }: { sync: SyncStatus; onOpen: () => void }) {
+  let Icon: LucideIcon = CloudOff;
+  let label = "Sync off";
+  let tone = "text-cream-400";
+  if (sync.state === "on") {
+    if (sync.conflicts > 0) {
+      [Icon, label, tone] = [TriangleAlert, sync.conflicts === 1 ? "1 world to choose" : `${sync.conflicts} worlds to choose`, "text-coral"];
+    } else if (sync.phase === "unreachable" || sync.phase === "failed") {
+      [Icon, label, tone] = [CloudAlert, `Can't reach ${sync.label}`, "text-coral"];
+    } else if (sync.phase === "waiting") {
+      [Icon, label, tone] = [Hourglass, "Arriving…", "text-amber"];
+    } else {
+      [Icon, label, tone] = [CloudCheck, "Synced", "text-moss"];
+    }
+  }
+  return (
+    <m.button
+      type="button"
+      onClick={onOpen}
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      title={sync.state === "on" ? (sync.message ?? `Syncing with ${sync.label}`) : "Cloud sync is off"}
+      className="flex h-9 items-center gap-2 rounded-full border border-cream/10 px-3.5 text-[13px] font-semibold text-cream-400 transition-colors hover:border-cream/25 hover:text-cream"
+    >
+      <Icon size={14} className={tone} aria-hidden="true" />
+      {label}
+    </m.button>
   );
 }

@@ -71,6 +71,7 @@ async fn main() {
             modpack: None,
             memory_mb: None,
             java_major: None,
+            sync_id: None,
         },
         game_dir: std::env::temp_dir().join("wisp-smoke-test"),
         account: Account {

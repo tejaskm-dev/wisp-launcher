@@ -127,6 +127,8 @@ pub struct NewInstanceOptions {
 #[serde(rename_all = "camelCase", default)]
 pub struct SyncPrefs {
     pub worlds: bool,
+    /// Instances themselves: version, loader, mods and mod configs.
+    pub instances: bool,
     /// Keybinds and the game settings that make sense on every computer.
     pub options: bool,
     pub servers: bool,
@@ -138,6 +140,7 @@ impl Default for SyncPrefs {
     fn default() -> Self {
         Self {
             worlds: true,
+            instances: true,
             options: true,
             servers: true,
             resource_packs: true,

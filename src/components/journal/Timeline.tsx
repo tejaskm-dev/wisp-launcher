@@ -291,7 +291,7 @@ function EntryCard({ entry, laneColor: color, instanceName, worldName, worldExis
       const world = entry.world ?? "";
       const name = worldName(entry.instanceId, world);
       const live = restorable?.has(event.snapshot) ?? false;
-      const title = event.label ?? (event.reason === "auto" ? "Restore point after playing" : event.reason === "manual" ? "Restore point" : "Kept before a restore");
+      const title = event.label ?? (event.reason === "auto" ? "Restore point after playing" : event.reason === "manual" ? "Restore point" : event.reason === "sync" ? "Kept when it synced" : "Kept before a restore");
       return (
         <div className="wisp-surface flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl px-3.5 py-3">
           <code className="rounded-md bg-cream/8 px-1.5 py-0.5 font-mono text-xs font-semibold text-cream-300" title={event.snapshot}>

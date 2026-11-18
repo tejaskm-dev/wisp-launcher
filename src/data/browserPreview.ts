@@ -6,7 +6,11 @@ import { DEFAULT_SETTINGS } from "./defaults";
 import type {
   Account,
   Category,
+  CloudFolder,
+  LaunchCheck,
   HomeSnapshot,
+  SyncOverview,
+  SyncStatus,
   Instance,
   JournalEntry,
   JournalQuery,
@@ -99,8 +103,79 @@ export function home(): Promise<HomeSnapshot> {
       else servers.push({ ...saved, instanceIds: [instance.id], lastPlayed: null });
     }
   }
-  return Promise.resolve({ account: readAccount(), device: { name: "This computer", os: "" }, instances, worlds: [], servers, sync: { state: "off" } });
+  return Promise.resolve({ account: readAccount(), device: { name: "This computer", os: "" }, instances, worlds: [], servers, sync: syncStatus() });
 }
+
+// ── Cloud sync ──
+// Add ?sync=on, ?sync=conflict, ?sync=waiting or ?sync=unreachable to the URL to see sync's states
+// (made-up worlds and computers, only for looking at the layout); without it, sync is off.
+
+const forcedSync = new URLSearchParams(window.location.search).get("sync");
+
+function syncPreview(): SyncOverview {
+  const off: SyncOverview = { phase: "off", folder: null, message: null, lastSynced: null, devices: [], items: [], usage: null };
+  if (!forcedSync || forcedSync === "off") return off;
+  const now = Date.now();
+  const minutes = (count: number) => now - count * 60_000;
+  const folder = { path: "/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Wisp", kind: "icloud" as const, label: "iCloud Drive", since: minutes(60 * 24 * 3) };
+  const overview: SyncOverview = {
+    phase: forcedSync === "waiting" ? "waiting" : forcedSync === "unreachable" ? "unreachable" : "idle",
+    folder,
+    message:
+      forcedSync === "waiting"
+        ? "Waiting for iCloud Drive to bring 3 files from your other computer."
+        : forcedSync === "unreachable"
+          ? "Wisp can't find its folder in iCloud Drive. Is iCloud Drive running and signed in?"
+          : null,
+    lastSynced: minutes(4),
+    devices: [
+      { id: "a", name: "This computer", os: "macOS", seen: now, playing: [], this: true },
+      { id: "b", name: "Desktop PC", os: "Windows", seen: minutes(forcedSync === "on" ? 2 : 40), playing: forcedSync === "on" ? ["Survival"] : [], this: false },
+    ],
+    items: [
+      { key: "i-1", kind: "instance", name: "Survival", instanceId: "survival", world: null, state: { kind: "synced", at: minutes(4), device: "Desktop PC" } },
+      { key: "w-1", kind: "world", name: "Cherry Hills", instanceId: "survival", world: "Cherry Hills", state: { kind: "synced", at: minutes(4), device: "Desktop PC" } },
+      { key: "w-2", kind: "world", name: "Frostpeak", instanceId: "survival", world: "Frostpeak", state: forcedSync === "waiting" ? { kind: "waiting", files: 3 } : { kind: "synced", at: minutes(90), device: "This computer" } },
+      { key: "w-4", kind: "world", name: "Skyblock", instanceId: null, world: "Skyblock", state: { kind: "cloud-only", at: minutes(300), device: "Desktop PC", bytes: 1_840_000_000, needsInstance: false } },
+    ],
+    usage: 2_400_000_000,
+  };
+  if (forcedSync === "conflict") {
+    overview.items.push({
+      key: "w-3",
+      kind: "world",
+      name: "Moonlit Shrine",
+      instanceId: "survival",
+      world: "Moonlit Shrine",
+      state: { kind: "conflict", choices: [{ commit: "c1", device: "Desktop PC", at: minutes(25) }], hereAt: minutes(12) },
+    });
+  }
+  return overview;
+}
+
+function syncStatus(): SyncStatus {
+  const overview = syncPreview();
+  if (!overview.folder) return { state: "off" };
+  const conflicts = overview.items.filter((item) => item.state.kind === "conflict").length;
+  return { state: "on", label: overview.folder.label, kind: overview.folder.kind, phase: overview.phase, lastSynced: overview.lastSynced, message: overview.message, conflicts };
+}
+
+export const sync = () => simulate(() => Promise.resolve(syncPreview()));
+
+/** What Play would stop for with sync on (?sync=conflict shows the choice). */
+export const launchCheck = (): Promise<LaunchCheck> => {
+  const overview = syncPreview();
+  return Promise.resolve({ conflicts: overview.items.filter((item) => item.state.kind === "conflict"), inUse: null, waiting: 0 });
+};
+
+export const syncFolders = () =>
+  simulate((): Promise<CloudFolder[]> =>
+    Promise.resolve([
+      { kind: "icloud", label: "iCloud Drive", path: "/Users/you/Library/Mobile Documents/com~apple~CloudDocs", existing: null },
+      { kind: "google-drive", label: "Google Drive", path: "/Users/you/Library/CloudStorage/GoogleDrive-you@example.com/My Drive", existing: { devices: ["Desktop PC"], instances: 4, worlds: 12, lastSeen: Date.now() - 3_600_000 } },
+      { kind: "dropbox", label: "Dropbox", path: "/Users/you/Library/CloudStorage/Dropbox", existing: null },
+    ]),
+  );
 
 const readServers = (instanceId: string) => readStorage<SavedServer[]>(`wisp.preview.servers.${instanceId}`, []);
 

@@ -25,6 +25,7 @@ pub mod skins;
 pub mod social;
 pub mod snapshots;
 pub mod storage;
+pub mod sync;
 pub mod versions;
 pub mod worlds;
 

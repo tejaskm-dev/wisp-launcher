@@ -90,14 +90,57 @@ pub enum WorldSync {
     Uploading { progress: f32, total_bytes: u64 },
     CloudNewer,
     Conflict,
+    /// Being played on another computer right now.
+    InUse { device: String },
+    /// A cloud app is still bringing the newest copy.
+    Waiting,
 }
 
-/// Whether cloud sync is set up on this computer.
+/// Whether cloud sync is set up on this computer, and how it's going.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "kebab-case")]
+#[serde(tag = "state", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum SyncStatus {
-    /// No storage provider connected yet.
+    /// No storage picked yet.
     Off,
+    On {
+        /// "iCloud Drive", "OneDrive"...
+        label: String,
+        kind: crate::sync::FolderKind,
+        phase: crate::sync::Phase,
+        last_synced: Option<i64>,
+        message: Option<String>,
+        /// Worlds that changed here and on another computer.
+        conflicts: u32,
+    },
+}
+
+impl SyncStatus {
+    fn from(overview: &crate::sync::Overview) -> Self {
+        match &overview.folder {
+            None => Self::Off,
+            Some(folder) => Self::On {
+                label: folder.label.clone(),
+                kind: folder.kind,
+                phase: overview.phase,
+                last_synced: overview.last_synced,
+                message: overview.message.clone(),
+                conflicts: overview.items.iter().filter(|item| matches!(item.state, crate::sync::ItemState::Conflict { .. })).count() as u32,
+            },
+        }
+    }
+}
+
+/// A world's badge, from what sync last found.
+fn world_sync(state: Option<&crate::sync::ItemState>) -> WorldSync {
+    use crate::sync::ItemState;
+    match state {
+        Some(ItemState::Synced { at, .. }) => WorldSync::Synced { at: *at },
+        Some(ItemState::CloudNewer { .. }) => WorldSync::CloudNewer,
+        Some(ItemState::Conflict { .. }) => WorldSync::Conflict,
+        Some(ItemState::InUse { device }) => WorldSync::InUse { device: device.clone() },
+        Some(ItemState::Waiting { .. }) => WorldSync::Waiting,
+        _ => WorldSync::Local,
+    }
 }
 
 /// "Fabric 26.3", "Vanilla 1.20.1".
@@ -121,8 +164,10 @@ fn mod_count(game_dir: &Path) -> u32 {
 
 impl HomeSnapshot {
     /// Reads the local library: the active account, this computer, its instances and every
-    /// world in them, with the notes and screenshots the journal has for each.
-    pub fn load(instances: &InstanceStore, accounts: &AccountStore, journal: &Journal) -> Self {
+    /// world in them, with the notes and screenshots the journal has for each and where each
+    /// stands with cloud sync.
+    pub fn load(instances: &InstanceStore, accounts: &AccountStore, journal: &Journal, sync: &crate::sync::Overview) -> Self {
+        let synced = crate::sync::world_states(sync);
         let device = DeviceInfo::current();
         let list = instances.list();
         let sessions = journal.list(&JournalQuery { kinds: vec!["session".into()], ..Default::default() });
@@ -135,7 +180,18 @@ impl HomeSnapshot {
             let mods = mod_count(&game_dir);
             let label = instance_label(instance);
             for info in worlds::list_info(&game_dir) {
-                worlds.push(summary(instance, &game_dir, info, &label, mods, &device, &sessions, &notes));
+                let state = synced.get(&(instance.id.clone(), info.folder.clone()));
+                let mut world = summary(instance, &game_dir, info, &label, mods, &device, &sessions, &notes);
+                world.sync = world_sync(state);
+                // Brought from another computer: say which.
+                if let Some(crate::sync::ItemState::Synced { device: by, at }) = state
+                    && *by != device.name
+                    && *at >= world.last_played - 60_000
+                {
+                    world.last_device = Some(by.clone());
+                    world.last_device_is_this = false;
+                }
+                worlds.push(world);
             }
         }
         worlds.sort_by_key(|world| std::cmp::Reverse(world.last_played));
@@ -146,7 +202,7 @@ impl HomeSnapshot {
             instances: list,
             worlds,
             servers,
-            sync: SyncStatus::Off,
+            sync: SyncStatus::from(sync),
         }
     }
 }
@@ -279,6 +335,7 @@ mod tests {
             &InstanceStore::new("/definitely/not/here"),
             &AccountStore::new("/definitely/not/here/accounts.json"),
             &Journal::new("/definitely/not/here/journal"),
+            &crate::sync::Overview::default(),
         ))
         .unwrap();
         for key in ["account", "device", "instances", "worlds", "sync"] {
@@ -340,7 +397,7 @@ mod tests {
         journal.append(Some(&instance.id), None, 2, session).unwrap();
         journal.append(Some(&instance.id), Some("Island"), 3, Event::Note { text: "Find the village".into(), session: None }).unwrap();
 
-        let home = HomeSnapshot::load(&instances, &AccountStore::new(root.join("accounts.json")), &journal);
+        let home = HomeSnapshot::load(&instances, &AccountStore::new(root.join("accounts.json")), &journal, &crate::sync::Overview::default());
         assert_eq!(home.servers.len(), 1);
         assert_eq!((home.servers[0].name.as_str(), home.servers[0].last_played), ("Example", Some(2)));
         assert_eq!(home.servers[0].instance_ids, vec![instance.id.clone()]);
@@ -368,6 +425,7 @@ mod tests {
             modpack: None,
             memory_mb: None,
             java_major: None,
+            sync_id: None,
         })
         .unwrap();
         for key in [

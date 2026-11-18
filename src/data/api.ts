@@ -4,6 +4,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   Account,
+  CloudFolder,
+  LaunchCheck,
+  SyncActivity,
+  SyncOverview,
+  SyncResolution,
   Category,
   CurseForgeStatus,
   FixedEvent,
@@ -341,4 +346,39 @@ export function projectUrl(project: Pick<ProjectDetails, "id" | "projectType" | 
     return { site: "CurseForge", url: page ?? `https://www.curseforge.com/minecraft/search?search=${encodeURIComponent(project.title)}` };
   }
   return { site: "Modrinth", url: modrinthUrl(project) };
+}
+
+// ── Cloud sync ──
+
+const SYNC_OFF: SyncOverview = { phase: "off", folder: null, message: null, lastSynced: null, devices: [], items: [], usage: null };
+
+export const getSync = () => call<SyncOverview>("get_sync", undefined, (p) => p.sync());
+/** The cloud folders on this computer (iCloud Drive, OneDrive...), the likeliest first. */
+export const getSyncFolders = () => call<CloudFolder[]>("get_sync_folders", undefined, (p) => p.syncFolders());
+/** Lets the player pick any folder; null when they cancelled. */
+export const pickSyncFolder = () => call<string | null>("pick_sync_folder", undefined, () => Promise.resolve(null));
+/** Turns sync on with a cloud folder (Wisp's folder goes inside it) and syncs. */
+export const startSync = (path: string) => call<SyncOverview>("start_sync", { path }, (p) => p.needsDesktop("Cloud sync"));
+export const stopSync = () => call<SyncOverview>("stop_sync", undefined, () => Promise.resolve(SYNC_OFF));
+export const syncNow = () => call<SyncOverview>("sync_now", undefined, () => Promise.resolve(SYNC_OFF));
+export const resolveSync = (key: string, resolution: SyncResolution) => call<SyncOverview>("resolve_sync", { key, resolution }, () => Promise.resolve(SYNC_OFF));
+export const bringSyncItem = (key: string) => call<SyncOverview>("bring_sync_item", { key }, () => Promise.resolve(SYNC_OFF));
+export const removeSyncItem = (key: string) => call<SyncOverview>("remove_sync_item", { key }, () => Promise.resolve(SYNC_OFF));
+export const openSyncFolder = () => call<void>("open_sync_folder", undefined, () => Promise.resolve());
+/** Just before Play: brings the newest copy and says what to decide first. */
+export const checkLaunch = (instanceId: string) =>
+  call<LaunchCheck>("check_launch", { instanceId }, (p) => p.launchCheck());
+
+/** Whenever sync finishes something (with where everything stands now). */
+export function onSyncChange(handler: (overview: SyncOverview) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<SyncOverview>("sync", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
+
+/** What's moving right now, as it moves (null when it's done). */
+export function onSyncActivity(handler: (activity: SyncActivity | null) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<SyncActivity | null>("sync-activity", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
 }

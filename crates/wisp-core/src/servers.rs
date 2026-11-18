@@ -156,6 +156,86 @@ pub fn remove(game_dir: &Path, address: &str) -> Result<bool, ServerError> {
     Ok(removed)
 }
 
+/// A server as cloud sync carries it: what the game keeps about it in servers.dat.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedServer {
+    pub name: String,
+    pub ip: String,
+    /// The icon as the game stores it (base64 PNG).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// The player's answer to "use this server's resource pack?" (1 yes, 0 no).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_textures: Option<i8>,
+}
+
+/// An instance's server list for syncing, in the game's order (hidden entries left out).
+pub fn listed(game_dir: &Path) -> Vec<ListedServer> {
+    let Ok(root) = nbt::read_file(&game_dir.join(FILE)) else {
+        return Vec::new();
+    };
+    let Some(Tag::List(entries)) = root.get("servers") else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.get("hidden").and_then(Tag::as_bool) != Some(true))
+        .filter_map(|entry| {
+            let ip = entry.get("ip").and_then(Tag::as_str)?.trim().to_string();
+            if ip.is_empty() {
+                return None;
+            }
+            Some(ListedServer {
+                name: entry.get("name").and_then(Tag::as_str).unwrap_or_default().to_string(),
+                ip,
+                icon: entry.get("icon").and_then(Tag::as_str).filter(|icon| !icon.is_empty()).map(String::from),
+                accept_textures: match entry.get("acceptTextures") {
+                    Some(Tag::Byte(value)) => Some(*value),
+                    _ => None,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Replaces an instance's server list with these (a merged list from sync), keeping hidden
+/// entries and anything else the game stored about servers that are still there.
+pub fn set_listed(game_dir: &Path, servers: &[ListedServer]) -> Result<(), ServerError> {
+    edit(game_dir, |entries| {
+        let hidden: Vec<Tag> = entries.iter().filter(|entry| entry.get("hidden").and_then(Tag::as_bool) == Some(true)).cloned().collect();
+        let mut kept: HashMap<String, HashMap<String, Tag>> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Tag::Compound(children) => {
+                    let key = children.get("ip").and_then(Tag::as_str).and_then(address_key)?;
+                    Some((key, children.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut fresh = Vec::new();
+        for server in servers {
+            let mut entry = address_key(&server.ip).and_then(|key| kept.remove(&key)).unwrap_or_default();
+            entry.insert("name".to_string(), Tag::String(server.name.clone()));
+            entry.insert("ip".to_string(), Tag::String(server.ip.clone()));
+            match &server.icon {
+                Some(icon) => entry.insert("icon".to_string(), Tag::String(icon.clone())),
+                None => entry.remove("icon"),
+            };
+            match server.accept_textures {
+                Some(value) => entry.insert("acceptTextures".to_string(), Tag::Byte(value)),
+                None => entry.remove("acceptTextures"),
+            };
+            entry.remove("hidden");
+            fresh.push(Tag::Compound(entry));
+        }
+        fresh.extend(hidden);
+        *entries = fresh;
+        Ok(())
+    })
+}
+
 /// Reads servers.dat, changes its list, and writes it back the way the game does: the old file
 /// kept as `servers.dat_old`, the new one written beside it and moved into place.
 fn edit(game_dir: &Path, change: impl FnOnce(&mut Vec<Tag>) -> Result<(), ServerError>) -> Result<(), ServerError> {

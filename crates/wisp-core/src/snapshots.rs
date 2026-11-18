@@ -28,6 +28,8 @@ pub enum SnapshotReason {
     Manual,
     /// The world as it was just before a restore, so the restore can be undone.
     BeforeRestore,
+    /// Kept when the world synced: sent from this computer, or brought from another one.
+    Sync,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +189,140 @@ impl Snapshots {
         Ok(true)
     }
 
+    /// Whether a file's contents are in the store.
+    pub fn has_object(&self, hash: &str) -> bool {
+        self.object_path(hash).is_file()
+    }
+
+    /// Where a stored file's contents are (gzip-compressed).
+    pub(crate) fn object_file(&self, hash: &str) -> PathBuf {
+        self.object_path(hash)
+    }
+
+    /// Adds contents that arrive already compressed (from the sync folder), checking they really
+    /// are the file `hash` names before keeping them. False when they aren't (a copy still being
+    /// written by a cloud app, or a damaged one): nothing is kept then.
+    pub(crate) fn import_object(&self, hash: &str, compressed: &Path) -> std::io::Result<bool> {
+        let target = self.object_path(hash);
+        if target.is_file() {
+            return Ok(true);
+        }
+        std::fs::create_dir_all(target.parent().expect("objects have a folder"))?;
+        let temp = target.with_extension("part");
+        std::fs::copy(compressed, &temp)?;
+        let mut decoder = flate2::read::GzDecoder::new(BufReader::new(std::fs::File::open(&temp)?));
+        let mut hasher = Sha1::new();
+        let mut buffer = vec![0u8; 1 << 16];
+        let intact = loop {
+            match decoder.read(&mut buffer) {
+                Ok(0) => break true,
+                Ok(read) => hasher.update(&buffer[..read]),
+                Err(_) => break false,
+            }
+        };
+        if !intact || hex(&hasher.finalize()) != hash {
+            let _ = std::fs::remove_file(&temp);
+            return Ok(false);
+        }
+        std::fs::rename(temp, target)?;
+        Ok(true)
+    }
+
+    /// A restore point's file list.
+    pub fn entries(&self, id: &str) -> Result<Vec<FileEntry>, SnapshotError> {
+        Ok(self.load(id)?.entries)
+    }
+
+    /// The files of the world's newest restore point, by path: what lets an unchanged file skip
+    /// being read again (when its size and time still match).
+    fn previous(&self, instance_id: &str, world: &str) -> HashMap<String, FileEntry> {
+        self.for_world(instance_id, world)
+            .first()
+            .and_then(|latest| self.load(&latest.id).ok())
+            .map(|manifest| manifest.entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The world's files as they are now, without storing anything: hashed only where they
+    /// changed since its newest restore point.
+    pub fn scan(&self, world_dir: &Path, instance_id: &str, world: &str) -> Result<Vec<FileEntry>, SnapshotError> {
+        let previous = self.previous(instance_id, world);
+        let mut entries = Vec::new();
+        for (relative, path, metadata) in world_files(world_dir)? {
+            let size = metadata.len();
+            let modified = modified_ms(&metadata);
+            let hash = match previous.get(&relative).filter(|entry| entry.size == size && entry.modified == modified) {
+                Some(entry) => entry.hash.clone(),
+                None => hash_file(&path)?,
+            };
+            entries.push(FileEntry { path: relative, hash, size, modified });
+        }
+        Ok(entries)
+    }
+
+    /// A restore point of the world as it is now: its newest one when nothing changed since,
+    /// otherwise a new one. Returns it with its files.
+    pub fn current(&self, world_dir: &Path, new: NewSnapshot) -> Result<(Summary, Vec<FileEntry>), SnapshotError> {
+        if let Some(latest) = self.for_world(new.instance_id, new.world).into_iter().next()
+            && let Ok(manifest) = self.load(&latest.id)
+        {
+            let now = self.scan(world_dir, new.instance_id, new.world)?;
+            let same = now.len() == manifest.entries.len()
+                && now.iter().zip(&manifest.entries).all(|(a, b)| a.path == b.path && a.hash == b.hash)
+                && manifest.entries.iter().all(|entry| self.has_object(&entry.hash));
+            if same {
+                return Ok((manifest.summary, manifest.entries));
+            }
+        }
+        let summary = self.create(world_dir, new)?;
+        let entries = self.load(&summary.id)?.entries;
+        Ok((summary, entries))
+    }
+
+    /// Records a restore point for files whose contents are already in the store (brought from
+    /// the sync folder), without reading the world.
+    pub fn adopt(&self, new: NewSnapshot, entries: Vec<FileEntry>) -> Result<Summary, SnapshotError> {
+        if let Some(missing) = entries.iter().find(|entry| !self.has_object(&entry.hash)) {
+            return Err(SnapshotError::Damaged(format!("{} is missing from the store", missing.path)));
+        }
+        let total_bytes = entries.iter().map(|entry| entry.size).sum();
+        self.record(&new, entries, total_bytes, 0)
+    }
+
+    /// Writes a restore point's manifest and adds it to the index.
+    fn record(&self, new: &NewSnapshot, entries: Vec<FileEntry>, total_bytes: u64, added_bytes: u64) -> Result<Summary, SnapshotError> {
+        // The id is the hash of what the restore point says, the way a commit's is.
+        let mut hasher = Sha1::new();
+        hasher.update(format!("{}\0{}\0{}\0", new.instance_id, new.world, new.now).as_bytes());
+        for entry in &entries {
+            hasher.update(format!("{}\0{}\n", entry.path, entry.hash).as_bytes());
+        }
+        let summary = Summary {
+            id: hex(&hasher.finalize()),
+            instance_id: new.instance_id.to_string(),
+            world: new.world.to_string(),
+            name: new.name.to_string(),
+            created_at: new.now,
+            reason: new.reason,
+            label: new.label.clone().filter(|label| !label.trim().is_empty()),
+            files: entries.len() as u32,
+            total_bytes,
+            added_bytes,
+        };
+        let manifest = Manifest { summary: summary.clone(), entries };
+        let path = self.manifest_path(&summary.id);
+        std::fs::create_dir_all(path.parent().expect("manifests have a folder"))?;
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, serde_json::to_vec(&manifest).map_err(std::io::Error::other)?)?;
+        std::fs::rename(temp, &path)?;
+
+        let mut summaries = self.list();
+        summaries.retain(|known| known.id != summary.id);
+        summaries.push(summary.clone());
+        self.write_index(&summaries)?;
+        Ok(summary)
+    }
+
     /// Every restore point, newest first.
     pub fn list(&self) -> Vec<Summary> {
         let mut summaries = self.read_index().unwrap_or_else(|| self.rebuild_index());
@@ -245,13 +381,7 @@ impl Snapshots {
     /// Takes a restore point of a world folder.
     pub fn create(&self, world_dir: &Path, new: NewSnapshot) -> Result<Summary, SnapshotError> {
         // Files unchanged since the world's last restore point keep their hash without a read.
-        let previous: HashMap<String, FileEntry> = self
-            .for_world(new.instance_id, new.world)
-            .first()
-            .and_then(|latest| self.load(&latest.id).ok())
-            .map(|manifest| manifest.entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect())
-            .unwrap_or_default();
-
+        let previous = self.previous(new.instance_id, new.world);
         let mut entries = Vec::new();
         let mut total_bytes = 0;
         let mut added_bytes = 0;
@@ -274,37 +404,7 @@ impl Snapshots {
             total_bytes += size;
             entries.push(FileEntry { path: relative, hash, size, modified });
         }
-
-        // The id is the hash of what the restore point says, the way a commit's is.
-        let mut hasher = Sha1::new();
-        hasher.update(format!("{}\0{}\0{}\0", new.instance_id, new.world, new.now).as_bytes());
-        for entry in &entries {
-            hasher.update(format!("{}\0{}\n", entry.path, entry.hash).as_bytes());
-        }
-        let summary = Summary {
-            id: hex(&hasher.finalize()),
-            instance_id: new.instance_id.to_string(),
-            world: new.world.to_string(),
-            name: new.name.to_string(),
-            created_at: new.now,
-            reason: new.reason,
-            label: new.label.filter(|label| !label.trim().is_empty()),
-            files: entries.len() as u32,
-            total_bytes,
-            added_bytes,
-        };
-        let manifest = Manifest { summary: summary.clone(), entries };
-        let path = self.manifest_path(&summary.id);
-        std::fs::create_dir_all(path.parent().expect("manifests have a folder"))?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, serde_json::to_vec(&manifest).map_err(std::io::Error::other)?)?;
-        std::fs::rename(temp, &path)?;
-
-        let mut summaries = self.list();
-        summaries.retain(|known| known.id != summary.id);
-        summaries.push(summary.clone());
-        self.write_index(&summaries)?;
-        Ok(summary)
+        self.record(&new, entries, total_bytes, added_bytes)
     }
 
     /// Puts a world folder back the way a restore point has it: files are rewritten where they
@@ -319,6 +419,17 @@ impl Snapshots {
             }
         }
         std::fs::create_dir_all(world_dir)?;
+        // What this computer knew about the world's files at its previous restore point: a file
+        // whose size and time still match that, with the hash the restore wants, needn't be read.
+        // (Only this computer's own record is trusted that way, never the times in the restore
+        // point being put back, which may have come from another computer.)
+        let trusted: HashMap<String, FileEntry> = self
+            .for_world(&manifest.summary.instance_id, &manifest.summary.world)
+            .into_iter()
+            .find(|summary| summary.id != id)
+            .and_then(|summary| self.load(&summary.id).ok())
+            .map(|known| known.entries.into_iter().map(|entry| (entry.path.clone(), entry)).collect())
+            .unwrap_or_default();
         let wanted: HashSet<&str> = manifest.entries.iter().map(|entry| entry.path.as_str()).collect();
         for (relative, path, _) in world_files(world_dir)? {
             if !wanted.contains(relative.as_str()) {
@@ -327,8 +438,11 @@ impl Snapshots {
         }
         for entry in &manifest.entries {
             let target = inside(world_dir, &entry.path)?;
-            let same = std::fs::metadata(&target).is_ok_and(|meta| meta.len() == entry.size)
-                && hash_file(&target).is_ok_and(|hash| hash == entry.hash);
+            let same = std::fs::metadata(&target).is_ok_and(|meta| {
+                meta.len() == entry.size
+                    && (trusted.get(&entry.path).is_some_and(|known| known.size == meta.len() && known.modified == modified_ms(&meta) && known.hash == entry.hash)
+                        || hash_file(&target).is_ok_and(|hash| hash == entry.hash))
+            });
             if same {
                 continue;
             }
@@ -341,6 +455,10 @@ impl Snapshots {
                 let mut writer = BufWriter::new(std::fs::File::create(&temp)?);
                 std::io::copy(&mut decoder, &mut writer)?;
                 writer.flush()?;
+                if entry.modified > 0 {
+                    let time = std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.modified as u64);
+                    let _ = writer.get_ref().set_modified(time);
+                }
             }
             std::fs::rename(&temp, &target)?;
         }
@@ -358,13 +476,13 @@ impl Snapshots {
         Ok(self.collect_garbage()?)
     }
 
-    /// Keeps the newest `keep` automatic restore points of a world and deletes older ones.
+    /// Keeps the newest `keep` automatic (and sync) restore points of a world and deletes older ones.
     /// Returns the bytes freed.
     pub fn prune(&self, instance_id: &str, world: &str, keep: usize) -> Result<u64, SnapshotError> {
         let old: Vec<String> = self
             .for_world(instance_id, world)
             .into_iter()
-            .filter(|summary| summary.reason == SnapshotReason::Auto)
+            .filter(|summary| matches!(summary.reason, SnapshotReason::Auto | SnapshotReason::Sync))
             .skip(keep)
             .map(|summary| summary.id)
             .collect();
