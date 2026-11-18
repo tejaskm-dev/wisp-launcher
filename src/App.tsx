@@ -10,12 +10,14 @@ import type { InstallTarget } from "./components/install/InstallDialog";
 import { InstallPanel } from "./components/install/InstallPanel";
 import { NotePrompt, type NoteRequest } from "./components/journal/NotePrompt";
 import { LaunchPanel } from "./components/launch/LaunchPanel";
+import { SyncGate, type Gate } from "./components/launch/SyncGate";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { TopBar } from "./components/TopBar";
 import { UpdatePanel } from "./components/UpdatePanel";
 import {
   canAddOfflineAccounts,
+  checkLaunch,
   getHome,
   getInstalls,
   getJournal,
@@ -32,12 +34,15 @@ import {
   onFixed,
   onLaunchEvent,
   onSocialChange,
+  onSyncChange,
+  resolveSync,
   saveSettings,
+  syncNow,
   stopInstance,
   undoFix,
 } from "./data/api";
 import { DEFAULT_SETTINGS, EMPTY_HOME } from "./data/defaults";
-import type { HomeSnapshot, InstallEvent, LaunchUpdate, PageId, Settings, StartPage } from "./data/types";
+import type { HomeSnapshot, InstallEvent, LaunchUpdate, PageId, Settings, StartPage, SyncItem, SyncResolution } from "./data/types";
 import { useIdleWhenUnfocused, useLatest, useNow } from "./lib/hooks";
 import { loadSkinsPage } from "./lib/preload";
 import { HomePage } from "./pages/HomePage";
@@ -405,22 +410,78 @@ export default function App() {
   const [accountDialog, setAccountDialog] = useState({ open: false, session: 0 });
   const playAfterAccount = useRef<{ instanceId: string; world: string | null; server: string | null } | null>(null);
 
+  // With cloud sync on, Play first brings the newest copy here, and stops to ask when a world
+  // changed on two computers, the instance is open on another one, or files are still arriving.
+  const [gate, setGate] = useState<Gate | null>(null);
+
   const startLaunch = useCallback(
-    (instanceId: string, world: string | null = null, server: string | null = null) => {
-      setLaunches((current) => ({ ...current, [instanceId]: { phase: "checking" } }));
-      setLaunchWorlds((current) => ({ ...current, [instanceId]: world }));
-      setLaunchServers((current) => ({ ...current, [instanceId]: server }));
-      if (world) requestedWorlds.current[instanceId] = world;
-      else delete requestedWorlds.current[instanceId];
-      launchInstance(instanceId, world, server).catch((failure: unknown) => {
-        setLaunches((current) => without(current, instanceId));
-        setLaunchWorlds((current) => without(current, instanceId));
-        setLaunchServers((current) => without(current, instanceId));
-        notify({ tone: "info", title: "Couldn't start the game", body: message(failure) });
+    (instanceId: string, world: string | null = null, server: string | null = null, skipSync = false) => {
+      const begin = () => {
+        setLaunches((current) => ({ ...current, [instanceId]: { phase: "checking" } }));
+        setLaunchWorlds((current) => ({ ...current, [instanceId]: world }));
+        setLaunchServers((current) => ({ ...current, [instanceId]: server }));
+        if (world) requestedWorlds.current[instanceId] = world;
+        else delete requestedWorlds.current[instanceId];
+        launchInstance(instanceId, world, server).catch((failure: unknown) => {
+          setLaunches((current) => without(current, instanceId));
+          setLaunchWorlds((current) => without(current, instanceId));
+          setLaunchServers((current) => without(current, instanceId));
+          notify({ tone: "info", title: "Couldn't start the game", body: message(failure) });
+        });
+      };
+      const sync = homeNow.current?.sync;
+      if (skipSync || sync?.state !== "on") return begin();
+      setLaunches((current) => ({ ...current, [instanceId]: { phase: "syncing", folder: sync.label } }));
+      checkLaunch(instanceId).then(
+        (check) => {
+          if (check.conflicts.length === 0 && !check.inUse && check.waiting === 0) return begin();
+          setLaunches((current) => without(current, instanceId));
+          const instanceName = homeNow.current?.instances.find((candidate) => candidate.id === instanceId)?.name ?? "This instance";
+          setGate({ instanceId, instanceName, world, server, folder: sync.label, check });
+        },
+        // Trouble with sync never stops you playing.
+        () => begin(),
+      );
+    },
+    [notify, homeNow],
+  );
+
+  const resolveAtGate = useCallback(
+    async (item: SyncItem, resolution: SyncResolution) => {
+      try {
+        await resolveSync(item.key, resolution);
+      } catch (failure) {
+        notify({ tone: "info", title: `Couldn't settle ${item.name}`, body: message(failure) });
+        return;
+      }
+      void refreshHome();
+      // Once every world is settled, the game starts by itself.
+      setGate((current) => {
+        if (!current) return current;
+        const conflicts = current.check.conflicts.filter((other) => other.key !== item.key);
+        if (conflicts.length === 0 && !current.check.inUse && current.check.waiting === 0) {
+          window.setTimeout(() => startLaunch(current.instanceId, current.world, current.server, true), 0);
+          return null;
+        }
+        return { ...current, check: { ...current.check, conflicts } };
       });
     },
-    [notify],
+    [notify, refreshHome, startLaunch],
   );
+
+  // Sync finished something: badges and the top bar catch up.
+  useEffect(() => onSyncChange(() => void refreshHome()), [refreshHome]);
+
+  // Coming back to Wisp after a while (say, from playing on another computer): sync straight
+  // away rather than at the next scheduled check.
+  useEffect(() => {
+    const onFocus = () => {
+      const sync = homeNow.current?.sync;
+      if (sync?.state === "on" && Date.now() - (sync.lastSynced ?? 0) > 2 * 60_000) void syncNow().catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [homeNow]);
 
   // What Wisp fixed before starting a game (or after a crash it restarted from).
   useEffect(
@@ -793,6 +854,22 @@ export default function App() {
               <InstallDialog key={installDialog.session} target={installDialog.target} open={installDialog.open} onClose={closeInstallDialog} />
             </Suspense>
           )}
+          <SyncGate
+            gate={gate}
+            now={now}
+            onResolve={resolveAtGate}
+            onPlay={() => {
+              const current = gate;
+              setGate(null);
+              if (current) startLaunch(current.instanceId, current.world, current.server, true);
+            }}
+            onRetry={() => {
+              const current = gate;
+              setGate(null);
+              if (current) startLaunch(current.instanceId, current.world, current.server);
+            }}
+            onCancel={() => setGate(null)}
+          />
           <Toasts toasts={toasts} onDismiss={dismiss}>
             <AnimatePresence>{noteRequest && <NotePrompt key={noteRequest.session ?? noteRequest.world} request={noteRequest} onDone={() => setNoteRequest(null)} />}</AnimatePresence>
             <UpdatePanel />

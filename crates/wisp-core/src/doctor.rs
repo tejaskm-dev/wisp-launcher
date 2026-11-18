@@ -1258,6 +1258,7 @@ mod tests {
             modpack: None,
             memory_mb: None,
             java_major: None,
+            sync_id: None,
         }
     }
 

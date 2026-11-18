@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, Check, HardDrive, TriangleAlert, type LucideIcon } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, Hourglass, HardDrive, MonitorPlay, TriangleAlert, type LucideIcon } from "lucide-react";
 import type { WorldSummary } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { formatBytes, timeAgo } from "../../lib/format";
@@ -42,6 +42,16 @@ export function SyncStatus({ world, now, size = "sm" }: SyncStatusProps) {
       Icon = TriangleAlert;
       tone = "text-coral";
       label = "Two copies, choose one";
+      break;
+    case "in-use":
+      Icon = MonitorPlay;
+      tone = "text-sky";
+      label = size === "md" ? `Being played on ${sync.device}` : `Open on ${sync.device}`;
+      break;
+    case "waiting":
+      Icon = Hourglass;
+      tone = "text-amber";
+      label = size === "md" ? "Newest copy still arriving from the cloud" : "Arriving";
       break;
   }
 

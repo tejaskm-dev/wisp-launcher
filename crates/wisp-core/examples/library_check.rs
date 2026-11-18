@@ -15,7 +15,7 @@ fn main() {
         std::path::Path::new(&home).join("Library/Application Support/app.wisp.launcher")
     });
     let instances = InstanceStore::new(data.join("instances"));
-    let home = HomeSnapshot::load(&instances, &AccountStore::new(data.join("accounts.json")), &Journal::new(data.join("journal")));
+    let home = HomeSnapshot::load(&instances, &AccountStore::new(data.join("accounts.json")), &Journal::new(data.join("journal")), &wisp_core::sync::overview(&data));
     println!("{}", serde_json::to_string_pretty(&home.worlds).unwrap());
     for instance in &home.instances {
         let game = instances.game_dir(&instance.id).unwrap();

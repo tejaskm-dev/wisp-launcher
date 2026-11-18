@@ -77,7 +77,11 @@ export type WorldSync =
   | { kind: "synced"; at: number }
   | { kind: "uploading"; progress: number; totalBytes: number }
   | { kind: "cloud-newer" }
-  | { kind: "conflict" };
+  | { kind: "conflict" }
+  /** Being played on another computer right now. */
+  | { kind: "in-use"; device: string }
+  /** A cloud app is still bringing the newest copy. */
+  | { kind: "waiting" };
 
 export type GameMode = "survival" | "creative" | "adventure" | "spectator" | "unknown";
 
@@ -120,7 +124,7 @@ export interface WorldExtras {
   restorePoints: RestorePoint[];
 }
 
-export type SnapshotReason = "auto" | "manual" | "before-restore";
+export type SnapshotReason = "auto" | "manual" | "before-restore" | "sync";
 
 /** A restore point: a copy of a world to go back to (crates/wisp-core/src/snapshots.rs). */
 export interface RestorePoint {
@@ -356,7 +360,108 @@ export interface SkinImport {
   failed: string[];
 }
 
-export type SyncStatus = { state: "off" };
+export type SyncStatus =
+  | { state: "off" }
+  | { state: "on"; label: string; kind: FolderKind; phase: SyncPhase; lastSynced: number | null; message: string | null; conflicts: number };
+
+// ── Cloud sync (crates/wisp-core/src/sync) ──
+
+/** Which app keeps the sync folder in step with the cloud. */
+export type FolderKind = "icloud" | "onedrive" | "google-drive" | "dropbox" | "box" | "nextcloud" | "syncthing" | "pcloud" | "folder";
+
+export type SyncPhase = "off" | "idle" | "working" | "waiting" | "unreachable" | "failed";
+
+/** What's already synced in a cloud folder from other computers. */
+export interface RemoteSummary {
+  devices: string[];
+  instances: number;
+  worlds: number;
+  lastSeen: number | null;
+}
+
+/** A cloud folder found on this computer. */
+export interface CloudFolder {
+  kind: FolderKind;
+  label: string;
+  path: string;
+  existing: RemoteSummary | null;
+}
+
+export interface SyncFolder {
+  path: string;
+  kind: FolderKind;
+  label: string;
+  since: number;
+}
+
+export interface SyncDevice {
+  id: string;
+  name: string;
+  os: string;
+  seen: number;
+  /** Names of the instances it's playing right now. */
+  playing: string[];
+  this: boolean;
+}
+
+/** One version to pick when a world changed on two computers. */
+export interface SyncChoice {
+  commit: string;
+  device: string;
+  at: number;
+}
+
+export type SyncItemState =
+  | { kind: "synced"; at: number; device: string }
+  | { kind: "pending" }
+  | { kind: "cloud-newer"; at: number; device: string }
+  | { kind: "conflict"; choices: SyncChoice[]; hereAt: number | null }
+  | { kind: "in-use"; device: string }
+  | { kind: "waiting"; files: number }
+  | { kind: "cloud-only"; at: number; device: string; bytes: number; needsInstance: boolean }
+  | { kind: "removed"; device: string }
+  | { kind: "failed"; message: string };
+
+export interface SyncItem {
+  key: string;
+  kind: "world" | "instance";
+  name: string;
+  /** The instance on this computer, when there is one. */
+  instanceId: string | null;
+  /** A world's folder. */
+  world: string | null;
+  state: SyncItemState;
+}
+
+export interface SyncOverview {
+  phase: SyncPhase;
+  folder: SyncFolder | null;
+  message: string | null;
+  lastSynced: number | null;
+  devices: SyncDevice[];
+  items: SyncItem[];
+  usage: number | null;
+}
+
+/** Something moving through sync right now. */
+export interface SyncActivity {
+  key: string;
+  name: string;
+  direction: "up" | "down";
+  done: number;
+  total: number;
+}
+
+export type SyncResolution = { keep: "here" } | { keep: "cloud"; commit: string } | { keep: "both"; commit: string };
+
+/** What the player should decide before an instance starts. */
+export interface LaunchCheck {
+  conflicts: SyncItem[];
+  /** Another computer playing this instance right now. */
+  inUse: string | null;
+  /** Files still on their way from the cloud. */
+  waiting: number;
+}
 
 export interface HomeSnapshot {
   account: Account | null;
@@ -425,6 +530,8 @@ export type IntroMode = "full" | "quick" | "off";
 
 export interface SyncPrefs {
   worlds: boolean;
+  /** Instances themselves: version, loader, mods and mod configs. */
+  instances: boolean;
   options: boolean;
   servers: boolean;
   resourcePacks: boolean;
@@ -752,6 +859,8 @@ export interface PatchNote {
 /** What the launcher is doing for one instance (crates/wisp-core/src/launch/mod.rs). */
 export type LaunchUpdate =
   | { phase: "checking" }
+  /** Before the launcher starts: bringing the newest copy from the sync folder (the window's own step). */
+  | { phase: "syncing"; folder: string }
   | { phase: "downloading"; doneBytes: number; totalBytes: number; doneFiles: number; totalFiles: number }
   | { phase: "installing"; loader: string }
   | { phase: "starting" }

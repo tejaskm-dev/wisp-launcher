@@ -9,6 +9,7 @@ mod multiplayer;
 mod protocol;
 mod skins;
 mod social;
+mod sync;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -231,8 +232,8 @@ fn now_ms() -> i64 {
 
 #[tauri::command]
 async fn get_home(paths: State<'_, Paths>) -> Result<HomeSnapshot, String> {
-    let (instances, accounts, journal) = (paths.instances(), paths.accounts(), paths.journal());
-    tauri::async_runtime::spawn_blocking(move || HomeSnapshot::load(&instances, &accounts, &journal))
+    let (instances, accounts, journal, data) = (paths.instances(), paths.accounts(), paths.journal(), paths.data.clone());
+    tauri::async_runtime::spawn_blocking(move || HomeSnapshot::load(&instances, &accounts, &journal, &wisp_core::sync::overview(&data)))
         .await
         .map_err(|error| error.to_string())
 }
@@ -249,16 +250,24 @@ async fn get_settings(settings: State<'_, SettingsState>) -> Result<Settings, St
 #[tauri::command]
 async fn set_settings(
     next: Settings,
+    app: AppHandle,
     settings: State<'_, SettingsState>,
     paths: State<'_, Paths>,
 ) -> Result<Settings, String> {
     let next = next.sanitized();
     next.save(&paths.settings)
         .map_err(|error| format!("Couldn't save settings: {error}"))?;
-    *settings
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+    let previous = std::mem::replace(
+        &mut *settings
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        next.clone(),
+    );
+    // What syncs changed: sync now, so what was just switched on goes up.
+    if previous.sync != next.sync {
+        sync::wake(&app);
+    }
     Ok(next)
 }
 
@@ -654,6 +663,7 @@ async fn play(
             if let Some(paths) = app.try_state::<Paths>() {
                 let _ = paths.instances().mark_played(&id, now_ms());
             }
+            sync::game_started(&app);
             match while_playing {
                 WhilePlaying::KeepOpen => {}
                 WhilePlaying::Minimize => {
@@ -857,6 +867,10 @@ async fn play(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&id);
+    }
+    // The game ran: what it changed (now in restore points) goes to the other computers.
+    if started_at.load(Ordering::Relaxed) > 0 {
+        sync::game_closed(&app, &id);
     }
 }
 
@@ -1532,6 +1546,7 @@ fn main() {
         .manage(SkinServerState::default())
         .manage(Installs::default())
         .manage(multiplayer::StatusCache::default())
+        .manage(sync::SyncHub::default())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let settings_path = app.path().app_config_dir()?.join("settings.json");
@@ -1544,6 +1559,7 @@ fn main() {
                 settings: settings_path,
             });
             social::start_if_enabled(app.handle());
+            sync::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1643,7 +1659,18 @@ fn main() {
             multiplayer::add_server,
             multiplayer::remove_server,
             fixes::undo_fix,
-            fixes::apply_fix
+            fixes::apply_fix,
+            sync::get_sync,
+            sync::get_sync_folders,
+            sync::pick_sync_folder,
+            sync::start_sync,
+            sync::stop_sync,
+            sync::sync_now,
+            sync::resolve_sync,
+            sync::bring_sync_item,
+            sync::remove_sync_item,
+            sync::check_launch,
+            sync::open_sync_folder
         ]);
     let builder = if updates {
         builder.plugin(tauri_plugin_updater::Builder::new().build())

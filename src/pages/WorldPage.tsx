@@ -257,7 +257,7 @@ export function WorldPage({ worldId, backTo, onBack }: { worldId: string; backTo
                   <li key={point.id} className="group flex items-center gap-3 rounded-2xl border border-cream/7 bg-ink-800 px-3.5 py-2.5">
                     <code className="rounded-md bg-cream/8 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-cream-300">{point.id.slice(0, 7)}</code>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-[13px] font-bold">{point.label ?? (point.reason === "auto" ? "After playing" : point.reason === "manual" ? "Made by you" : "Before a restore")}</p>
+                      <p className="truncate text-[13px] font-bold">{point.label ?? (point.reason === "auto" ? "After playing" : point.reason === "manual" ? "Made by you" : point.reason === "sync" ? "When it synced" : "Before a restore")}</p>
                       <p className="text-xs text-mute">
                         {timeAgo(point.createdAt, now)} · {formatBytes(point.totalBytes)}
                       </p>

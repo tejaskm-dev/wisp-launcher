@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS: Settings = {
   newInstances: { copyOptionsFrom: null, skipWelcome: false, skipTutorial: false, autoJumpOff: false },
   concurrentDownloads: 16,
   externalImages: true,
-  sync: { worlds: true, options: true, servers: true, resourcePacks: true, screenshots: false },
+  sync: { worlds: true, instances: true, options: true, servers: true, resourcePacks: true, screenshots: false },
   journal: { autoRestorePoints: true, keepRestorePoints: 10, askForNote: true },
 };
 
