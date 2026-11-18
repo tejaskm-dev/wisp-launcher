@@ -365,7 +365,9 @@ export function SkinsPage() {
           )}
           <p className="flex items-start gap-2 rounded-2xl bg-cream/[0.04] px-3.5 py-3 text-xs leading-relaxed text-mute">
             <Info size={14} className="mt-px shrink-0" aria-hidden="true" />
-            The skin you wear is your avatar in Wisp. Minecraft itself only loads skins from Mojang, so wearing one in game comes with Microsoft sign-in. Emotes are just for Wisp.
+            {home?.account?.kind === "offline"
+              ? "The skin you wear is your avatar in Wisp and in your own worlds in game. On servers, the server picks the skins everyone sees. Emotes are just for Wisp."
+              : "The skin you wear is your avatar in Wisp. Minecraft itself only loads skins from Mojang, so wearing one in game comes with Microsoft sign-in. Emotes are just for Wisp."}
           </p>
         </aside>
       </m.div>

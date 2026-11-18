@@ -5,6 +5,10 @@
 //!
 //! Set WISP_DATA to use another folder. To try the launch settings, set WISP_JVM_ARGS,
 //! WISP_WINDOW ("1000x600" or "fullscreen"), WISP_PRE, WISP_WRAPPER or WISP_POST.
+//!
+//! WISP_SKIN starts the skin server for the offline account, wearing the skin worn in Wisp
+//! ("worn") or a PNG file, and prints every question the game asks it. WISP_WORLD opens a world
+//! in the game folder straight away, and WISP_KEEP keeps the game open that many seconds.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -103,8 +107,13 @@ async fn main() {
         quick_play: env("WISP_WORLD").map(wisp_core::launch::QuickPlay::World),
         skin_server: None,
     };
-
     let started = Instant::now();
+    let mut options = options;
+    if let Some(skin) = env("WISP_SKIN") {
+        options.skin_server = Some(skin_server(&skin, &options.account, started).await);
+    }
+    let keep = env("WISP_KEEP").and_then(|seconds| seconds.parse().ok()).unwrap_or(6);
+
     let last_print = Mutex::new(Instant::now() - Duration::from_secs(10));
     let (stop, stop_requested) = oneshot::channel();
     let stop = Mutex::new(Some(stop));
@@ -128,12 +137,12 @@ async fn main() {
         }
         LaunchUpdate::Running { .. } => {
             println!(
-                "[{:>5.1}s] window is up; closing in 6 s",
+                "[{:>5.1}s] window is up; closing in {keep} s",
                 started.elapsed().as_secs_f32()
             );
             if let Some(stop) = stop.lock().unwrap().take() {
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    tokio::time::sleep(Duration::from_secs(keep)).await;
                     let _ = stop.send(());
                 });
             }
@@ -167,4 +176,35 @@ async fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// The skin server, answering for the offline account with the skin worn in Wisp ("worn") or a
+/// PNG file, and printing each question the game asks it.
+async fn skin_server(skin: &str, account: &Account, started: Instant) -> wisp_core::skin_server::SkinServer {
+    use std::sync::Arc;
+    use wisp_core::skin_server::{self, Observe, Player, Skin, Who};
+
+    let (png, slim) = if skin == "worn" {
+        let store = wisp_core::skins::SkinStore::new(data_dir().join("skins"));
+        let library = store.library();
+        let worn = library.active.as_ref().and_then(|id| library.skins.iter().find(|item| &item.id == id)).expect("a skin worn in Wisp");
+        println!("wearing {} ({:?})", worn.name, worn.model);
+        (std::fs::read(store.png_path(&worn.id)).expect("the worn skin's png"), worn.model == wisp_core::skins::SkinModel::Slim)
+    } else {
+        (std::fs::read(skin).expect("the skin png"), false)
+    };
+    let (uuid, name) = (account.uuid.replace('-', "").to_lowercase(), account.name.clone());
+    let player = Player { uuid: uuid.clone(), name: name.clone(), skin: Some(Skin { png, slim }) };
+    let lookup: skin_server::Lookup = Arc::new(move |who| {
+        let matches = match who {
+            Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
+            Who::Name(asked) => asked.eq_ignore_ascii_case(&name),
+        };
+        matches.then(|| player.clone())
+    });
+    let observe: Observe = Arc::new(move |method, path, status| println!("[{:>5.1}s] skin server: {method} {path} -> {status}", started.elapsed().as_secs_f32()));
+    let key = skin_server::load_or_make_key(&std::env::temp_dir().join("wisp-skin-smoke-key.der")).expect("key");
+    let server = skin_server::start_observed(key, lookup, Some(observe)).await.expect("skin server");
+    println!("skin server at {}", server.api_root);
+    server
 }

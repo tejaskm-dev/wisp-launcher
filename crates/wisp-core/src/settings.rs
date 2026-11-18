@@ -134,6 +134,9 @@ pub struct SyncPrefs {
     pub servers: bool,
     pub resource_packs: bool,
     pub screenshots: bool,
+    /// A world changed on two computers is settled without asking: the copy played last wins,
+    /// and the other is kept (as a restore point, or in the sync folder's history).
+    pub settle_conflicts: bool,
 }
 
 impl Default for SyncPrefs {
@@ -145,6 +148,7 @@ impl Default for SyncPrefs {
             servers: true,
             resource_packs: true,
             screenshots: false,
+            settle_conflicts: true,
         }
     }
 }
@@ -192,6 +196,9 @@ pub struct Settings {
     pub java_paths: BTreeMap<String, String>,
     pub hooks: LaunchHooks,
     pub new_instances: NewInstanceOptions,
+    /// Settings changed in one instance (FOV, keybinds, volume, video and the rest of
+    /// options.txt) reach the others on this computer the next time they start.
+    pub share_options: bool,
     pub concurrent_downloads: u32,
     /// Show images that project descriptions load from other websites (they see your IP address).
     pub external_images: bool,
@@ -216,6 +223,7 @@ impl Default for Settings {
             java_paths: BTreeMap::new(),
             hooks: LaunchHooks::default(),
             new_instances: NewInstanceOptions::default(),
+            share_options: true,
             concurrent_downloads: 16,
             external_images: true,
             curseforge_api_key: String::new(),

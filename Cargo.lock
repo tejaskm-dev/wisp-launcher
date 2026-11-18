@@ -6559,7 +6559,7 @@ dependencies = [
 
 [[package]]
 name = "wisp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -6577,7 +6577,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "flate2",

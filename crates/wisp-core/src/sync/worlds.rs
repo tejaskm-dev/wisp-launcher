@@ -97,7 +97,10 @@ pub fn upload(remote: &Remote, snapshots: &Snapshots, world: &World, parents: Ve
 pub fn download(remote: &Remote, snapshots: &Snapshots, world: &World, commit: &Commit, keep_current: bool, now: i64, progress: &dyn Fn(u64, u64)) -> Result<Option<u32>, SyncError> {
     let manifest: WorldManifest = match remote.get_json(&commit.manifest) {
         Ok(manifest) => manifest,
-        Err(RemoteError::Missing) => return Ok(Some(1)),
+        Err(RemoteError::Missing) => {
+            remote.ask_cloud_for(&commit.manifest);
+            return Ok(Some(1));
+        }
         Err(error) => return Err(error.into()),
     };
     let mut seen = HashSet::new();
@@ -109,6 +112,7 @@ pub fn download(remote: &Remote, snapshots: &Snapshots, world: &World, commit: &
     for file in needed {
         let source = remote.object_path(&file.hash);
         if !source.is_file() || !snapshots.import_object(&file.hash, &source)? {
+            remote.ask_cloud_for(&file.hash);
             waiting += 1;
             continue;
         }

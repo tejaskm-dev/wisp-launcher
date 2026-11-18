@@ -1,4 +1,4 @@
-import { Check, Cpu, FolderOpen, LoaderCircle, Play, RotateCw, Square, Undo2, Wrench, X } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, Cpu, FolderOpen, LoaderCircle, Play, RotateCw, Square, Undo2, Wrench, X } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useState } from "react";
 import { applyFix, installRosetta, openInstanceFolder, undoFix } from "../../data/api";
@@ -45,12 +45,17 @@ function InstallRosettaButton({ onInstalled }: { onInstalled: () => void }) {
   );
 }
 
-/** What Wisp worked out about a crash: what it fixed (with Undo), what it can do with a click, and what's left. */
+/**
+ * What Wisp worked out about a crash, in the order a player needs it: what it already fixed
+ * (with Undo), what's still in the way and what can be done about it, then, folded away,
+ * everything it found. The first finding is the card's own headline.
+ */
 function CrashHelp({ instanceId, help }: { instanceId: string; help: FixReport }) {
   const { notify } = useApp();
   const [undone, setUndone] = useState(false);
   const [applied, setApplied] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [details, setDetails] = useState(false);
   const fail = (title: string) => (failure: unknown) => notify({ tone: "info", title, body: failure instanceof Error ? failure.message : String(failure) });
 
   const undo = () => {
@@ -67,22 +72,16 @@ function CrashHelp({ instanceId, help }: { instanceId: string; help: FixReport }
       }, fail("Couldn't do that"))
       .finally(() => setBusy(null));
   };
-  const more = help.found.slice(1, 4);
+  const left = help.offers.length + help.unsolved.length;
+  if (help.fixed.length === 0 && left === 0 && help.found.length <= 1) return null;
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl bg-ink-900/55 p-3 text-xs leading-snug">
-      {more.length > 0 && (
-        <ul className="flex flex-col gap-1 text-cream-300">
-          {more.map((line) => (
-            <li key={line}>{line}</li>
-          ))}
-        </ul>
-      )}
+    <div className="flex flex-col gap-3 rounded-xl bg-ink-900/55 p-3 text-xs leading-snug">
       {help.fixed.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <p className="flex items-center gap-1.5 font-bold text-moss-soft">
             <Wrench size={12} aria-hidden="true" />
-            {undone ? "Undone" : "Wisp fixed it"}
+            {undone ? "Undone" : left > 0 ? "What Wisp fixed" : "Wisp fixed it"}
           </p>
           <ul className={cn("flex flex-col gap-1", undone && "opacity-50")}>
             {help.fixed.map((line) => (
@@ -100,28 +99,56 @@ function CrashHelp({ instanceId, help }: { instanceId: string; help: FixReport }
           )}
         </div>
       )}
-      {help.offers.map((offer) => {
-        const done = applied.includes(offer.label);
-        return (
-          <div key={offer.label} className="flex flex-col gap-1.5">
-            <p className="text-mute">{offer.detail}</p>
-            <button
-              type="button"
-              disabled={done || busy !== null}
-              onClick={() => take(offer)}
-              className="flex h-7 w-fit items-center gap-1.5 rounded-full border border-cream/20 px-3 font-bold text-cream-300 transition-colors enabled:hover:border-cream/45 enabled:hover:text-cream disabled:opacity-60"
-            >
-              {done ? <Check size={12} aria-hidden="true" /> : busy === offer.label ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> : null}
-              {done ? "Done" : offer.label}
-            </button>
-          </div>
-        );
-      })}
-      {help.unsolved.map((line) => (
-        <p key={line} className="text-mute">
-          {line}
-        </p>
-      ))}
+      {left > 0 && (
+        <div className="flex flex-col gap-2">
+          <p className="flex items-center gap-1.5 font-bold text-coral">
+            <CircleAlert size={12} aria-hidden="true" />
+            {left === 1 ? "Still in the way" : `${left} things still in the way`}
+          </p>
+          {help.unsolved.map((line) => (
+            <p key={line} className="text-cream-300">
+              {line}
+            </p>
+          ))}
+          {help.offers.map((offer) => {
+            const done = applied.includes(offer.label);
+            return (
+              <div key={offer.label} className="flex flex-col gap-1.5">
+                <p className="text-cream-300">{offer.detail}</p>
+                <button
+                  type="button"
+                  disabled={done || busy !== null}
+                  onClick={() => take(offer)}
+                  className="flex h-7 w-fit items-center gap-1.5 rounded-full border border-cream/20 px-3 font-bold text-cream-300 transition-colors enabled:hover:border-cream/45 enabled:hover:text-cream disabled:opacity-60"
+                >
+                  {done ? <Check size={12} aria-hidden="true" /> : busy === offer.label ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> : null}
+                  {done ? "Done" : offer.label}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {help.found.length > 1 && (
+        <div className="flex flex-col gap-1.5">
+          <button
+            type="button"
+            aria-expanded={details}
+            onClick={() => setDetails((open) => !open)}
+            className="flex w-fit items-center gap-1 font-bold text-mute transition-colors hover:text-cream"
+          >
+            {details ? "Hide what Wisp found" : `What Wisp found (${help.found.length})`}
+            <ChevronDown size={12} aria-hidden="true" className={cn("transition-transform duration-200", details && "rotate-180")} />
+          </button>
+          {details && (
+            <ul className="flex flex-col gap-1 text-mute">
+              {help.found.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

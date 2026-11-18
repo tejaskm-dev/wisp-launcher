@@ -1,6 +1,6 @@
 import { ArrowUpCircle, Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { clearCache, getDataFolder, getStorageUsage, openDataFolder, testerBuild } from "../../data/api";
+import { clearCache, getDataFolder, getStorageUsage, openDataFolder, testerBuild, openExternal } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
 import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
@@ -176,6 +176,12 @@ export function AboutSection({ settings, update }: SectionProps) {
             {testerBuild && <p>Made for testers who own Minecraft: offline accounts are on and it doesn't update itself. Please don't share it.</p>}
             <p>A Minecraft: Java Edition launcher that keeps your worlds on every computer.</p>
             <p className="mt-1 text-mute-2">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
+            <p className="mt-1 text-mute-2">
+              Wisp's own developers make it and answer for it. Questions or problems:{" "}
+              <button type="button" onClick={() => void openExternal("mailto:wisplaunchercontact@gmail.com")} className="font-semibold text-cream-300 underline decoration-cream/25 underline-offset-2 hover:text-cream">
+                wisplaunchercontact@gmail.com
+              </button>
+            </p>
           </div>
         </div>
         <UpdateRow />

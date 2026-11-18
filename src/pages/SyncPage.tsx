@@ -66,7 +66,7 @@ const KIND_ICON: Record<FolderKind, LucideIcon> = {
 };
 
 const WHAT_SYNCS: { key: keyof SyncPrefs; label: string; description: string }[] = [
-  { key: "worlds", label: "Worlds", description: "Every save, with a restore point each time it syncs. Worlds are never merged: if one changes on two computers, you choose." },
+  { key: "worlds", label: "Worlds", description: "Every save, with a restore point each time it syncs. Worlds are never merged: two copies of one world never mix." },
   { key: "instances", label: "Instances and mods", description: "Version, loader, mods and their settings. Mods Modrinth has download fresh on each computer; only ones you added yourself are copied." },
   { key: "options", label: "Options and keybinds", description: "Controls, sound, chat, language and other options, merged setting by setting." },
   { key: "servers", label: "Server list", description: "The multiplayer servers you've added, merged by address." },
@@ -201,6 +201,21 @@ export function SyncPage() {
                   />
                 ))}
               </div>
+            )}
+          </Panel>
+
+          <Panel title="When a world changed on two computers" description="Played on two computers before they could sync, a world has two copies. They're never mixed.">
+            {settings !== null && (
+              <Toggle
+                label="Settle it for me"
+                description={
+                  settings.sync.settleConflicts
+                    ? "The copy played last wins, and Wisp says so. The other isn't lost: this computer's becomes a restore point, another's stays in its restore points."
+                    : "Wisp asks which copy to keep (or keep both) before you play it."
+                }
+                checked={settings.sync.settleConflicts}
+                onChange={(value) => updateSettings((current) => ({ sync: { ...current.sync, settleConflicts: value } }))}
+              />
             )}
           </Panel>
 

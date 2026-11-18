@@ -325,6 +325,7 @@ pub fn apply(
             applied.bytes += file.size;
             progress(applied.bytes, total);
         } else {
+            remote.ask_cloud_for(&file.hash);
             applied.waiting += 1;
         }
     }

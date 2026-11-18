@@ -365,6 +365,7 @@ impl RawFile {
                 filename: self.file_name.clone(),
                 primary: true,
                 size: self.file_length,
+                sha512: None,
             }],
             dependencies: self
                 .dependencies
@@ -725,6 +726,8 @@ pub async fn summaries(
             title: raw.name.clone(),
             project_type: project_type(raw.class_id),
             icon_url: raw.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
+            description: raw.summary.clone(),
+            categories: Vec::new(),
         })
         .collect())
 }

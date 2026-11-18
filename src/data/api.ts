@@ -55,6 +55,19 @@ import type {
   VersionList,
   WorldEntry,
   WorldExtras,
+  InstanceItem,
+  ItemUpdate,
+  RemovedItem,
+  InstanceStats,
+  LocalSettings,
+  MovePlan,
+  MovedInstance,
+  UpdatedAll,
+  LogFile,
+  PackUpdates,
+  PackUpdated,
+  ExportOptions,
+  ExportedFile,
 } from "./types";
 
 /** True inside the desktop app; false when the UI runs in a plain browser via `pnpm dev`. */
@@ -305,6 +318,15 @@ export const addServer = (instanceId: string, name: string, address: string) =>
   call<SavedServer>("add_server", { instanceId, name, address }, (p) => p.addServer(instanceId, name, address));
 export const removeServer = (instanceId: string, address: string) => call<void>("remove_server", { instanceId, address }, (p) => p.removeServer(instanceId, address));
 
+// ── Settings shared between instances ──
+
+/** Ids of the instances that keep their own settings instead of sharing them. */
+export const getInstancesKeepingSettings = () => call<string[]>("get_instances_keeping_settings", undefined, () => Promise.resolve([]));
+export const setInstanceKeepsSettings = (id: string, keep: boolean) =>
+  call<void>("set_instance_keeps_settings", { id, keep }, (p) => p.needsDesktop("Keeping an instance's settings apart"));
+/** Gives every other instance all of this one's settings, from their next start. Returns how many settings. */
+export const shareInstanceSettings = (id: string) => call<number>("share_instance_settings", { id }, (p) => p.needsDesktop("Sharing an instance's settings"));
+
 // ── Fixes ──
 
 export const undoFix = (entryId: string) => call<void>("undo_fix", { entryId }, (p) => p.needsDesktop("Undoing a fix"));
@@ -387,3 +409,39 @@ export function onSyncActivity(handler: (activity: SyncActivity | null) => void)
   const stop = listen<SyncActivity | null>("sync-activity", (event) => handler(event.payload));
   return () => void stop.then((unlisten) => unlisten());
 }
+
+// ── An instance's own page (src-tauri/src/instance_page.rs) ──
+
+/** Everything in an instance, named (Modrinth's names where it knows the files). */
+export const getInstanceItems = (id: string) => call<InstanceItem[]>("get_instance_items", { id }, (p) => p.instanceItems(id));
+export const getInstanceUpdates = (id: string) => call<ItemUpdate[]>("get_instance_updates", { id }, (p) => p.instanceUpdates(id));
+/** Turns a mod or pack on or off; resolves to where its file is now. */
+export const setItemEnabled = (id: string, file: string, enabled: boolean) =>
+  call<string>("set_item_enabled", { id, file, enabled }, (p) => p.needsDesktop("Turning mods on and off"));
+export const removeItem = (id: string, file: string, name: string) => call<RemovedItem>("remove_item", { id, file, name }, (p) => p.needsDesktop("Removing mods"));
+export const putBackItem = (id: string, removedId: string) => call<string>("put_back_item", { id, removedId }, (p) => p.needsDesktop("Putting mods back"));
+export const installItemVersion = (id: string, file: string, versionId: string) =>
+  call<InstalledContent[]>("install_item_version", { id, file, versionId }, (p) => p.needsDesktop("Changing versions"));
+export const updateAllItems = (id: string) => call<UpdatedAll>("update_all_items", { id }, (p) => p.needsDesktop("Updating mods"));
+export const getInstanceStats = (id: string) => call<InstanceStats>("get_instance_stats", { id }, () => Promise.resolve({ playtimeMs: 0, sessions: 0 }));
+export const getLocalSettings = (id: string) => call<LocalSettings>("get_local_settings", { id }, () => Promise.resolve({}));
+export const setLocalSettings = (id: string, settings: LocalSettings) =>
+  call<void>("set_local_settings", { id, settings }, (p) => p.needsDesktop("Instance settings"));
+export const setInstanceMemory = (id: string, memoryMb: number | null) =>
+  call<Instance>("set_instance_memory", { id, memoryMb }, (p) => p.needsDesktop("Instance settings"));
+export const setInstanceJava = (id: string, javaMajor: number | null) =>
+  call<Instance>("set_instance_java", { id, javaMajor }, (p) => p.needsDesktop("Instance settings"));
+export const planInstanceMove = (id: string, gameVersion: string, loader: Loader) =>
+  call<MovePlan>("plan_instance_move", { id, gameVersion, loader }, (p) => p.needsDesktop("Changing versions"));
+export const moveInstance = (id: string, gameVersion: string, loader: Loader, loaderVersion: string | null) =>
+  call<MovedInstance>("move_instance", { id, gameVersion, loader, loaderVersion }, (p) => p.needsDesktop("Changing versions"));
+export const duplicateInstance = (id: string, name: string, withWorlds: boolean) =>
+  call<Instance>("duplicate_instance", { id, name, withWorlds }, (p) => p.needsDesktop("Copying instances"));
+/** Resolves to null when the save dialog was closed. */
+export const exportInstance = (id: string, options: ExportOptions) =>
+  call<ExportedFile | null>("export_instance", { id, options }, (p) => p.needsDesktop("Exporting modpacks"));
+export const getInstanceLogs = (id: string) => call<LogFile[]>("get_instance_logs", { id }, () => Promise.resolve([]));
+export const readInstanceLog = (id: string, name: string) => call<string>("read_instance_log", { id, name }, (p) => p.needsDesktop("Reading logs"));
+export const checkPackUpdates = (id: string) => call<PackUpdates>("check_pack_updates", { id }, () => Promise.resolve({ sameGame: null, newerGame: null }));
+export const updateInstancePack = (id: string, versionId: string, gameVersions: string[]) =>
+  call<PackUpdated>("update_instance_pack", { id, versionId, gameVersions }, (p) => p.needsDesktop("Updating modpacks"));

@@ -230,7 +230,7 @@ pub(crate) fn safe_join(base: &Path, relative: &str) -> Option<PathBuf> {
 }
 
 /// The newest version that fits: a release if there is one, else the newest beta or alpha.
-async fn best_version(
+pub(crate) async fn best_version(
     client: &HttpClient,
     key: Option<&str>,
     project_id: &str,
@@ -336,6 +336,18 @@ pub async fn install(
                 game: instance.game_version.clone(),
             })?,
         };
+        let file = checked_file(&details, &version)?;
+        let relative = format!(
+            "{}/{}",
+            folder(details.project_type, &version),
+            file.filename
+        );
+        // A dependency whose very file is already there stays as it is, along with what it
+        // needs: a modpack's own jars aren't in the index, and fetching them again would only
+        // put back what's there (or, undone later, take it away).
+        if !explicit && index.game_dir().join(&relative).is_file() {
+            continue;
+        }
         for dependency in version
             .dependencies
             .iter()
@@ -352,12 +364,6 @@ pub async fn install(
             }
         }
 
-        let file = checked_file(&details, &version)?;
-        let relative = format!(
-            "{}/{}",
-            folder(details.project_type, &version),
-            file.filename
-        );
         planned.push((
             InstalledContent {
                 project_id: details.id.clone(),
@@ -380,6 +386,16 @@ pub async fn install(
         ));
     }
 
+    // The mods already there, to tell a new dependency from another build of one the instance
+    // has under a different file name (a modpack's, say).
+    let before = if planned
+        .iter()
+        .any(|(item, _)| !item.explicit && item.project_type == ProjectType::Mod)
+    {
+        crate::doctor::scan(instance_dir)
+    } else {
+        Vec::new()
+    };
     let downloads = planned
         .iter()
         .map(|(_, download)| download.clone())
@@ -391,6 +407,19 @@ pub async fn install(
         &Arc::new(Progress::default()),
     )
     .await?;
+    // Two copies of a mod stop the game: a dependency the instance already has keeps the copy
+    // it has, and the one just fetched goes again.
+    planned.retain(|(item, download)| {
+        if item.explicit || item.project_type != ProjectType::Mod {
+            return true;
+        }
+        let fetched = crate::doctor::read_jar(&download.path);
+        let had = !fetched.id.is_empty() && before.iter().any(|old| old.answers_to(&fetched.id));
+        if had {
+            let _ = std::fs::remove_file(&download.path);
+        }
+        !had
+    });
 
     // Swap out older files of the same projects, then record what's there now.
     let mut items = existing;

@@ -43,8 +43,16 @@ function updatesOn() {
 
 const failure = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/** In the browser preview, `?update=available` shows the update window (the desktop app never does this). */
+function previewUpdate(): boolean {
+  if (isDesktop || typeof location === "undefined" || new URLSearchParams(location.search).get("update") !== "available") return false;
+  set({ phase: "available", version: "0.1.9", notes: "### What's new\n\n- **Instance pages**: every instance has its own page.\n- **Fixed**: something that was broken.", later: false });
+  return true;
+}
+
 /** Asks whether there's a newer Wisp. Quiet about it unless one turns up. */
 export async function checkForUpdate() {
+  if (previewUpdate()) return;
   if (!(await updatesOn())) {
     set({ phase: "off" });
     return;

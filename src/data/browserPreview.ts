@@ -4,6 +4,8 @@
 
 import { DEFAULT_SETTINGS } from "./defaults";
 import type {
+  InstanceItem,
+  ItemUpdate,
   Account,
   Category,
   CloudFolder,
@@ -431,6 +433,26 @@ export async function deleteInstance(id: string): Promise<void> {
 
 export async function needsDesktop(what: string): Promise<never> {
   throw new Error(`${what} needs the desktop app. Run pnpm tauri dev.`);
+}
+
+/** What's in an instance: the browser can't read game folders, so only what a test puts in
+ * localStorage under "wisp.preview.items" (instance id -> items) shows. */
+export async function instanceItems(id: string): Promise<InstanceItem[]> {
+  return seeded<InstanceItem>("wisp.preview.items", id);
+}
+
+/** Updates for what's in an instance: likewise only what a test puts under "wisp.preview.updates". */
+export async function instanceUpdates(id: string): Promise<ItemUpdate[]> {
+  return seeded<ItemUpdate>("wisp.preview.updates", id);
+}
+
+function seeded<T>(key: string, id: string): T[] {
+  try {
+    const all = JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, T[]>;
+    return all[id] ?? [];
+  } catch {
+    return [];
+  }
 }
 
 // ─── Modrinth projects ────────────────────────────────────────────────────────────────────────────

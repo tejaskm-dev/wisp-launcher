@@ -1,8 +1,6 @@
-import { FolderOpen, LoaderCircle, Package, PackagePlus, Pencil, Play, Plus, RotateCw, Square } from "lucide-react";
-import { useState } from "react";
+import { FolderOpen, LoaderCircle, Package, PackagePlus, Play, Plus, RotateCw, Settings2, Square } from "lucide-react";
 import { m } from "motion/react";
 import { Ghost } from "../components/brand/Ghost";
-import { EditInstanceDialog } from "../components/instances/EditInstanceDialog";
 import { InstanceAvatar } from "../components/instances/InstanceAvatar";
 import { InstanceLabel } from "../components/instances/VersionTag";
 import { describeLaunch, type LaunchView } from "../components/launch/describe";
@@ -21,8 +19,7 @@ import { useApp } from "../state/AppContext";
 const GRID = "grid grid-cols-[repeat(auto-fill,minmax(270px,1fr))] gap-4";
 
 export function InstancesPage() {
-  const { home, now, openNewInstance, importFiles, notify, launches, play, stop } = useApp();
-  const [editing, setEditing] = useState<{ instance: Instance; open: boolean; session: number } | null>(null);
+  const { home, now, openNewInstance, importFiles, notify, launches, play, stop, openInstance } = useApp();
   const instances = home?.instances ?? null;
 
   const openFolder = (instance: Instance) =>
@@ -92,7 +89,8 @@ export function InstancesPage() {
                 onPlay={() => play(instance.id)}
                 onStop={() => stop(instance.id)}
                 onOpenFolder={() => void openFolder(instance)}
-                onEdit={() => setEditing((current) => ({ instance, open: true, session: (current?.session ?? 0) + 1 }))}
+                onOpen={() => openInstance(instance.id)}
+                onSettings={() => openInstance(instance.id, "settings")}
               />
             </li>
           ))}
@@ -110,14 +108,6 @@ export function InstancesPage() {
           </li>
         </m.ul>
       )}
-      {editing && (
-        <EditInstanceDialog
-          key={editing.session}
-          instance={editing.instance}
-          open={editing.open}
-          onClose={() => setEditing((current) => (current ? { ...current, open: false } : null))}
-        />
-      )}
     </Page>
   );
 }
@@ -129,17 +119,20 @@ interface InstanceCardProps {
   onPlay: () => void;
   onStop: () => void;
   onOpenFolder: () => void;
-  onEdit: () => void;
+  /** Its own page. */
+  onOpen: () => void;
+  onSettings: () => void;
 }
 
-function InstanceCard({ instance, now, view, onPlay, onStop, onOpenFolder, onEdit }: InstanceCardProps) {
+function InstanceCard({ instance, now, view, onPlay, onStop, onOpenFolder, onOpen, onSettings }: InstanceCardProps) {
   const busy = view.kind === "busy";
   return (
     <article className="wisp-card lift lit group flex h-full flex-col gap-4 p-4">
       <div className="flex items-center gap-3.5">
+        <button type="button" onClick={onOpen} aria-label={`Open ${instance.name}`} className="flex min-w-0 flex-1 items-center gap-3.5 text-left">
         <InstanceAvatar instance={instance} className="size-14 text-2xl transition-transform duration-500 ease-out-expo group-hover:-rotate-6 group-hover:scale-105" />
         <div className="min-w-0 flex-1">
-          <h3 className="truncate font-display text-lg font-bold leading-tight">{instance.name}</h3>
+          <h3 className="truncate font-display text-lg font-bold leading-tight underline-offset-4 group-hover:underline">{instance.name}</h3>
           <p className="mt-0.5 truncate text-[13px] text-mute">
             <InstanceLabel instance={instance} />
           </p>
@@ -150,14 +143,15 @@ function InstanceCard({ instance, now, view, onPlay, onStop, onOpenFolder, onEdi
             </p>
           )}
         </div>
+        </button>
         <button
           type="button"
-          onClick={onEdit}
-          aria-label={`Edit ${instance.name}`}
-          title="Edit"
+          onClick={onSettings}
+          aria-label={`${instance.name} settings`}
+          title="Settings"
           className="grid size-9 shrink-0 place-items-center self-start rounded-full text-mute transition-colors hover:bg-cream/8 hover:text-cream"
         >
-          <Pencil size={15} aria-hidden="true" />
+          <Settings2 size={15} aria-hidden="true" />
         </button>
       </div>
 

@@ -96,6 +96,21 @@ pub enum Event {
         title: String,
         version: String,
     },
+    /// The instance's modpack moved to another of its versions.
+    ModpackUpdated {
+        title: String,
+        from: String,
+        to: String,
+    },
+    /// The instance moved to another Minecraft version or loader ("Fabric 26.2" to "Fabric 26.3").
+    VersionChanged {
+        from: String,
+        to: String,
+    },
+    /// A copy of another instance.
+    InstanceDuplicated {
+        from: String,
+    },
     WorldImported {
         name: String,
     },
@@ -135,6 +150,9 @@ impl Event {
             Event::ContentRemoved { .. } => "content-removed",
             Event::InstanceCreated { .. } => "instance-created",
             Event::ModpackInstalled { .. } => "modpack-installed",
+            Event::ModpackUpdated { .. } => "modpack-updated",
+            Event::VersionChanged { .. } => "version-changed",
+            Event::InstanceDuplicated { .. } => "instance-duplicated",
             Event::WorldImported { .. } => "world-imported",
             Event::WorldExported { .. } => "world-exported",
             Event::WorldDeleted { .. } => "world-deleted",

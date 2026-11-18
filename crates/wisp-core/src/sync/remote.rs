@@ -192,6 +192,30 @@ impl Remote {
         self.root.join(OBJECTS).join(&hash[..2]).join(&hash[2..])
     }
 
+    /// Asks the cloud app to bring back a file it's holding in the cloud. iCloud Drive with
+    /// "Optimise Mac Storage" leaves a `.name.icloud` stand-in until something asks for the file;
+    /// other cloud apps bring files in as they're read, or simply haven't got them yet. Best effort.
+    pub fn ask_cloud_for(&self, hash: &str) {
+        if !valid_hash(hash) {
+            return;
+        }
+        let path = self.object_path(hash);
+        #[cfg(target_os = "macos")]
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            let stand_in = parent.join(format!(".{}.icloud", name.to_string_lossy()));
+            if stand_in.exists() {
+                let _ = std::process::Command::new("/usr/bin/brctl")
+                    .arg("download")
+                    .arg(&path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = path;
+    }
+
     pub fn has(&self, hash: &str) -> bool {
         valid_hash(hash) && self.object_path(hash).is_file()
     }

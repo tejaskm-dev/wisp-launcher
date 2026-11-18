@@ -559,6 +559,9 @@ pub struct VersionFile {
     pub primary: bool,
     pub size: u64,
     pub sha1: Option<String>,
+    /// Modrinth's modpack format names every file by both hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha512: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -634,6 +637,7 @@ impl From<RawVersion> for ProjectVersion {
                 .into_iter()
                 .map(|file| VersionFile {
                     sha1: file.hashes.get("sha1").cloned(),
+                    sha512: file.hashes.get("sha512").cloned(),
                     url: file.url,
                     filename: file.filename,
                     primary: file.primary,
@@ -727,6 +731,24 @@ pub async fn versions_by_hashes(client: &HttpClient, sha1s: &[String]) -> Result
     Ok(raw.into_iter().map(|(hash, version)| (hash, version.into())).collect())
 }
 
+/// The newest version of each file's project that fits these loaders and game versions, found by
+/// the files' SHA-1s in one request. Files Modrinth doesn't have, or whose project has nothing
+/// that fits, are left out of the answer.
+pub async fn latest_by_hashes(client: &HttpClient, sha1s: &[String], loaders: &[&str], game_versions: &[&str]) -> Result<HashMap<String, ProjectVersion>, Error> {
+    if sha1s.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let raw: HashMap<String, RawVersion> = client
+        .post(format!("{API}/version_files/update"))
+        .json(&serde_json::json!({ "hashes": sha1s, "algorithm": "sha1", "loaders": loaders, "game_versions": game_versions }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(raw.into_iter().map(|(hash, version)| (hash, version.into())).collect())
+}
+
 /// A Modrinth category, for the filter sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -779,6 +801,12 @@ pub struct ProjectSummary {
     pub project_type: ProjectType,
     #[serde(default, alias = "icon_url")]
     pub icon_url: Option<String>,
+    /// The one-line summary.
+    #[serde(default)]
+    pub description: String,
+    /// Modrinth's categories ("library", "optimization", ...).
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 pub async fn projects(client: &HttpClient, ids: &[String]) -> Result<Vec<ProjectSummary>, Error> {

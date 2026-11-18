@@ -49,6 +49,10 @@ pub enum Who<'a> {
 /// game asks).
 pub type Lookup = Arc<dyn Fn(Who<'_>) -> Option<Player> + Send + Sync>;
 
+/// Told about each question the game asked and the status it got back (method, path, status),
+/// for checking what a game really asks.
+pub type Observe = Arc<dyn Fn(&str, &str, u16) + Send + Sync>;
+
 /// A running skin server.
 #[derive(Debug, Clone)]
 pub struct SkinServer {
@@ -64,6 +68,7 @@ struct Inner {
     public_der: String,
     metadata: String,
     lookup: Lookup,
+    observe: Option<Observe>,
 }
 
 /// The key skin data is signed with: loaded from `key_path`, or made (and kept there) the first time.
@@ -84,6 +89,11 @@ pub fn load_or_make_key(key_path: &Path) -> std::io::Result<RsaPrivateKey> {
 
 /// Starts the server on a free port of 127.0.0.1. It runs until Wisp quits.
 pub async fn start(key: RsaPrivateKey, lookup: Lookup) -> std::io::Result<SkinServer> {
+    start_observed(key, lookup, None).await
+}
+
+/// `start`, telling `observe` about every question the game asks.
+pub async fn start_observed(key: RsaPrivateKey, lookup: Lookup, observe: Option<Observe>) -> std::io::Result<SkinServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let public = RsaPublicKey::from(&key);
@@ -99,7 +109,7 @@ pub async fn start(key: RsaPrivateKey, lookup: Lookup) -> std::io::Result<SkinSe
         "signaturePublickey": public_pem,
     })
     .to_string();
-    let inner = Arc::new(Inner { port, signer: SigningKey::<sha1_10::Sha1>::new(key), public_der, metadata: metadata.clone(), lookup });
+    let inner = Arc::new(Inner { port, signer: SigningKey::<sha1_10::Sha1>::new(key), public_der, metadata: metadata.clone(), lookup, observe });
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let inner = inner.clone();
@@ -158,6 +168,9 @@ async fn serve(stream: TcpStream, inner: &Inner) -> std::io::Result<()> {
     reader.read_exact(&mut body).await?;
 
     let response = answer(inner, method, target, &body);
+    if let Some(observe) = &inner.observe {
+        observe(method, target, response.status);
+    }
     let reason = match response.status {
         200 => "OK",
         204 => "No Content",

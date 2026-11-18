@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::HttpClient;
 use crate::content::safe_join;
 use crate::curseforge;
+use crate::inventory;
 use crate::instances::{
-    Instance, InstanceError, InstanceStore, Loader, ModpackOrigin, NewInstance,
+    GAME_DIR, Instance, InstanceError, InstanceStore, Loader, ModpackOrigin, NewInstance,
 };
 use crate::launch::{Download, DownloadError, Progress, download_all};
 use crate::modrinth::{self, ProjectType};
@@ -393,11 +394,14 @@ async fn fill(
         .game_dir(&instance.id)
         .ok_or(InstanceError::NotFound)?;
     let mut downloads = Vec::new();
+    // What the pack brought, so the instance can tell its files from ones added later.
+    let mut brought: HashMap<String, String> = HashMap::new();
     for file in &index.files {
         let client_side = file.env.as_ref().and_then(|env| env.client.as_deref());
         if client_side == Some("unsupported") {
             continue;
         }
+        brought.insert(file.path.clone(), file.hashes.get("sha1").cloned().unwrap_or_default());
         let path = safe_join(&game_dir, &file.path).ok_or_else(|| {
             ModpackError::BadPack(format!(
                 "a file wants to go outside the instance: {}",
@@ -422,15 +426,23 @@ async fn fill(
 
     // Overrides: configs, resource packs and such, copied over the downloaded files.
     report(InstallUpdate::Unpacking);
-    unpack_overrides(archive, &game_dir, &["overrides/", "client-overrides/"])
+    for path in unpack_overrides(archive, &game_dir, &["overrides/", "client-overrides/"])? {
+        brought.entry(path).or_default();
+    }
+    if let Some(dir) = instances.dir_of(&instance.id) {
+        let _ = inventory::record_pack_files(&dir, &brought);
+    }
+    Ok(())
 }
 
-/// Copies the files under these folders of the pack into the game folder.
+/// Copies the files under these folders of the pack into the game folder, returning where they
+/// went (relative to it).
 fn unpack_overrides(
     archive: &mut zip::ZipArchive<std::fs::File>,
     game_dir: &Path,
     prefixes: &[&str],
-) -> Result<(), ModpackError> {
+) -> Result<Vec<String>, ModpackError> {
+    let mut written = Vec::new();
     for prefix in prefixes {
         for position in 0..archive.len() {
             let mut entry = archive
@@ -448,13 +460,280 @@ fn unpack_overrides(
             let Some(destination) = safe_join(game_dir, relative) else {
                 continue;
             };
+            // A pack update keeps the player's own game settings.
+            if relative == "options.txt" && destination.exists() {
+                continue;
+            }
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::io::copy(&mut entry, &mut std::fs::File::create(destination)?)?;
+            written.push(relative.to_string());
         }
     }
-    Ok(())
+    Ok(written)
+}
+
+// ─── Updating a pack ────────────────────────────────────────────────────────────────────────────
+
+/// A version of the modpack an instance came from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackRelease {
+    pub version_id: String,
+    pub version_number: String,
+    /// The Minecraft versions it's for.
+    pub game_versions: Vec<String>,
+    /// RFC 3339.
+    pub published: String,
+}
+
+/// Newer versions of an instance's modpack: the newest for its Minecraft version, and the newest
+/// of all when that one is for another Minecraft version.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackUpdates {
+    pub same_game: Option<PackRelease>,
+    pub newer_game: Option<PackRelease>,
+}
+
+fn newest_release(versions: Vec<modrinth::ProjectVersion>) -> Option<modrinth::ProjectVersion> {
+    let release = versions.iter().position(|version| version.version_type == "release");
+    match release {
+        Some(index) => versions.into_iter().nth(index),
+        None => versions.into_iter().next(),
+    }
+}
+
+fn release_of(version: &modrinth::ProjectVersion) -> PackRelease {
+    PackRelease {
+        version_id: version.id.clone(),
+        version_number: version.version_number.clone(),
+        game_versions: version.game_versions.clone(),
+        published: version.date_published.clone(),
+    }
+}
+
+/// Looks for newer versions of the Modrinth modpack an instance came from.
+pub async fn pack_updates(client: &HttpClient, instance: &Instance) -> Result<PackUpdates, ModpackError> {
+    let Some(origin) = instance.modpack.as_ref().filter(|origin| !curseforge::is_curseforge(&origin.project_id)) else {
+        return Ok(PackUpdates::default());
+    };
+    let versions = modrinth::project_versions(client, &origin.project_id, &[], &[]).await?;
+    let current = versions.iter().find(|version| version.id == origin.version_id).map(|version| version.date_published.clone());
+    let newer = |version: &modrinth::ProjectVersion| version.id != origin.version_id && current.as_ref().is_none_or(|current| version.date_published > *current);
+    let same: Vec<modrinth::ProjectVersion> = versions.iter().filter(|version| version.game_versions.contains(&instance.game_version)).cloned().collect();
+    let same_game = newest_release(same).filter(|version| newer(version)).map(|version| release_of(&version));
+    let newer_game = newest_release(versions)
+        .filter(|version| newer(version) && !version.game_versions.contains(&instance.game_version))
+        .map(|version| release_of(&version));
+    Ok(PackUpdates { same_game, newer_game })
+}
+
+/// What a pack update did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackUpdated {
+    pub from: String,
+    pub to: String,
+    /// Files the new version brought or changed.
+    pub added: usize,
+    /// The old version's files it dropped (they wait in the instance's holding folder).
+    pub removed: usize,
+    /// When the update moved the instance to another Minecraft version or loader.
+    pub moved_to: Option<String>,
+}
+
+/// Updates an instance to another version of its Modrinth modpack. The pack's old files that the
+/// new version drops go to the holding folder (files the player turned off stay off), its new
+/// and changed files are downloaded, and its overrides (configs) are unpacked again, keeping the
+/// player's options.txt. Mods and packs the player added are left alone.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_pack(
+    client: &HttpClient,
+    instances: &InstanceStore,
+    instance_id: &str,
+    version_id: &str,
+    cache_dir: &Path,
+    concurrency: usize,
+    now_ms: i64,
+    report: &(dyn Fn(InstallUpdate) + Send + Sync),
+) -> Result<PackUpdated, ModpackError> {
+    let instance = instances.get(instance_id).ok_or(InstanceError::NotFound)?;
+    let instance_dir = instances.dir_of(instance_id).ok_or(InstanceError::NotFound)?;
+    let game_dir = instance_dir.join(GAME_DIR);
+    let origin = instance.modpack.clone().filter(|origin| !curseforge::is_curseforge(&origin.project_id)).ok_or(ModpackError::NotAModpack)?;
+    report(InstallUpdate::Preparing);
+    let old_pack = cache_dir.join(format!("{}.mrpack", origin.version_id));
+    let old_files = inventory::pack_files(&instance_dir, Some(&old_pack));
+
+    let version = modrinth::version(client, version_id).await?;
+    if version.project_id != origin.project_id {
+        return Err(ModpackError::NotAModpack);
+    }
+    let file = version.primary_file().ok_or(ModpackError::NoVersion)?;
+    let pack_path = cache_dir.join(format!("{}.mrpack", version.id));
+    if !pack_path.is_file() {
+        let download = Download { url: file.url.clone(), path: pack_path.clone(), sha1: file.sha1.clone(), size: Some(file.size), executable: false };
+        download_with_progress(client, vec![download], concurrency, report).await?;
+    }
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&pack_path)?).map_err(|error| ModpackError::BadPack(error.to_string()))?;
+    let index: PackIndex = read_json(&mut archive, "modrinth.index.json")?;
+    let (game_version, loader, loader_version) = target(&index.dependencies)?;
+    let new_files = inventory::mrpack_files(&pack_path).ok_or_else(|| ModpackError::BadPack("its file list couldn't be read".into()))?;
+
+    // The old version's files the new one doesn't have.
+    let mut removed = 0;
+    for path in old_files.iter().flat_map(|files| files.keys()) {
+        if new_files.contains_key(path) {
+            continue;
+        }
+        let listed = ["mods/", "resourcepacks/", "shaderpacks/"].iter().any(|folder| path.starts_with(folder));
+        for candidate in [path.clone(), format!("{path}.disabled")] {
+            if listed && game_dir.join(&candidate).is_file() && inventory::remove(&instance_dir, &candidate, now_ms).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    // New and changed files; ones the player turned off stay off.
+    let mut downloads = Vec::new();
+    for file in &index.files {
+        if file.env.as_ref().and_then(|env| env.client.as_deref()) == Some("unsupported") {
+            continue;
+        }
+        let path = safe_join(&game_dir, &file.path).ok_or_else(|| ModpackError::BadPack(format!("a file wants to go outside the instance: {}", file.path)))?;
+        if game_dir.join(format!("{}.disabled", file.path)).is_file() {
+            continue;
+        }
+        let expected = file.hashes.get("sha1");
+        if path.is_file() {
+            if expected.is_some() && inventory::sha1_of(&path).as_ref() == expected {
+                continue;
+            }
+            std::fs::remove_file(&path)?;
+        }
+        let url = file.downloads.iter().find(|url| url.starts_with("https://")).ok_or_else(|| ModpackError::BadPack(format!("{} has no download", file.path)))?;
+        downloads.push(Download { url: url.clone(), path, sha1: expected.cloned(), size: file.file_size, executable: false });
+    }
+    let added = downloads.len();
+    download_with_progress(client, downloads, concurrency, report).await?;
+    report(InstallUpdate::Unpacking);
+    unpack_overrides(&mut archive, &game_dir, &["overrides/", "client-overrides/"])?;
+
+    let before = format!("{} {}", instance.loader.display_name(), instance.game_version);
+    let after = format!("{} {}", loader.display_name(), game_version);
+    instances.update(instance_id, |stored| {
+        stored.game_version = game_version.clone();
+        stored.loader = loader;
+        stored.loader_version = loader_version.clone();
+        if let Some(stored_origin) = stored.modpack.as_mut() {
+            stored_origin.version_id = version.id.clone();
+            stored_origin.version_number = version.version_number.clone();
+        }
+    })?;
+    let _ = inventory::record_pack_files(&instance_dir, &new_files);
+    Ok(PackUpdated { from: origin.version_number, to: version.version_number, added, removed, moved_to: (before != after).then_some(after) })
+}
+
+// ─── Exporting a pack ───────────────────────────────────────────────────────────────────────────
+
+/// What goes into an exported modpack besides its mods and packs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportOptions {
+    /// The pack's own version, as its players see it ("1.0").
+    pub version: String,
+    /// The config folders: config/, defaultconfigs/, kubejs/ and the like.
+    pub configs: bool,
+    /// The game settings in options.txt.
+    pub options: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Exported {
+    /// Files players download from Modrinth when they install it.
+    pub downloads: usize,
+    /// Files carried inside the pack, because Modrinth doesn't have them.
+    pub bundled: usize,
+    pub bytes: u64,
+}
+
+/// Folders of configs and scripts packs commonly carry.
+const CONFIG_FOLDERS: [&str; 6] = ["config", "defaultconfigs", "kubejs", "scripts", "global_packs", "resources"];
+
+/// The key a loader goes by in a `.mrpack`'s dependencies.
+fn loader_key(loader: Loader) -> Option<&'static str> {
+    match loader {
+        Loader::Fabric => Some("fabric-loader"),
+        Loader::Quilt => Some("quilt-loader"),
+        Loader::Forge => Some("forge"),
+        Loader::NeoForge => Some("neoforge"),
+        Loader::Vanilla => None,
+    }
+}
+
+/// Writes an instance as a Modrinth modpack (`.mrpack`): what Modrinth has is listed for
+/// download, everything else (and, if asked, configs and options.txt) is carried inside. Worlds,
+/// screenshots and logs stay out, and so do files that are turned off.
+pub fn export_mrpack(instance: &Instance, instance_dir: &Path, scan: &inventory::Scan, out: &Path, options: &ExportOptions) -> Result<Exported, ModpackError> {
+    use std::io::Write;
+    let game_dir = instance_dir.join(GAME_DIR);
+    let (downloadable, own) = scan.for_export();
+    let mut dependencies = serde_json::Map::new();
+    dependencies.insert("minecraft".into(), instance.game_version.clone().into());
+    if let (Some(key), Some(version)) = (loader_key(instance.loader), &instance.loader_version) {
+        dependencies.insert(key.into(), version.clone().into());
+    }
+    let files: Vec<serde_json::Value> = downloadable
+        .iter()
+        .map(|file| serde_json::json!({ "path": file.path, "hashes": { "sha1": file.sha1, "sha512": file.sha512 }, "downloads": [file.url], "fileSize": file.size }))
+        .collect();
+    let index = serde_json::json!({
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": options.version,
+        "name": instance.name,
+        "files": files,
+        "dependencies": dependencies,
+    });
+
+    let zip_error = |error: zip::result::ZipError| ModpackError::Io(std::io::Error::other(error));
+    let partial = out.with_extension("mrpack.part");
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(std::fs::File::create(&partial)?));
+    let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("modrinth.index.json", deflated).map_err(zip_error)?;
+    zip.write_all(&serde_json::to_vec_pretty(&index).map_err(std::io::Error::other)?)?;
+
+    let mut carried: Vec<String> = own;
+    if options.configs {
+        carried.extend(CONFIG_FOLDERS.iter().filter(|folder| game_dir.join(folder).is_dir()).map(|folder| folder.to_string()));
+    }
+    if options.options && game_dir.join("options.txt").is_file() {
+        carried.push("options.txt".into());
+    }
+    let mut bundled = 0;
+    let mut pending: Vec<String> = carried;
+    while let Some(relative) = pending.pop() {
+        let path = game_dir.join(&relative);
+        if path.is_dir() {
+            for entry in std::fs::read_dir(&path)?.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with('.') {
+                    pending.push(format!("{relative}/{name}"));
+                }
+            }
+        } else if path.is_file() {
+            zip.start_file(format!("overrides/{relative}"), deflated).map_err(zip_error)?;
+            std::io::copy(&mut std::fs::File::open(&path)?, &mut zip)?;
+            bundled += 1;
+        }
+    }
+    zip.finish().map_err(zip_error)?;
+    std::fs::rename(&partial, out)?;
+    let bytes = std::fs::metadata(out).map(|meta| meta.len()).unwrap_or(0);
+    Ok(Exported { downloads: downloadable.len(), bundled, bytes })
 }
 
 // ─── CurseForge packs ───────────────────────────────────────────────────────────────────────────
@@ -665,6 +944,7 @@ async fn fill_curseforge(
 
     let mut downloads = Vec::new();
     let mut skipped = Vec::new();
+    let mut brought: HashMap<String, String> = HashMap::new();
     for file in files {
         let project = projects.get(&file.mod_id);
         let name = project.map_or_else(|| file.file_name.clone(), |project| project.name.clone());
@@ -685,6 +965,7 @@ async fn fill_curseforge(
             )));
         }
         let folder = curse_folder(project.and_then(|project| project.class_id));
+        brought.insert(format!("{folder}/{}", file.file_name), file.sha1().unwrap_or_default());
         downloads.push(Download {
             url,
             path: game_dir.join(folder).join(&file.file_name),
@@ -697,7 +978,12 @@ async fn fill_curseforge(
 
     report(InstallUpdate::Unpacking);
     let prefix = format!("{}/", manifest.overrides.trim_end_matches('/'));
-    unpack_overrides(archive, &game_dir, &[prefix.as_str()])?;
+    for path in unpack_overrides(archive, &game_dir, &[prefix.as_str()])? {
+        brought.entry(path).or_default();
+    }
+    if let Some(dir) = instances.dir_of(&instance.id) {
+        let _ = inventory::record_pack_files(&dir, &brought);
+    }
     skipped.sort();
     Ok(skipped)
 }
@@ -738,6 +1024,41 @@ async fn download_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_an_instance_as_a_modrinth_pack_wisp_can_read_back() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("wisp-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = InstanceStore::new(root.join("instances"));
+        let request = NewInstance { name: "Export".into(), game_version: "26.3".into(), loader: Loader::Fabric, loader_version: None, icon: None };
+        let instance = store.create(request, Some("0.20.1".into()), 0).unwrap();
+        let dir = store.dir_of(&instance.id).unwrap();
+        let game = dir.join(GAME_DIR);
+        let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        jar.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default()).unwrap();
+        jar.write_all(br#"{"id": "mine", "version": "1"}"#).unwrap();
+        let jar = jar.finish().unwrap().into_inner();
+        for (path, bytes) in [("mods/mine.jar", &jar[..]), ("mods/off.jar.disabled", &jar[..]), ("config/mine.json", b"{}"), ("options.txt", b"fov:0.5"), ("saves/World/level.dat", b"world")] {
+            let file = game.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        let scan = inventory::scan(&dir);
+        let out = root.join("Export 1.0.mrpack");
+        let exported = export_mrpack(&instance, &dir, &scan, &out, &ExportOptions { version: "1.0".into(), configs: true, options: false }).unwrap();
+        // Nothing here is on Modrinth (no network in tests), so the mod travels inside the pack.
+        assert_eq!((exported.downloads, exported.bundled), (0, 2));
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let summary = summarize(&mut archive).unwrap().unwrap();
+        assert_eq!((summary.game_version.as_str(), summary.loader, summary.version.as_deref()), ("26.3", Loader::Fabric, Some("1.0")));
+        let names: Vec<String> = archive.file_names().filter_map(Result::ok).map(|name| name.into_owned()).collect();
+        assert!(names.contains(&"overrides/mods/mine.jar".to_string()) && names.contains(&"overrides/config/mine.json".to_string()), "{names:?}");
+        assert!(!names.iter().any(|name| name.contains("off.jar") || name.contains("options.txt") || name.contains("saves")), "{names:?}");
+        let files = inventory::mrpack_files(&out).unwrap();
+        assert!(files.contains_key("mods/mine.jar"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reads_curseforge_manifests() {
