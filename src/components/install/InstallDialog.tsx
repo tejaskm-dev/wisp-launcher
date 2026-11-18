@@ -1,5 +1,5 @@
 import { Check, CircleAlert, Earth, LoaderCircle, Package, Plus } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getInstanceContent, getInstanceWorlds, getProject, installProject } from "../../data/api";
 import type { InstalledContent, ProjectType, WorldEntry } from "../../data/types";
 import { cn } from "../../lib/cn";
@@ -91,11 +91,16 @@ function ModpackInstall({ target, open, onClose }: { target: InstallTarget; open
 }
 
 function AddToInstance({ target, open, onClose }: { target: InstallTarget; open: boolean; onClose: () => void }) {
-  const { home, openNewInstance, notify } = useApp();
+  const { home, openNewInstance, notify, discoverFor } = useApp();
   const [project] = useResource(() => getProject(target.projectId));
   const [rows, setRows] = useState<Record<string, RowState>>({});
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
-  const instances = home?.instances ?? [];
+  // The instance whose page sent you to Discover comes first.
+  const instances = useMemo(() => {
+    const all = home?.instances ?? [];
+    const first = all.find((instance) => instance.id === discoverFor);
+    return first ? [first, ...all.filter((instance) => instance !== first)] : all;
+  }, [home?.instances, discoverFor]);
 
   // Which instances already have it.
   useEffect(() => {

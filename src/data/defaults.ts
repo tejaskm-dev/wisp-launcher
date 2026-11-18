@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shareOptions: true,
   concurrentDownloads: 16,
   externalImages: true,
-  sync: { worlds: true, instances: true, options: true, servers: true, resourcePacks: true, screenshots: false },
+  sync: { worlds: true, instances: true, options: true, servers: true, resourcePacks: true, screenshots: false, settleConflicts: true },
   journal: { autoRestorePoints: true, keepRestorePoints: 10, askForNote: true },
 };
 

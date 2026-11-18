@@ -134,6 +134,9 @@ pub struct SyncPrefs {
     pub servers: bool,
     pub resource_packs: bool,
     pub screenshots: bool,
+    /// A world changed on two computers is settled without asking: the copy played last wins,
+    /// and the other is kept (as a restore point, or in the sync folder's history).
+    pub settle_conflicts: bool,
 }
 
 impl Default for SyncPrefs {
@@ -145,6 +148,7 @@ impl Default for SyncPrefs {
             servers: true,
             resource_packs: true,
             screenshots: false,
+            settle_conflicts: true,
         }
     }
 }

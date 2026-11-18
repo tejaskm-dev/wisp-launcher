@@ -10,6 +10,8 @@ interface ToggleProps {
   label: string;
   description?: ReactNode;
   disabled?: boolean;
+  /** Just the switch (for list rows): the label is only read out. */
+  compact?: boolean;
 }
 
 /** How far the ghost travels across the track when it's switched on. */
@@ -21,7 +23,7 @@ const ACROSS = 27;
  * is the ghost itself. Off, it dozes on the left in an unlit track; switched on, it hops across,
  * wakes up, lights the track and leaves a spark behind, the way Wisp marks what's chosen.
  */
-export function Toggle({ checked, onChange, label, description, disabled = false }: ToggleProps) {
+export function Toggle({ checked, onChange, label, description, disabled = false, compact = false }: ToggleProps) {
   const id = useId();
   const calm = useReducedMotion();
   // Counts switch-ons, so each one gets its own spark.
@@ -32,19 +34,14 @@ export function Toggle({ checked, onChange, label, description, disabled = false
     onChange(!checked);
   };
 
-  return (
-    <div className={cn("flex items-center justify-between gap-6 py-3.5", disabled && "opacity-50")}>
-      <div className="min-w-0">
-        <label htmlFor={id} className="text-[15px] font-semibold">
-          {label}
-        </label>
-        {description && <p className="mt-0.5 text-[13px] leading-relaxed text-mute">{description}</p>}
-      </div>
+  const control = (
       <button
         id={id}
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-label={compact ? label : undefined}
+        title={compact ? label : undefined}
         disabled={disabled}
         onClick={flip}
         className={cn(
@@ -94,6 +91,17 @@ export function Toggle({ checked, onChange, label, description, disabled = false
           )}
         </AnimatePresence>
       </button>
+  );
+  if (compact) return <span className={cn("inline-flex", disabled && "opacity-50")}>{control}</span>;
+  return (
+    <div className={cn("flex items-center justify-between gap-6 py-3.5", disabled && "opacity-50")}>
+      <div className="min-w-0">
+        <label htmlFor={id} className="text-[15px] font-semibold">
+          {label}
+        </label>
+        {description && <p className="mt-0.5 text-[13px] leading-relaxed text-mute">{description}</p>}
+      </div>
+      {control}
     </div>
   );
 }

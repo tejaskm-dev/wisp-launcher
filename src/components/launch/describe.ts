@@ -35,7 +35,14 @@ export function describeLaunch(update: LaunchUpdate | undefined, now: number): L
     case "checking":
       return { kind: "busy", label: "Getting ready…", detail: "Checking the game files", progress: null };
     case "syncing":
-      return { kind: "busy", label: "Syncing…", detail: `Getting the newest copy from ${update.folder}`, progress: null };
+      return {
+        kind: "busy",
+        label: "Syncing…",
+        detail: update.waiting
+          ? `Waiting for ${update.folder} to bring ${update.waiting === 1 ? "a file" : `${update.waiting} files`} from your other computer`
+          : `Getting the newest copy from ${update.folder}`,
+        progress: null,
+      };
     case "downloading": {
       const progress = update.totalBytes > 0 ? Math.min(1, update.doneBytes / update.totalBytes) : null;
       return {

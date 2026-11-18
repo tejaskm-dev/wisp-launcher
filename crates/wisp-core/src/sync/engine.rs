@@ -157,6 +157,9 @@ pub struct Overview {
     pub items: Vec<ItemStatus>,
     /// How much space the sync folder takes.
     pub usage: Option<u64>,
+    /// What sync settled by itself this time, a sentence each (worlds changed on two computers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled: Vec<String>,
 }
 
 /// What stands in the way of starting an instance.
@@ -309,6 +312,8 @@ struct Run<'a, 'c> {
     others_want: HashSet<String>,
     /// Files this computer couldn't get from Modrinth this time.
     wanted: BTreeSet<String>,
+    /// Conflicts settled by themselves this time, a sentence each.
+    settled: Vec<String>,
 }
 
 impl Run<'_, '_> {
@@ -319,6 +324,12 @@ impl Run<'_, '_> {
     fn record(&mut self, key: &str, commit: &Commit) {
         self.state.items.insert(key.to_string(), Synced { base: commit.id.clone(), content: commit.content.clone(), at: commit.at, device: commit.device_name.clone() });
         let _ = self.store.save(&self.state);
+    }
+
+    /// Whether something this big comes down by itself: up to a gigabyte always, and more while
+    /// there's plenty of room (as much as a fifth of the free space, up to 16 GB).
+    fn small_enough(&self, bytes: u64) -> bool {
+        bytes <= BIG || crate::device::free_space(self.ctx.data).is_some_and(|free| bytes <= (free / 5).min(16 * BIG))
     }
 
     fn synced_state(&self, key: &str) -> ItemState {
@@ -410,7 +421,7 @@ impl Run<'_, '_> {
             let head = &live[0];
             let asked = self.asked.contains(key);
             let declined = (had.is_some() || self.state.declined.contains(key)) && !asked;
-            if declined || !self.ctx.prefs.instances || manifest.definition.is_none() || (manifest.total_bytes() > BIG && !asked) {
+            if declined || !self.ctx.prefs.instances || manifest.definition.is_none() || (!self.small_enough(manifest.total_bytes()) && !asked) {
                 return Ok(ItemState::CloudOnly { at: head.at, device: head.device_name.clone(), bytes: manifest.total_bytes(), needs_instance: false });
             }
             let created = instances::create_from(self.ctx.instances, sync_id, &manifest, self.now)?;
@@ -561,13 +572,16 @@ impl Run<'_, '_> {
                     .map(|commit| Choice { commit: commit.id, device: commit.device_name, at: commit.at })
                     .collect();
                 let here_at = std::fs::metadata(dir.join("level.dat")).ok().and_then(|meta| meta.modified().ok()).and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|elapsed| elapsed.as_millis() as i64);
+                if self.ctx.prefs.settle_conflicts && elsewhere.is_none() {
+                    return self.settle(key, &world, commits, here_at);
+                }
                 Ok(ItemState::Conflict { choices, here_at })
             }
             Plan::New { head } | Plan::Gone { head } => {
                 let commit = by_id(&head).expect("planned from these commits");
                 let asked = self.asked.contains(key);
                 let declined = (base.is_some() || self.state.declined.contains(key)) && !asked;
-                if declined || !self.ctx.prefs.worlds || (commit.bytes > BIG && !asked) || elsewhere.is_some() {
+                if declined || !self.ctx.prefs.worlds || (!self.small_enough(commit.bytes) && !asked) || elsewhere.is_some() {
                     return Ok(ItemState::CloudOnly { at: commit.at, device: commit.device_name, bytes: commit.bytes, needs_instance: false });
                 }
                 self.state.declined.remove(key);
@@ -591,6 +605,46 @@ impl Run<'_, '_> {
         }
         self.record(key, commit);
         Ok(ItemState::Synced { at: commit.at, device: commit.device_name.clone() })
+    }
+
+    /// Settles a world changed here and on another computer without asking: the copy played last
+    /// wins, and nothing is lost. When the other computer's is newer, this computer's copy is kept
+    /// as a restore point before it's replaced; when this one's is newer, it goes up as the way
+    /// forward and the other stays in the folder's history (and in its own computer's restore
+    /// points).
+    fn settle(&mut self, key: &str, world: &World, commits: &[Commit], here_at: Option<i64>) -> Result<ItemState, SyncError> {
+        let tips: Vec<Commit> = heads(commits).into_iter().filter(|commit| !commit.removed).cloned().collect();
+        let Some(newest) = tips.iter().max_by_key(|commit| commit.at).cloned() else {
+            return Ok(ItemState::Pending);
+        };
+        if here_at.is_none_or(|here| newest.at > here) {
+            let state = self.bring(key, world, &newest, true)?;
+            if let ItemState::Waiting { .. } = state {
+                return Ok(state);
+            }
+            if tips.len() > 1 {
+                let refs: Vec<&Commit> = tips.iter().collect();
+                let who = self.who();
+                let joined = worlds::join(&self.remote, &refs, &newest, &who)?;
+                self.record(key, &joined);
+            }
+            self.settled.push(format!(
+                "{} changed here and on {}. Kept {}'s copy, played later; this computer's is a restore point.",
+                world.name, newest.device_name, newest.device_name
+            ));
+            Ok(ItemState::Synced { at: newest.at, device: newest.device_name })
+        } else {
+            let who = self.who();
+            let progress = reporter(self.ctx, key, world.name, Direction::Up);
+            let commit = worlds::upload(&self.remote, self.ctx.snapshots, world, tips.iter().map(|tip| tip.id.clone()).collect(), &who, &progress)?;
+            (self.ctx.activity)(None);
+            self.record(key, &commit);
+            self.settled.push(format!(
+                "{} changed here and on {}. Kept this computer's copy, played later; {}'s stays in its restore points.",
+                world.name, newest.device_name, newest.device_name
+            ));
+            Ok(ItemState::Synced { at: commit.at, device: commit.device_name })
+        }
     }
 
     /// Clears out history nobody needs, about once a week.
@@ -645,6 +699,7 @@ pub fn run(ctx: &Context, scope: Scope, busy: &HashSet<String>, asked: &HashSet<
                 FolderKind::Folder => "Wisp can't find its sync folder. Is the drive it's on connected?".to_string(),
                 _ => format!("Wisp can't find its folder in {}. Is {} running and signed in?", folder.label, folder.label),
             }),
+            settled: Vec::new(),
             ..previous
         };
         save_overview(&store, &overview);
@@ -659,7 +714,7 @@ pub fn run(ctx: &Context, scope: Scope, busy: &HashSet<String>, asked: &HashSet<
         .flat_map(|record| record.playing.iter().map(|play| (play.item.clone(), record.name.clone())))
         .collect();
     let others_want: HashSet<String> = others.iter().flat_map(|record| record.wants.iter().cloned()).collect();
-    let mut run = Run { ctx, store, state, remote, now, busy, asked, elsewhere, waiting: 0, others_want, wanted: BTreeSet::new() };
+    let mut run = Run { ctx, store, state, remote, now, busy, asked, elsewhere, waiting: 0, others_want, wanted: BTreeSet::new(), settled: Vec::new() };
     let busy_list: Vec<String> = busy.iter().cloned().collect();
     write_record(ctx, &run.remote, &run.state, &busy_list)?;
     run.link_instances();
@@ -774,7 +829,7 @@ pub fn run(ctx: &Context, scope: Scope, busy: &HashSet<String>, asked: &HashSet<
         let files = if run.waiting == 1 { "1 file".to_string() } else { format!("{} files", run.waiting) };
         format!("Waiting for {label} to bring {files} from your other computer.")
     });
-    let overview = Overview { phase, folder: state.folder.clone(), message, last_synced: state.last_synced, devices, items: statuses, usage };
+    let overview = Overview { phase, folder: state.folder.clone(), message, last_synced: state.last_synced, devices, items: statuses, usage, settled: run.settled };
     save_overview(&run.store, &overview);
     Ok(overview)
 }
@@ -861,7 +916,7 @@ pub fn resolve(ctx: &Context, key: &str, resolution: Resolution, busy: &HashSet<
     let dir = game_dir.join(crate::worlds::SAVES).join(&folder_name);
     let name = local.as_ref().map(|world| world.name.clone()).unwrap_or_else(|| folder_name.clone());
     let nothing_asked = HashSet::new();
-    let mut run = Run { ctx, store, state, remote, now, busy, asked: &nothing_asked, elsewhere: HashMap::new(), waiting: 0, others_want: HashSet::new(), wanted: BTreeSet::new() };
+    let mut run = Run { ctx, store, state, remote, now, busy, asked: &nothing_asked, elsewhere: HashMap::new(), waiting: 0, others_want: HashSet::new(), wanted: BTreeSet::new(), settled: Vec::new() };
     let world = World { key, instance_id: &instance.id, instance_sync: &sync_id, folder: &folder_name, dir: &dir, name: &name };
     let chosen = |commit: &str| tips.iter().find(|tip| tip.id == commit).cloned().ok_or_else(|| SyncError::Other("that version isn't there any more".into()));
     match resolution {
@@ -962,7 +1017,8 @@ mod tests {
                 instances: InstanceStore::new(data.join("instances")),
                 snapshots: Snapshots::new(data.join("journal")),
                 data,
-                prefs: SyncPrefs::default(),
+                // These computers ask about conflicts unless a test turns settling on.
+                prefs: SyncPrefs { settle_conflicts: false, ..SyncPrefs::default() },
                 device: DeviceInfo { name: name.into(), os: "macOS".into() },
             }
         }
@@ -998,6 +1054,61 @@ mod tests {
 
     fn synced(state: &ItemState) -> bool {
         matches!(state, ItemState::Synced { .. })
+    }
+
+    #[test]
+    fn a_world_changed_on_two_computers_settles_by_itself() {
+        let root = std::env::temp_dir().join(format!("wisp-sync-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cloud = root.join("OneDrive/Wisp");
+        let mut laptop = Computer::new(&root, "Laptop");
+        laptop.prefs.settle_conflicts = true;
+        let desktop = Computer::new(&root, "Desktop");
+        laptop
+            .instances
+            .create(NewInstance { name: "Survival".into(), game_version: "1.21.1".into(), loader: Loader::Vanilla, loader_version: None, icon: None }, None, tick())
+            .unwrap();
+        let world = laptop.world("Home");
+        std::fs::create_dir_all(world.join("region")).unwrap();
+        std::fs::write(world.join("level.dat"), b"level").unwrap();
+        std::fs::write(world.join("region/r.0.0.mca"), vec![1u8; 9000]).unwrap();
+        laptop.with(|ctx| connect(ctx, &cloud).unwrap());
+        desktop.with(|ctx| connect(ctx, &cloud).unwrap());
+        let restore_points = |computer: &Computer| computer.snapshots.for_world(&computer.only().id, "Home").len();
+
+        // Played on both without syncing in between; the desktop's game was the later one. (The
+        // laptop's files get older times: written in the same millisecond as the desktop's, at the
+        // same size, they'd look unchanged to the scan's cache, which real computers never hit.)
+        let long_ago = |path: &Path| std::fs::File::options().write(true).open(path).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000)).unwrap();
+        std::fs::write(world.join("region/r.0.0.mca"), vec![4u8; 9000]).unwrap();
+        long_ago(&world.join("region/r.0.0.mca"));
+        long_ago(&world.join("level.dat"));
+        std::fs::write(desktop.world("Home").join("region/r.0.0.mca"), vec![5u8; 9000]).unwrap();
+        desktop.sync();
+        let before = restore_points(&laptop);
+        let settled = laptop.sync();
+        assert!(synced(state_of(&settled, "Home")), "{settled:#?}");
+        assert_eq!(std::fs::read(world.join("region/r.0.0.mca")).unwrap(), vec![5u8; 9000], "the copy played later wins");
+        assert_eq!(settled.settled.len(), 1, "{:?}", settled.settled);
+        assert!(settled.settled[0].contains("Kept Desktop's copy"), "{:?}", settled.settled);
+        // This computer's copy wasn't thrown away: it's a restore point.
+        assert!(restore_points(&laptop) > before);
+        assert!(laptop.snapshots.for_world(&laptop.only().id, "Home").iter().any(|point| point.reason == crate::snapshots::SnapshotReason::BeforeRestore));
+        // It stays settled: the next sync has nothing to say.
+        assert!(laptop.sync().settled.is_empty());
+
+        // The other way round: this computer played last, so its copy goes up and reaches the desktop.
+        std::fs::write(desktop.world("Home").join("region/r.0.0.mca"), vec![6u8; 9000]).unwrap();
+        desktop.sync();
+        std::fs::write(world.join("region/r.0.0.mca"), vec![7u8; 9000]).unwrap();
+        std::fs::write(world.join("level.dat"), b"level, saved just now").unwrap();
+        let mine = laptop.sync();
+        assert!(synced(state_of(&mine, "Home")), "{mine:#?}");
+        assert!(mine.settled.iter().any(|line| line.contains("Kept this computer's copy")), "{:?}", mine.settled);
+        let desk = desktop.sync();
+        assert!(synced(state_of(&desk, "Home")), "{desk:#?}");
+        assert_eq!(std::fs::read(desktop.world("Home").join("region/r.0.0.mca")).unwrap(), vec![7u8; 9000]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

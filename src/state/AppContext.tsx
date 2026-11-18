@@ -1,6 +1,9 @@
 import { createContext, useContext } from "react";
 import type { InstallTarget } from "../components/install/InstallDialog";
 import type { HomeSnapshot, InstallEvent, LaunchUpdate, PageId, Settings } from "../data/types";
+
+/** The tabs of an instance's page. */
+export type InstanceTab = "content" | "worlds" | "screenshots" | "journal" | "servers" | "logs" | "settings";
 import type { Toast } from "./useToasts";
 
 export interface AppContextValue {
@@ -38,6 +41,11 @@ export interface AppContextValue {
   openProject: (projectId: string) => void;
   /** Opens a world's page ("<instance id>/<folder>"). */
   openWorld: (worldId: string) => void;
+  /** Opens an instance's page, on one of its tabs. */
+  openInstance: (instanceId: string, tab?: InstanceTab) => void;
+  /** The instance Discover was last opened for (its page's Add), so installs offer it first. */
+  discoverFor: string | null;
+  openDiscoverFor: (instanceId: string) => void;
   /** Imports worlds (from dropped files, or a file picker), asking which instance if there's a choice. */
   importWorlds: (files?: string[] | null) => void;
   /** Opens the install dialog for a project (or a specific version of it). */

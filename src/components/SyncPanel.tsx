@@ -1,6 +1,8 @@
-import { ArrowRight, Cloud, CloudAlert, CloudOff, Hourglass, Laptop, Monitor, TriangleAlert, type LucideIcon } from "lucide-react";
+import { ArrowRight, Cloud, CloudAlert, CloudOff, Hourglass, Laptop, LoaderCircle, Monitor, TriangleAlert, type LucideIcon } from "lucide-react";
 import { m } from "motion/react";
-import type { DeviceInfo, HomeSnapshot } from "../data/types";
+import { useEffect, useState } from "react";
+import { getSyncFolders, startSync } from "../data/api";
+import type { CloudFolder, DeviceInfo, HomeSnapshot } from "../data/types";
 import { timeAgo } from "../lib/format";
 import { rise } from "../lib/motion";
 import { useApp } from "../state/AppContext";
@@ -14,9 +16,39 @@ interface SyncPanelProps {
 
 /** Cloud sync on Home: where it stands, and the way to set it up or see more. */
 export function SyncPanel({ home, onOpen }: SyncPanelProps) {
-  const { now } = useApp();
+  const { now, notify, refreshHome } = useApp();
   const sync = home?.sync ?? null;
   const on = sync?.state === "on" ? sync : null;
+
+  // Sync is off here but another computer already syncs through a cloud folder on this one:
+  // joining it is one click, with nothing to choose.
+  const [joinable, setJoinable] = useState<CloudFolder | null>(null);
+  const [joining, setJoining] = useState(false);
+  const off = sync?.state === "off";
+  useEffect(() => {
+    if (!off) return;
+    let live = true;
+    getSyncFolders().then(
+      (folders) => live && setJoinable(folders.find((folder) => folder.existing !== null && folder.existing.devices.length > 0) ?? null),
+      () => live && setJoinable(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [off]);
+  const join = async (folder: CloudFolder) => {
+    setJoining(true);
+    try {
+      await startSync(folder.path);
+      await refreshHome();
+      notify({ tone: "success", title: `Syncing through ${folder.label}`, body: "Your worlds and instances from your other computer are on their way, and changes here go back the same way." });
+    } catch (failure) {
+      notify({ tone: "info", title: "Couldn't turn sync on", body: failure instanceof Error ? failure.message : String(failure) });
+    } finally {
+      setJoining(false);
+    }
+  };
+  const other = joinable?.existing?.devices[0] ?? "Your other computer";
 
   let Icon: LucideIcon = CloudOff;
   let status = "Off";
@@ -63,6 +95,25 @@ export function SyncPanel({ home, onOpen }: SyncPanelProps) {
               : "Keep worlds, instances and keybinds on every computer, through a cloud folder you already have. Nothing goes to Wisp's servers."}
           </p>
           <ThisDevice device={home.device} />
+          {!on && joinable && (
+            <div className="flex flex-col gap-2.5 rounded-[14px] border border-ember/25 bg-ember/[0.06] p-3">
+              <p className="text-[13px] leading-relaxed text-cream-300">
+                <span className="font-bold text-cream">{other}</span> already syncs through {joinable.label}
+                {joinable.existing && joinable.existing.worlds + joinable.existing.instances > 0
+                  ? `, with ${joinable.existing.worlds === 1 ? "1 world" : `${joinable.existing.worlds} worlds`} and ${joinable.existing.instances === 1 ? "1 instance" : `${joinable.existing.instances} instances`}.`
+                  : "."}
+              </p>
+              <button
+                type="button"
+                disabled={joining}
+                onClick={() => void join(joinable)}
+                className="tail wag relative flex h-9 w-fit items-center gap-1.5 rounded-full bg-cream px-4 text-[13px] font-bold text-ink-900 transition-transform [--tail:16px] active:scale-95 disabled:opacity-60"
+              >
+                {joining && <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />}
+                {joining ? "Joining…" : "Join it"}
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={onOpen}

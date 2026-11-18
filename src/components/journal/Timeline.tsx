@@ -355,6 +355,24 @@ function EntryCard({ entry, laneColor: color, instanceName, worldName, worldExis
           Installed the modpack <span className="font-bold text-cream">{event.title}</span> <span className="text-mute">{event.version}</span>
         </Line>
       );
+    case "modpack-updated":
+      return (
+        <Line icon={<Package size={14} aria-hidden="true" />} time={entry.at} tag={tag}>
+          Updated <span className="font-bold text-cream">{event.title}</span> <span className="text-mute">from {event.from} to {event.to}</span>
+        </Line>
+      );
+    case "version-changed":
+      return (
+        <Line icon={<Box size={14} aria-hidden="true" />} time={entry.at} tag={tag}>
+          Moved from <span className="text-mute">{event.from}</span> to <span className="font-bold text-cream">{event.to}</span>
+        </Line>
+      );
+    case "instance-duplicated":
+      return (
+        <Line icon={<Box size={14} aria-hidden="true" />} time={entry.at} tag={tag}>
+          Made as a copy of <span className="font-bold text-cream">{event.from}</span>
+        </Line>
+      );
     case "world-imported":
       return (
         <Line icon={<FolderInput size={14} aria-hidden="true" />} time={entry.at} tag={tag}>

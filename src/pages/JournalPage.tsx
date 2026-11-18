@@ -26,7 +26,7 @@ const FILTERS: { value: Filter; label: string; kinds: JournalKind[] }[] = [
   { value: "sessions", label: "Sessions", kinds: ["session"] },
   { value: "notes", label: "Notes", kinds: ["note"] },
   { value: "restore", label: "Restore points", kinds: ["restore-point", "restored"] },
-  { value: "content", label: "Mods & packs", kinds: ["content-added", "content-removed", "modpack-installed", "instance-created"] },
+  { value: "content", label: "Mods & packs", kinds: ["content-added", "content-removed", "modpack-installed", "modpack-updated", "version-changed", "instance-created", "instance-duplicated"] },
   { value: "fixes", label: "Fixes", kinds: ["fixed", "fix-undone"] },
 ];
 const NO_WORLD = "none";

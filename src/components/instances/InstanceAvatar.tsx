@@ -38,7 +38,13 @@ export function InstanceAvatar({ instance, className }: { instance: Pick<Instanc
     return <SpriteIcon index={builtin} className={cn("ghost-shape", className)} />;
   }
   if (instance.icon?.startsWith("https://")) {
-    return <img src={instance.icon} alt="" loading="lazy" decoding="async" className={cn("ghost-shape shrink-0 bg-ink-700 object-cover", className)} />;
+    // The ghost's body is the top-left 56/64 of the tile (the rest is where its tail flicks out),
+    // so a downloaded picture fits the body rather than being cut off at the right and bottom.
+    return (
+      <span aria-hidden="true" className={cn("ghost-shape relative block shrink-0 bg-ink-700", className)}>
+        <img src={instance.icon} alt="" loading="lazy" decoding="async" className="absolute left-0 top-0 size-[87.5%] object-cover" />
+      </span>
+    );
   }
   const letter = instance.name.trim().charAt(0).toUpperCase() || "?";
   return (

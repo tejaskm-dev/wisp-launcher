@@ -70,6 +70,46 @@ pub fn total_memory_mb() -> Option<u64> {
     Some(bytes / (1024 * 1024))
 }
 
+/// Free space on the drive holding `path`, in bytes, if the OS says. Asked of the system's own
+/// tools and kept for a few minutes, since it's wanted on every sync.
+pub fn free_space(path: &std::path::Path) -> Option<u64> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<(std::path::PathBuf, Instant, Option<u64>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((asked, at, free)) = last.as_ref()
+        && asked == path
+        && at.elapsed() < Duration::from_secs(300)
+    {
+        return *free;
+    }
+    let free = ask_free_space(path);
+    *last = Some((path.to_path_buf(), Instant::now(), free));
+    free
+}
+
+fn ask_free_space(path: &std::path::Path) -> Option<u64> {
+    let run = |program: &str, args: &[&std::ffi::OsStr]| {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    if cfg!(windows) {
+        // The drive letter's free bytes.
+        let drive = path.to_string_lossy().chars().next().filter(char::is_ascii_alphabetic)?;
+        let command = format!("(Get-PSDrive {drive}).Free");
+        let out = run("powershell", &["-NoProfile".as_ref(), "-NonInteractive".as_ref(), "-Command".as_ref(), command.as_ref()])?;
+        return out.trim().parse().ok();
+    }
+    // POSIX df: the second line's fourth column is the space available, in 1K blocks.
+    let out = run("df", &["-Pk".as_ref(), path.as_os_str()])?;
+    let kilobytes: u64 = out.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kilobytes * 1024)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

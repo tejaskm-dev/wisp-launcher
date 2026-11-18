@@ -13,7 +13,8 @@ export type PageId =
   | "sync"
   | "settings"
   | "project"
-  | "world";
+  | "world"
+  | "instance";
 
 export interface Account {
   id: string;
@@ -184,6 +185,9 @@ export type JournalEvent =
   | { kind: "content-removed"; projectId: string; title: string; projectType: string }
   | { kind: "instance-created"; name: string; label: string }
   | { kind: "modpack-installed"; title: string; version: string }
+  | { kind: "modpack-updated"; title: string; from: string; to: string }
+  | { kind: "version-changed"; from: string; to: string }
+  | { kind: "instance-duplicated"; from: string }
   | { kind: "world-imported"; name: string }
   | { kind: "world-exported"; name: string }
   | { kind: "world-deleted"; name: string }
@@ -441,6 +445,8 @@ export interface SyncOverview {
   devices: SyncDevice[];
   items: SyncItem[];
   usage: number | null;
+  /** What sync settled by itself in this run, a sentence each. */
+  settled?: string[];
 }
 
 /** Something moving through sync right now. */
@@ -536,6 +542,8 @@ export interface SyncPrefs {
   servers: boolean;
   resourcePacks: boolean;
   screenshots: boolean;
+  /** A world changed on two computers is settled without asking: the copy played last wins, the other is kept. */
+  settleConflicts: boolean;
 }
 
 export type StartPage = "home" | "instances" | "discover" | "last";
@@ -862,7 +870,7 @@ export interface PatchNote {
 export type LaunchUpdate =
   | { phase: "checking" }
   /** Before the launcher starts: bringing the newest copy from the sync folder (the window's own step). */
-  | { phase: "syncing"; folder: string }
+  | { phase: "syncing"; folder: string; waiting?: number }
   | { phase: "downloading"; doneBytes: number; totalBytes: number; doneFiles: number; totalFiles: number }
   | { phase: "installing"; loader: string }
   | { phase: "starting" }
@@ -882,4 +890,137 @@ export interface LaunchEvent {
   /** The server the game joined straight away, if any. */
   server?: string | null;
   update: LaunchUpdate;
+}
+
+// ── An instance's own page ──
+
+export type ItemKind = "mod" | "resource-pack" | "shader" | "data-pack";
+/** Who put a file there: the modpack the instance came from, Wisp, or the player by hand. */
+export type ItemOrigin = "pack" | "wisp" | "yours";
+
+/** One mod, resource pack, shader pack or data pack in an instance. */
+export interface InstanceItem {
+  kind: ItemKind;
+  /** Where it is in the game folder: "mods/sodium.jar", with ".disabled" while it's off. */
+  file: string;
+  enabled: boolean;
+  /** An unzipped pack: listed, but it can't be turned off. */
+  folder: boolean;
+  size: number;
+  name: string;
+  version: string;
+  description: string;
+  /** Modrinth's picture of the project. */
+  iconUrl: string | null;
+  /** A picture taken from the file itself, as a path in the data folder. */
+  iconFile: string | null;
+  projectId: string | null;
+  versionId: string | null;
+  origin: ItemOrigin;
+  /** The world a data pack is in. */
+  world: string | null;
+  /** Something other mods need rather than something picked for itself. */
+  library: boolean;
+  /** The mods that can't run without it. */
+  neededBy: string[];
+  sha1: string;
+}
+
+export interface ItemUpdate {
+  file: string;
+  projectId: string;
+  versionId: string;
+  versionNumber: string;
+}
+
+/** A file taken out of an instance, waiting in case it's wanted back. */
+export interface RemovedItem {
+  id: string;
+  file: string;
+  at: number;
+}
+
+export interface InstanceStats {
+  playtimeMs: number;
+  sessions: number;
+}
+
+/** What an instance does differently on this computer (never synced). Unset means Wisp's setting. */
+export interface LocalSettings {
+  jvmArgs?: string | null;
+  gameWindow?: GameWindow | null;
+  hooks?: LaunchHooks | null;
+  /** "screenshot:<file>", "none", or unset for its newest screenshot. */
+  banner?: string | null;
+}
+
+export interface MoveItem {
+  file: string;
+  name: string;
+  versionId?: string | null;
+  versionNumber?: string | null;
+}
+
+/** What moving to another Minecraft version or loader does to an instance's mods. */
+export interface MovePlan {
+  updates: MoveItem[];
+  unchanged: MoveItem[];
+  withoutBuild: MoveItem[];
+  unknown: MoveItem[];
+}
+
+export interface MovedInstance {
+  instance: Instance;
+  moved: { updated: string[]; turnedOff: string[]; failed: [string, string][] };
+  restorePoints: number;
+}
+
+export interface UpdatedAll {
+  updated: string[];
+  failed: [string, string][];
+}
+
+export type LogKind = "latest" | "older" | "crash";
+
+export interface LogFile {
+  /** Relative to the game folder. */
+  name: string;
+  kind: LogKind;
+  size: number;
+  modified: number;
+}
+
+export interface PackRelease {
+  versionId: string;
+  versionNumber: string;
+  gameVersions: string[];
+  published: string;
+}
+
+export interface PackUpdates {
+  /** The newest version for the instance's Minecraft version. */
+  sameGame: PackRelease | null;
+  /** The newest of all, when it's for another Minecraft version. */
+  newerGame: PackRelease | null;
+}
+
+export interface PackUpdated {
+  from: string;
+  to: string;
+  added: number;
+  removed: number;
+  movedTo: string | null;
+}
+
+export interface ExportOptions {
+  version: string;
+  configs: boolean;
+  options: boolean;
+}
+
+export interface ExportedFile {
+  path: string;
+  downloads: number;
+  bundled: number;
+  bytes: number;
 }

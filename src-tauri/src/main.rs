@@ -4,6 +4,7 @@
 mod away;
 mod fixes;
 mod imports;
+mod instance_page;
 mod library;
 mod multiplayer;
 mod protocol;
@@ -535,8 +536,10 @@ async fn launch_instance(
         }
         _ => None,
     };
-    let window = &settings.game_window;
-    let hooks = &settings.hooks;
+    // What this instance does differently on this computer stands in for Settings.
+    let local = instances.local_settings(&id);
+    let window = local.game_window.as_ref().unwrap_or(&settings.game_window);
+    let hooks = local.hooks.as_ref().unwrap_or(&settings.hooks);
     let memory_mb = instance.memory_mb.unwrap_or(settings.memory_mb);
     let options = LaunchOptions {
         instance,
@@ -545,7 +548,7 @@ async fn launch_instance(
         memory_mb,
         concurrency: settings.concurrent_downloads as usize,
         launcher_version: env!("CARGO_PKG_VERSION").to_string(),
-        jvm_args: launch::split_args(&settings.jvm_args),
+        jvm_args: launch::split_args(local.jvm_args.as_deref().unwrap_or(&settings.jvm_args)),
         window: match window.mode {
             WindowMode::Default => WindowSize::Default,
             WindowMode::Custom => WindowSize::Custom {
@@ -1625,6 +1628,26 @@ fn main() {
             get_instance_content,
             install_project,
             remove_content,
+            instance_page::get_instance_items,
+            instance_page::get_instance_updates,
+            instance_page::set_item_enabled,
+            instance_page::remove_item,
+            instance_page::put_back_item,
+            instance_page::install_item_version,
+            instance_page::update_all_items,
+            instance_page::get_instance_stats,
+            instance_page::get_local_settings,
+            instance_page::set_local_settings,
+            instance_page::set_instance_memory,
+            instance_page::set_instance_java,
+            instance_page::plan_instance_move,
+            instance_page::move_instance,
+            instance_page::duplicate_instance,
+            instance_page::export_instance,
+            instance_page::get_instance_logs,
+            instance_page::read_instance_log,
+            instance_page::check_pack_updates,
+            instance_page::update_instance_pack,
             install_modpack,
             install_modpack_file,
             imports::pick_import_files,

@@ -53,7 +53,7 @@ fn world_dir(paths: &Paths, instance_id: &str, folder: &str) -> Result<PathBuf, 
     worlds::world_dir(&game_dir(paths, instance_id)?, folder).ok_or_else(|| "That world no longer exists.".to_string())
 }
 
-fn world_name(dir: &Path, folder: &str) -> String {
+pub(crate) fn world_name(dir: &Path, folder: &str) -> String {
     worlds::read_info(dir).map_or_else(|| folder.to_string(), |info| info.name)
 }
 
@@ -70,7 +70,7 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
 }
 
 /// Runs file work on a thread meant for it.
-async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(work).await.map_err(|error| error.to_string())?
 }
 
@@ -361,7 +361,7 @@ pub async fn get_restore_point_usage(paths: State<'_, Paths>) -> Result<u64, Str
     blocking(move || Ok(snapshots.usage())).await
 }
 
-fn restore_point_event(summary: &Summary) -> Event {
+pub(crate) fn restore_point_event(summary: &Summary) -> Event {
     Event::RestorePoint {
         snapshot: summary.id.clone(),
         reason: summary.reason,

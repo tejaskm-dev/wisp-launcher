@@ -47,7 +47,7 @@ import { useIdleWhenUnfocused, useLatest, useNow } from "./lib/hooks";
 import { loadSkinsPage } from "./lib/preload";
 import { HomePage } from "./pages/HomePage";
 import { PageArrivalContext, type PageArrival } from "./components/ui/Page";
-import { AppContext, type AppContextValue, type SettingsPatch } from "./state/AppContext";
+import { AppContext, type AppContextValue, type InstanceTab, type SettingsPatch } from "./state/AppContext";
 import { useToasts } from "./state/useToasts";
 
 // Home ships in the main bundle; every other page loads from disk the first time it's opened.
@@ -66,6 +66,7 @@ const SyncPage = lazy(() => import("./pages/SyncPage").then((module) => ({ defau
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const ProjectPage = lazy(() => import("./pages/ProjectPage").then((module) => ({ default: module.ProjectPage })));
 const WorldPage = lazy(() => import("./pages/WorldPage").then((module) => ({ default: module.WorldPage })));
+const InstancePage = lazy(() => import("./pages/InstancePage").then((module) => ({ default: module.InstancePage })));
 const JournalPage = lazy(() => tabPageCode.journal().then((module) => ({ default: module.JournalPage })));
 const SkinsPage = lazy(() => loadSkinsPage().then((module) => ({ default: module.SkinsPage })));
 const ServersPage = lazy(() => tabPageCode.servers().then((module) => ({ default: module.ServersPage })));
@@ -100,6 +101,10 @@ const LAST_PAGE_KEY = "wisp.lastPage";
 const RESTORABLE: PageId[] = ["home", "instances", "worlds", "servers", "discover", "screenshots", "journal", "skins", "friends", "sync", "settings"];
 
 /** Pages that share a sidebar entry and show as tabs of one page. */
+/** How long Play waits for files a cloud app is still bringing before it asks, and how often it looks. */
+const FILES_WAIT_MS = 90_000;
+const FILES_POLL_MS = 3_000;
+
 const TAB_GROUPS: (keyof typeof tabPageCode)[][] = [
   ["worlds", "servers"],
   ["journal", "screenshots"],
@@ -252,6 +257,30 @@ export default function App() {
       navigate("world");
     },
     [navigate, pageNow],
+  );
+
+  // An instance's page (and which of its tabs), and the page to go back to from it.
+  const [instanceRoute, setInstanceRoute] = useState<{ id: string; tab: InstanceTab; from: PageId; session: number } | null>(null);
+  const openInstance = useCallback(
+    (id: string, tab: InstanceTab = "content") => {
+      setInstanceRoute((current) => ({
+        id,
+        tab,
+        from: pageNow.current === "instance" ? (current?.from ?? "instances") : pageNow.current,
+        session: (current?.session ?? 0) + 1,
+      }));
+      navigate("instance");
+    },
+    [navigate, pageNow],
+  );
+  // The instance Discover was opened for, so installing puts it first.
+  const [discoverFor, setDiscoverFor] = useState<string | null>(null);
+  const openDiscoverFor = useCallback(
+    (instanceId: string) => {
+      setDiscoverFor(instanceId);
+      navigate("discover");
+    },
+    [navigate],
   );
 
   const mainRef = useRef<HTMLElement>(null);
@@ -413,9 +442,12 @@ export default function App() {
   const [accountDialog, setAccountDialog] = useState({ open: false, session: 0 });
   const playAfterAccount = useRef<{ instanceId: string; world: string | null; server: string | null } | null>(null);
 
-  // With cloud sync on, Play first brings the newest copy here, and stops to ask when a world
-  // changed on two computers, the instance is open on another one, or files are still arriving.
+  // With cloud sync on, Play first brings the newest copy here. Files still on their way are
+  // waited for (the cloud app is asked for them); it stops to ask only when a world changed on two
+  // computers and isn't settled by itself, the instance is open on another one, or the files
+  // haven't come after a while.
   const [gate, setGate] = useState<Gate | null>(null);
+  const launchesNow = useLatest(launches);
 
   const startLaunch = useCallback(
     (instanceId: string, world: string | null = null, server: string | null = null, skipSync = false) => {
@@ -435,18 +467,28 @@ export default function App() {
       const sync = homeNow.current?.sync;
       if (skipSync || sync?.state !== "on") return begin();
       setLaunches((current) => ({ ...current, [instanceId]: { phase: "syncing", folder: sync.label } }));
-      checkLaunch(instanceId).then(
-        (check) => {
-          if (check.conflicts.length === 0 && !check.inUse && check.waiting === 0) return begin();
-          setLaunches((current) => without(current, instanceId));
-          const instanceName = homeNow.current?.instances.find((candidate) => candidate.id === instanceId)?.name ?? "This instance";
-          setGate({ instanceId, instanceName, world, server, folder: sync.label, check });
-        },
-        // Trouble with sync never stops you playing.
-        () => begin(),
-      );
+      const startedAt = Date.now();
+      const look = () =>
+        checkLaunch(instanceId).then(
+          (check) => {
+            // Cancelled from the launch card while it waited.
+            if (launchesNow.current[instanceId]?.phase !== "syncing") return;
+            if (check.conflicts.length === 0 && !check.inUse && check.waiting === 0) return begin();
+            if (check.conflicts.length === 0 && !check.inUse && Date.now() - startedAt < FILES_WAIT_MS) {
+              setLaunches((current) => ({ ...current, [instanceId]: { phase: "syncing", folder: sync.label, waiting: check.waiting } }));
+              window.setTimeout(() => void look(), FILES_POLL_MS);
+              return;
+            }
+            setLaunches((current) => without(current, instanceId));
+            const instanceName = homeNow.current?.instances.find((candidate) => candidate.id === instanceId)?.name ?? "This instance";
+            setGate({ instanceId, instanceName, world, server, folder: sync.label, check });
+          },
+          // Trouble with sync never stops you playing.
+          () => begin(),
+        );
+      void look();
     },
-    [notify, homeNow],
+    [notify, homeNow, launchesNow],
   );
 
   const resolveAtGate = useCallback(
@@ -473,7 +515,21 @@ export default function App() {
   );
 
   // Sync finished something: badges and the top bar catch up.
-  useEffect(() => onSyncChange(() => void refreshHome()), [refreshHome]);
+  // What sync settled by itself (a world changed on two computers) is said once.
+  const settledSeen = useRef(new Set<string>());
+  useEffect(
+    () =>
+      onSyncChange((overview) => {
+        void refreshHome();
+        for (const line of overview.settled ?? []) {
+          const key = `${overview.lastSynced ?? 0}|${line}`;
+          if (settledSeen.current.has(key)) continue;
+          settledSeen.current.add(key);
+          notify({ tone: "info", title: "Wisp settled a world for you", body: line, lifetimeMs: 14_000 });
+        }
+      }),
+    [refreshHome, notify],
+  );
 
   // Coming back to Wisp after a while (say, from playing on another computer): sync straight
   // away rather than at the next scheduled check.
@@ -535,9 +591,14 @@ export default function App() {
 
   const stop = useCallback(
     (instanceId: string) => {
+      // Still syncing (waiting for files): nothing has started yet, so cancelling is just letting go.
+      if (launchesNow.current[instanceId]?.phase === "syncing") {
+        setLaunches((current) => without(current, instanceId));
+        return;
+      }
       stopInstance(instanceId).catch((failure: unknown) => notify({ tone: "info", title: "Couldn't stop the game", body: message(failure) }));
     },
-    [notify],
+    [notify, launchesNow],
   );
 
   const dismissLaunch = useCallback((instanceId: string) => setLaunches((current) => without(current, instanceId)), []);
@@ -728,6 +789,9 @@ export default function App() {
       addAccount,
       openProject,
       openWorld,
+      openInstance,
+      discoverFor,
+      openDiscoverFor,
       importWorlds,
       requestInstall,
       installs,
@@ -758,6 +822,9 @@ export default function App() {
       addAccount,
       openProject,
       openWorld,
+      openInstance,
+      discoverFor,
+      openDiscoverFor,
       importWorlds,
       requestInstall,
       installs,
@@ -809,6 +876,12 @@ export default function App() {
                   )}
                   {page === "world" && worldRoute && (
                     <Lazy key={`world-${worldRoute.id}`} page={<WorldPage worldId={worldRoute.id} backTo={worldRoute.from} onBack={() => navigate(worldRoute.from)} />} />
+                  )}
+                  {page === "instance" && instanceRoute && (
+                    <Lazy
+                      key={`instance-${instanceRoute.id}-${instanceRoute.session}`}
+                      page={<InstancePage instanceId={instanceRoute.id} initialTab={instanceRoute.tab} backTo={instanceRoute.from} onBack={() => navigate(instanceRoute.from)} />}
+                    />
                   )}
                 </AnimatePresence>
               </PageArrivalContext>
@@ -875,10 +948,11 @@ export default function App() {
           />
           <Toasts toasts={toasts} onDismiss={dismiss}>
             <AnimatePresence>{noteRequest && <NotePrompt key={noteRequest.session ?? noteRequest.world} request={noteRequest} onDone={() => setNoteRequest(null)} />}</AnimatePresence>
-            <UpdatePanel />
             <InstallPanel />
             <LaunchPanel />
           </Toasts>
+          {/* A new Wisp is announced in its own window, above everything. */}
+          <UpdatePanel />
           {intro.phase !== "done" && (
             <StartupIntro
               phase={intro.phase}
