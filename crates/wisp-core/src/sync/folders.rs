@@ -57,8 +57,9 @@ fn home() -> Option<PathBuf> {
 }
 
 /// The cloud folders on this computer, the most likely choice first: one that already has your
-/// worlds from another computer, then the one this kind of computer usually has.
-pub fn detect() -> Vec<CloudFolder> {
+/// worlds from another computer, then the one this kind of computer usually has. `this_device` is
+/// this computer's sync id, so its own leftovers in a folder don't look like another computer's.
+pub fn detect(this_device: &str) -> Vec<CloudFolder> {
     let mut found: Vec<(FolderKind, String, PathBuf)> = Vec::new();
     let mut add = |kind: FolderKind, label: String, path: PathBuf| {
         if path.is_dir() && !found.iter().any(|(_, _, known)| same_place(known, &path)) {
@@ -87,7 +88,8 @@ pub fn detect() -> Vec<CloudFolder> {
             if let Some(path) = dropbox_from_info(&home) {
                 add(FolderKind::Dropbox, FolderKind::Dropbox.label().into(), path);
             }
-            // Google Drive for desktop shows up as its own drive letter (G: unless that's taken).
+            // Google Drive for desktop shows up as its own drive letter (G: unless that's taken)
+            // when it streams files, or as a folder in the user's home when it mirrors them.
             for letter in "GHIJKLMNOPQRSTUVWXYZDEF".chars() {
                 let path = PathBuf::from(format!("{letter}:\\My Drive"));
                 if path.is_dir() {
@@ -95,6 +97,8 @@ pub fn detect() -> Vec<CloudFolder> {
                     break;
                 }
             }
+            add(FolderKind::GoogleDrive, FolderKind::GoogleDrive.label().into(), home.join("My Drive"));
+            add(FolderKind::GoogleDrive, FolderKind::GoogleDrive.label().into(), home.join("Google Drive"));
             add(FolderKind::Box, FolderKind::Box.label().into(), home.join("Box"));
         }
         for (kind, folder) in [
@@ -115,7 +119,11 @@ pub fn detect() -> Vec<CloudFolder> {
         .into_iter()
         .map(|(kind, label, path)| {
             let remote = Remote::new(path.join(FOLDER_NAME), "");
-            let existing = remote.is_set_up().then(|| remote.summary());
+            // Only worth mentioning when another computer has synced something there.
+            let existing = remote
+                .is_set_up()
+                .then(|| remote.summary(this_device))
+                .filter(|summary| !summary.devices.is_empty() && summary.worlds + summary.instances > 0);
             CloudFolder { kind, label, path, existing }
         })
         .collect();
@@ -188,7 +196,7 @@ pub fn wisp_folder_in(picked: &Path) -> PathBuf {
 /// What kind of cloud folder a picked path is in, judging by where it is.
 pub fn kind_of(path: &Path) -> (FolderKind, String) {
     let text = path.to_string_lossy();
-    for folder in detect() {
+    for folder in detect("") {
         if path.starts_with(&folder.path) {
             return (folder.kind, folder.label);
         }
