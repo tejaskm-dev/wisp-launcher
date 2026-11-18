@@ -37,6 +37,7 @@ import {
   getSyncFolders,
   onSyncActivity,
   onSyncChange,
+  openExternal,
   openSyncFolder,
   pickSyncFolder,
   removeSyncItem,
@@ -48,6 +49,7 @@ import {
 import type { CloudFolder, FolderKind, SyncActivity, SyncItem, SyncOverview, SyncPrefs, SyncResolution } from "../data/types";
 import { cn } from "../lib/cn";
 import { formatBytes, timeAgo } from "../lib/format";
+import { isMac } from "../lib/platform";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 
@@ -109,9 +111,13 @@ export function SyncPage() {
   useEffect(() => {
     if (overview === null || on) return;
     let active = true;
-    getSyncFolders().then((found) => active && setFolders(found), () => active && setFolders([]));
+    const look = () => getSyncFolders().then((found) => active && setFolders(found), () => active && setFolders((current) => current ?? []));
+    void look();
+    // A cloud app installed meanwhile shows up when you come back to the window.
+    window.addEventListener("focus", look);
     return () => {
       active = false;
+      window.removeEventListener("focus", look);
     };
   }, [overview, on]);
 
@@ -279,6 +285,16 @@ export function SyncPage() {
 
 // ── Choosing a folder ──
 
+/** Cloud apps Wisp can sync through once they're on this computer, and where to get each. */
+const KNOWN_APPS: { kind: FolderKind; label: string; url: string; note?: string }[] = [
+  isMac
+    ? { kind: "icloud", label: "iCloud Drive", url: "https://support.apple.com/guide/mac-help/use-icloud-drive-to-store-documents-mchle5a61431/mac", note: "Turn it on in System Settings, under your Apple Account, iCloud" }
+    : { kind: "icloud", label: "iCloud Drive", url: "https://support.apple.com/en-us/103232", note: "iCloud for Windows" },
+  { kind: "onedrive", label: "OneDrive", url: "https://www.microsoft.com/microsoft-365/onedrive/download" },
+  { kind: "google-drive", label: "Google Drive", url: "https://www.google.com/drive/download/", note: "Google Drive for desktop" },
+  { kind: "dropbox", label: "Dropbox", url: "https://www.dropbox.com/install" },
+];
+
 function ChooseFolder({ folders, working, onConnect, onPick }: { folders: CloudFolder[] | null; working: string | null; onConnect: (path: string) => void; onPick: () => void }) {
   const joining = folders?.find((folder) => folder.existing);
   return (
@@ -350,6 +366,8 @@ function ChooseFolder({ folders, working, onConnect, onPick }: { folders: CloudF
         </ul>
       )}
 
+      {folders !== null && <OtherApps found={folders} />}
+
       <div className="relative mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-cream/8 pt-4">
         <button type="button" onClick={onPick} disabled={working !== null} className="text-sm font-bold text-cream-300 underline decoration-cream/25 underline-offset-4 transition-colors hover:text-cream hover:decoration-cream disabled:opacity-50">
           Choose another folder…
@@ -357,6 +375,37 @@ function ChooseFolder({ folders, working, onConnect, onPick }: { folders: CloudF
         <span className="text-xs text-mute">A Syncthing folder, a network drive, or anything else kept in step.</span>
       </div>
     </section>
+  );
+}
+
+/** The cloud apps Wisp didn't find on this computer: install one and it shows up above. */
+function OtherApps({ found }: { found: CloudFolder[] }) {
+  const missing = KNOWN_APPS.filter((app) => !found.some((folder) => folder.kind === app.kind));
+  if (missing.length === 0) return null;
+  return (
+    <div className="relative mt-4">
+      <p className="text-xs font-semibold text-mute">
+        {found.length === 0 ? "Wisp works with these once they're on this computer:" : "Also works with these, once they're on this computer:"}
+      </p>
+      <ul className="mt-2 flex flex-wrap gap-2">
+        {missing.map((app) => {
+          const Icon = KIND_ICON[app.kind];
+          return (
+            <li key={app.kind}>
+              <button
+                type="button"
+                onClick={() => void openExternal(app.url)}
+                title={app.note ?? `Get ${app.label}`}
+                className="flex items-center gap-2 rounded-full border border-cream/10 px-3 py-1.5 text-xs font-bold text-cream-300 transition-colors hover:border-cream/25 hover:text-cream"
+              >
+                <Icon size={14} aria-hidden="true" />
+                Get {app.label}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

@@ -7,6 +7,10 @@ name: Release
 # Run it by hand (Actions > Release > Run workflow) to build without releasing; the installers are
 # kept as workflow artifacts. Name some builds to make only those, so trying a fix for one system
 # doesn't pay for all six again (macOS minutes count ten times on private repositories).
+#
+# Tick "tester" for a tester build: offline accounts on (for a closed group who own Minecraft,
+# until Microsoft sign-in is approved), no self-updating (a public release would take offline
+# accounts away again), and never released.
 
 on:
   push:
@@ -17,6 +21,11 @@ on:
         description: "Builds to make, separated by spaces (blank for all): macos-arm64 macos-x64 windows-x64 windows-arm64 linux-x64 linux-arm64"
         required: false
         default: ""
+      tester:
+        description: "Tester build: offline accounts on, no self-updating, never released. Only for people who own Minecraft."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -111,7 +120,7 @@ jobs:
       # TAURI_SIGNING_PRIVATE_KEY_PASSWORD, builds are signed and the release gets a latest.json
       # that installed copies check. Without them, builds are made as before and don't update.
       - name: Turn on updates
-        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && !inputs.tester
         shell: bash
         env:
           PUBKEY: ${{ vars.WISP_UPDATER_PUBKEY }}
@@ -126,23 +135,26 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tester builds only (an empty value leaves both off).
+          WISP_TESTER: ${{ inputs.tester && '1' || '' }}
+          VITE_WISP_TESTER: ${{ inputs.tester && '1' || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: pnpm tauri
-          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && ' --config src-tauri/tauri.updates.conf.json' || '' }}
+          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && !inputs.tester && ' --config src-tauri/tauri.updates.conf.json' || '' }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Wisp {0}', github.ref_name) || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: true
-          includeUpdaterJson: ${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' }}
+          includeUpdaterJson: ${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && !inputs.tester }}
 
       - name: Keep the installers
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: wisp-${{ matrix.name }}
+          name: wisp-${{ matrix.name }}${{ inputs.tester && '-tester' || '' }}
           if-no-files-found: error
           path: |
             target/${{ matrix.target }}/release/bundle/dmg/*.dmg

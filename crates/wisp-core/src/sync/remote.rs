@@ -367,8 +367,10 @@ impl Remote {
 
     // ── Looking after it ──
 
-    pub fn summary(&self) -> RemoteSummary {
-        let devices = self.devices();
+    /// What's in the folder, as another computer sees it: `this_device`'s own record (left by
+    /// turning sync on here before) doesn't count as another computer.
+    pub fn summary(&self, this_device: &str) -> RemoteSummary {
+        let devices: Vec<DeviceRecord> = self.devices().into_iter().filter(|device| device.id != this_device).collect();
         let items = self.items();
         RemoteSummary {
             devices: devices.iter().map(|device| device.name.clone()).collect(),

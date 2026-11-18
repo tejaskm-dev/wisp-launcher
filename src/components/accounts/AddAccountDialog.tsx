@@ -1,6 +1,6 @@
 import { Info } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { addOfflineAccount } from "../../data/api";
+import { addOfflineAccount, testerBuild } from "../../data/api";
 import type { Account } from "../../data/types";
 import { Ghost } from "../brand/Ghost";
 import { Button } from "../ui/Button";
@@ -72,8 +72,9 @@ export function AddAccountDialog({ open, onClose, onAdded }: { open: boolean; on
         <p className="flex items-start gap-2.5 rounded-2xl bg-cream/4 px-4 py-3 text-[13px] leading-relaxed text-mute">
           <Info size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
           <span>
-            You're on a developer build, so offline accounts are available for testing. They play singleplayer and offline
-            servers. Released versions of Wisp will ask for a Microsoft account that owns Minecraft first.
+            {testerBuild
+              ? "This is a tester build, so offline accounts are on until Microsoft sign-in is ready. Use one only if you own Minecraft: Java Edition. They play singleplayer, LAN and servers with online mode off. Released versions of Wisp ask for a Microsoft account that owns Minecraft first."
+              : "You're on a developer build, so offline accounts are available for testing. They play singleplayer and offline servers. Released versions of Wisp will ask for a Microsoft account that owns Minecraft first."}
           </span>
         </p>
         {error && (

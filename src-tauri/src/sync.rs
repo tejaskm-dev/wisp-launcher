@@ -230,8 +230,9 @@ pub async fn get_sync(app: AppHandle) -> Result<Overview, String> {
 
 /// The cloud folders on this computer, the likeliest first.
 #[tauri::command]
-pub async fn get_sync_folders() -> Result<Vec<CloudFolder>, String> {
-    tauri::async_runtime::spawn_blocking(sync::detect).await.map_err(|error| error.to_string())
+pub async fn get_sync_folders(app: AppHandle) -> Result<Vec<CloudFolder>, String> {
+    let data = data(&app);
+    tauri::async_runtime::spawn_blocking(move || sync::detect(&sync::this_device(&data))).await.map_err(|error| error.to_string())
 }
 
 /// Lets the player pick any folder to sync through.

@@ -223,6 +223,20 @@ struct FixedEvent {
 
 struct SettingsState(SyncMutex<Settings>);
 
+/// Offline accounts work in developer builds, and in tester builds (the release workflow's
+/// "tester" option, built with WISP_TESTER=1) made for a closed group of people who own
+/// Minecraft. Public releases need a Microsoft account that owns the game.
+const OFFLINE_ACCOUNTS: bool = cfg!(debug_assertions) || is_one(option_env!("WISP_TESTER"));
+
+/// Whether a build-time setting is exactly "1" (an empty one, as the workflow passes when the
+/// option's off, isn't).
+const fn is_one(value: Option<&str>) -> bool {
+    match value {
+        Some(text) => matches!(text.as_bytes(), [b'1']),
+        None => false,
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -910,7 +924,7 @@ async fn get_launches(launches: State<'_, Launches>) -> Result<Vec<LaunchEvent>,
 /// signed in, as other launchers do.
 #[tauri::command]
 async fn add_offline_account(name: String, paths: State<'_, Paths>) -> Result<Account, String> {
-    if !cfg!(debug_assertions) {
+    if !OFFLINE_ACCOUNTS {
         return Err(
             "Offline accounts unlock after you sign in with a Microsoft account that owns Minecraft."
                 .into(),

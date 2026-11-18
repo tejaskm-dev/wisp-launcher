@@ -1,5 +1,7 @@
 # Wisp
 
+> NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.
+
 A fast Minecraft: Java Edition launcher whose worlds, keybinds and settings follow you between computers.
 
 > **Status:** early, but it plays. Create an instance with Vanilla, Fabric, Quilt, Forge or NeoForge, on any Minecraft version Mojang lists, and press Play: Wisp downloads the game, its libraries and assets and the right Java from Mojang, checks every file's SHA-1, and starts Minecraft. Mods, resource packs, shaders and modpacks install from Modrinth. Microsoft sign-in is next (it needs an Azure app ID that Mojang has approved); until then, **developer builds** can add an offline account for testing, and the installers on the Releases page can't start the game yet. CurseForge needs an API key from CurseForge first. Cloud sync works through a cloud folder you already have (iCloud Drive, OneDrive, Google Drive, Dropbox, Syncthing or any shared folder).

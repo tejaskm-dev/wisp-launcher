@@ -61,6 +61,11 @@ pub trait Fetch {
     fn known(&self, sha1s: &[String]) -> Option<HashMap<String, String>>;
 }
 
+/// This computer's sync id (made up the first time it's asked for).
+pub fn this_device(data: &Path) -> String {
+    state::Store::new(data).load().device_id
+}
+
 /// A SHA-1 as lowercase hex, for checking downloads.
 pub fn sha1_of(bytes: &[u8]) -> String {
     remote::sha1_hex(bytes)

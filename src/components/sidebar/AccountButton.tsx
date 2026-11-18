@@ -1,6 +1,6 @@
 import { Cloud, LogIn, Shirt, SlidersHorizontal, Trash2, UserRoundPlus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { canAddOfflineAccounts, getSkins, removeAccount } from "../../data/api";
+import { canAddOfflineAccounts, getSkins, removeAccount, testerBuild } from "../../data/api";
 import type { Account } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { modKey } from "../../lib/platform";
@@ -138,7 +138,7 @@ function AccountMenu({ account, skin, onClose }: { account: Account | null; skin
         <MenuItem
           icon={<UserRoundPlus size={16} aria-hidden="true" />}
           label={account ? "Use a different offline name" : "Add offline account"}
-          hint={canAddOfflineAccounts ? "Developer build: for testing" : "Needs a Microsoft account that owns Minecraft"}
+          hint={testerBuild ? "Tester build: if you own Minecraft" : canAddOfflineAccounts ? "Developer build: for testing" : "Needs a Microsoft account that owns Minecraft"}
           disabled={!canAddOfflineAccounts}
           onSelect={run(addAccount)}
         />
