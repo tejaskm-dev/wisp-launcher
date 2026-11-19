@@ -27,11 +27,13 @@ export interface Pose {
   turn?: number;
   /** Sideways lean. */
   lean?: number;
+  /** Minecraft's sneak (see `applyPose`): 1 is down, 0 standing. It switches; it never blends. */
+  sneak?: number;
 }
 
 const KEYS: (keyof Pose)[] = [
   "headX", "headY", "headZ", "leftArmX", "leftArmZ", "rightArmX", "rightArmZ",
-  "leftLegX", "leftLegZ", "rightLegX", "rightLegZ", "bend", "x", "y", "z", "turn", "lean",
+  "leftLegX", "leftLegZ", "rightLegX", "rightLegZ", "bend", "x", "y", "z", "turn", "lean", "sneak",
 ];
 
 const PI = Math.PI;
@@ -65,6 +67,8 @@ export function blendPose(from: Pose, to: Pose, k: number): Pose {
   const out = mix(from, to, k);
   const start = wrap(from.turn ?? 0);
   out.turn = start + wrap((to.turn ?? 0) - start) * k;
+  // Sneaking is on or off in the game, never halfway down.
+  out.sneak = to.sneak ?? 0;
   return out;
 }
 
@@ -92,16 +96,29 @@ export function timeline(frames: [number, Pose][], t: number, loop?: number): Po
 /** Puts a pose on the player. */
 export function applyPose(player: PlayerObject, pose: Pose) {
   const skin = player.skin;
+  // Sneaking, as the game's player model does it: the body tips 0.5 forward on a hinge at its top,
+  // 3.2 below the neck, so the hips go back; the head drops 4.2 and keeps looking where it was;
+  // the arms drop 3.2 and hang 0.4 back, along the body; the legs step 4 back (and 0.2 down) to
+  // stay under the hips. The game also draws a sneaking player 2 pixels lower, feet and all.
+  const sneak = pose.sneak ?? 0;
+  const tip = 0.5 * sneak;
+  skin.head.position.y = -4.2 * sneak;
   skin.head.rotation.set(pose.headX ?? 0, pose.headY ?? 0, pose.headZ ?? 0);
-  skin.leftArm.rotation.set(pose.leftArmX ?? 0, 0, pose.leftArmZ ?? 0);
-  skin.rightArm.rotation.set(pose.rightArmX ?? 0, 0, pose.rightArmZ ?? 0);
+  skin.body.rotation.set(tip, 0, 0);
+  skin.body.position.set(0, -3.2 * sneak - 6 * Math.cos(tip), -6 * Math.sin(tip));
+  skin.leftArm.position.y = skin.rightArm.position.y = -2 - 3.2 * sneak;
+  skin.leftArm.rotation.set((pose.leftArmX ?? 0) + 0.4 * sneak, 0, pose.leftArmZ ?? 0);
+  skin.rightArm.rotation.set((pose.rightArmX ?? 0) + 0.4 * sneak, 0, pose.rightArmZ ?? 0);
+  skin.leftLeg.position.y = skin.rightLeg.position.y = -12 - 0.2 * sneak;
+  skin.leftLeg.position.z = skin.rightLeg.position.z = -0.1 - 3.9 * sneak;
   // Bending tips the skin around the hips (12 below the neck), which sits 8 up in the player.
   const bend = pose.bend ?? 0;
   skin.rotation.set(bend, 0, 0);
   skin.position.set(0, -4 + 12 * Math.cos(bend), 12 * Math.sin(bend));
   skin.leftLeg.rotation.set((pose.leftLegX ?? 0) - bend, 0, pose.leftLegZ ?? 0);
   skin.rightLeg.rotation.set((pose.rightLegX ?? 0) - bend, 0, pose.rightLegZ ?? 0);
-  player.position.set(pose.x ?? 0, pose.y ?? 0, pose.z ?? 0);
+  // Those 2 pixels are the world's; players are drawn at 15/16 size, so they're 2.13 of the model's.
+  player.position.set(pose.x ?? 0, (pose.y ?? 0) - (2 / 0.9375) * sneak, pose.z ?? 0);
   player.rotation.set(0, pose.turn ?? 0, pose.lean ?? 0);
 }
 
@@ -233,12 +250,18 @@ function tPose(t: number): Pose {
   return add(mix(idlePose(t), arms, clamp01(t / 0.2)), { turn: Math.max(0, t - 0.6) * 0.75, y: smooth((t - 0.4) / 0.6) * (0.8 + Math.sin(t * 1.5) * 0.4) });
 }
 
-const CROUCHED: Pose = { bend: 0.5, y: -1.8, headX: 0.28, leftArmX: -0.3, rightArmX: -0.3, leftArmZ: 0.08, rightArmZ: -0.08 };
+// Crouch spam, Minecraft's way of saying hi, as it comes through in the game: a game tick (a
+// twentieth of a second) a character, "x" down. A burst of six, a breath, four more, a longer one.
+const SPAM = `xx..xxx..xx...xx..xxx..xx${".".repeat(18)}xxx..xx..xx...xx${".".repeat(22)}`;
+
+/** Whether the player is down, t seconds into crouch spam (the ghost bobs along with it). */
+export function crouchedAt(t: number): boolean {
+  return t >= 0 && SPAM[Math.floor(t * 20) % SPAM.length] === "x";
+}
 
 function crouchSpam(t: number): Pose {
-  // Square-ish, about five crouches a second: Minecraft's way of saying hi.
-  const down = 0.5 + 0.5 * Math.tanh(Math.sin(t * 15) * 5);
-  return add(mix(idlePose(t), CROUCHED, down), { headY: Math.sin(t * 3) * 0.2 });
+  // Eyes on whoever's being greeted, drifting a little.
+  return { ...idlePose(t), headY: Math.sin(t * 0.6) * 0.07, headX: -0.02, sneak: crouchedAt(t) ? 1 : 0 };
 }
 
 export const EMOTES: Emote[] = [
