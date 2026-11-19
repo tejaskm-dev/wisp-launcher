@@ -72,8 +72,8 @@ export function GameSection({ settings, update }: SectionProps) {
           label="Memory for Minecraft"
           description={
             total
-              ? `This computer has ${formatGb(total)}. 4 GB suits most worlds; big modpacks like 6 to 8 GB.`
-              : "4 GB suits most worlds; big modpacks like 6 to 8 GB."
+              ? `This computer has ${formatGb(total)}. 4 GB suits most worlds. Instances with lots of mods get more by themselves (6 to 10 GB, by how many), and any instance can have its own.`
+              : "4 GB suits most worlds. Instances with lots of mods get more by themselves (6 to 10 GB, by how many), and any instance can have its own."
           }
           value={settings.memoryMb}
           min={1024}

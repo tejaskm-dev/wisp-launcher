@@ -130,6 +130,34 @@ pub struct LocalSettings {
 /// The folder Minecraft itself runs in (worlds, options.txt, mods, screenshots...).
 pub const GAME_DIR: &str = "minecraft";
 
+/// Memory for an instance that has none of its own: Wisp's setting, or more for one with lots of
+/// mods, since big modpacks run out at what vanilla is happy with. Never less than the setting,
+/// and never more than 60% of the computer's memory (the fixer's ceiling for memory too).
+pub fn automatic_memory_mb(setting_mb: u32, mods: usize, system_mb: Option<u64>) -> u32 {
+    let wanted: u32 = match mods {
+        0..60 => 0,
+        60..150 => 6 * 1024,
+        150..250 => 8 * 1024,
+        _ => 10 * 1024,
+    };
+    setting_mb.max(wanted.min(memory_ceiling_mb(system_mb)))
+}
+
+/// The most memory Wisp picks for a game by itself: 60% of the computer's, in steps of 512 MB.
+pub fn memory_ceiling_mb(system_mb: Option<u64>) -> u32 {
+    system_mb.map_or(8192, |total| u32::try_from(total * 6 / 10).unwrap_or(u32::MAX) / 512 * 512)
+}
+
+/// How many mods an instance has turned on: the jars in its game folder's mods/.
+pub fn mod_count(game_dir: &Path) -> usize {
+    std::fs::read_dir(game_dir.join("mods")).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension.eq_ignore_ascii_case("jar")))
+            .count()
+    })
+}
+
 /// Instances live in `<root>/<id>/`, each with an `instance.json` and a `minecraft/` game folder.
 pub struct InstanceStore {
     root: PathBuf,
@@ -460,5 +488,35 @@ mod tests {
     #[test]
     fn missing_root_lists_nothing() {
         assert!(InstanceStore::new("/definitely/not/here").list().is_empty());
+    }
+
+    #[test]
+    fn big_modpacks_get_more_memory_by_themselves() {
+        let sixteen = Some(16 * 1024);
+        // Vanilla and light packs get Wisp's setting; heavier ones more, in steps.
+        assert_eq!(automatic_memory_mb(4096, 0, sixteen), 4096);
+        assert_eq!(automatic_memory_mb(4096, 59, sixteen), 4096);
+        assert_eq!(automatic_memory_mb(4096, 60, sixteen), 6144);
+        assert_eq!(automatic_memory_mb(4096, 214, sixteen), 8192);
+        assert_eq!(automatic_memory_mb(4096, 400, sixteen), 9728);
+        // A higher setting stays; a small computer keeps to 60% of its memory.
+        assert_eq!(automatic_memory_mb(12288, 400, sixteen), 12288);
+        assert_eq!(automatic_memory_mb(4096, 214, Some(8 * 1024)), 4608);
+        assert_eq!(automatic_memory_mb(2048, 214, Some(4 * 1024)), 2048);
+        // Not knowing the computer's memory, it goes no higher than 8 GB.
+        assert_eq!(automatic_memory_mb(4096, 400, None), 8192);
+    }
+
+    #[test]
+    fn counts_the_mods_turned_on() {
+        let dir = std::env::temp_dir().join(format!("wisp-mod-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mod_count(&dir), 0);
+        std::fs::create_dir_all(dir.join("mods").join("sub")).unwrap();
+        for name in ["sodium.jar", "Lithium.JAR", "iris.jar.disabled", "notes.txt"] {
+            std::fs::write(dir.join("mods").join(name), b"").unwrap();
+        }
+        assert_eq!(mod_count(&dir), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -7,6 +7,7 @@ import {
   getInstancesKeepingSettings,
   getLoaderGameVersions,
   getScreenshots,
+  getInstanceMemory,
   getSystemMemory,
   getVersions,
   moveInstance,
@@ -19,7 +20,7 @@ import {
   thumbUrl,
   updateInstance,
 } from "../../data/api";
-import type { GameWindow, Instance, LaunchHooks, Loader, LocalSettings, MovePlan, Screenshot, SpedUp, WindowMode } from "../../data/types";
+import type { GameWindow, Instance, InstanceMemory, LaunchHooks, Loader, LocalSettings, MovePlan, Screenshot, SpedUp, WindowMode } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { formatBytes, instanceLabel, loaderName } from "../../lib/format";
 import { sharesSettings } from "../../lib/sharedSettings";
@@ -34,6 +35,7 @@ import { Select } from "../ui/Select";
 import { Slider } from "../ui/Slider";
 import { Toggle } from "../ui/Toggle";
 import { PackUpdate } from "./PackUpdate";
+import { memoryLabel } from "./QuickSettings";
 import { Panel, Reveal, listNames, message } from "./shared";
 
 const LOADERS: Loader[] = ["vanilla", "fabric", "quilt", "forge", "neoforge"];
@@ -68,11 +70,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/** Memory in MB as people say it: "4 GB", "6.5 GB". */
-function memoryLabel(mb: number): string {
-  const gb = mb / 1024;
-  return Number.isInteger(gb) ? `${gb} GB` : `${gb.toFixed(1)} GB`;
-}
 
 function TextField({ label, value, onCommit, placeholder, mono = false }: { label: string; value: string; onCommit: (value: string) => void; placeholder?: string; mono?: boolean }) {
   const [draft, setDraft] = useState(value);
@@ -353,12 +350,17 @@ function MemoryAndJava({ instance, saved }: { instance: Instance; saved: (work: 
   const { settings } = useApp();
   const [system, setSystem] = useState<number | null>(null);
   const [memory, setMemory] = useState<number | null>(instance.memoryMb ?? null);
+  // What Wisp picks when it has none of its own (more than the setting for a big modpack).
+  const [automatic, setAutomatic] = useState<InstanceMemory | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     getSystemMemory().then(setSystem, () => setSystem(null));
   }, []);
   useEffect(() => setMemory(instance.memoryMb ?? null), [instance.memoryMb]);
-  const wisp = settings?.memoryMb ?? 4096;
+  useEffect(() => {
+    getInstanceMemory(instance.id).then(setAutomatic, () => setAutomatic(null));
+  }, [instance.id, instance.memoryMb, settings?.memoryMb]);
+  const wisp = automatic?.automaticMb ?? settings?.memoryMb ?? 4096;
   const max = Math.max(4096, Math.floor(((system ?? 16384) * 0.75) / 512) * 512);
   const commit = (value: number | null) => {
     setMemory(value);
@@ -372,7 +374,13 @@ function MemoryAndJava({ instance, saved }: { instance: Instance; saved: (work: 
       <div className="flex flex-col gap-2">
         <Toggle
           label="Its own memory"
-          description={memory === null ? `Uses Wisp's setting: ${memoryLabel(wisp)}.` : "Instead of Wisp's setting. Big modpacks often want more."}
+          description={
+            memory !== null
+              ? "Instead of what Wisp picks. Big modpacks often want more."
+              : automatic && automatic.automaticMb > automatic.settingMb
+                ? `Wisp gives it ${memoryLabel(wisp)} for its ${automatic.mods} mods (your setting is ${memoryLabel(automatic.settingMb)}).`
+                : `Uses Wisp's setting: ${memoryLabel(wisp)}.`
+          }
           checked={memory !== null}
           onChange={(own) => commit(own ? Math.min(max, Math.max(wisp, 6144)) : null)}
         />
