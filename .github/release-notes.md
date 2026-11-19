@@ -6,10 +6,10 @@ An early preview of Wisp, a fast Minecraft: Java Edition launcher.
 
 | System | File |
 |---|---|
-| macOS, Apple Silicon (M1 and later) | `Wisp_0.1.9_aarch64.dmg` |
-| macOS, Intel | `Wisp_0.1.9_x64.dmg` |
-| Windows, x64 | `Wisp_0.1.9_x64-setup.exe`, or the `.msi` |
-| Windows, ARM64 | `Wisp_0.1.9_arm64-setup.exe` |
+| macOS, Apple Silicon (M1 and later) | `Wisp_0.2.0_aarch64.dmg` |
+| macOS, Intel | `Wisp_0.2.0_x64.dmg` |
+| Windows, x64 | `Wisp_0.2.0_x64-setup.exe`, or the `.msi` |
+| Windows, ARM64 | `Wisp_0.2.0_arm64-setup.exe` |
 | Linux, x64 | the `amd64.AppImage`, `.deb` (Debian, Ubuntu) or `x86_64.rpm` (Fedora, openSUSE) |
 | Linux, ARM64 | the `aarch64.AppImage`, `arm64.deb` or `aarch64.rpm` |
 
@@ -21,11 +21,11 @@ These builds aren't code-signed yet, so your system checks with you the first ti
 
 ### What's new
 
-If you have 0.1.8, Wisp offers this update in its own window: Update now installs it and restarts where you were.
+If you have 0.1.9, Wisp offers this update in its own window: Update now installs it and restarts where you were.
 
-- **Quitting isn't a crash any more**: on some computers, Windows especially, leaving Minecraft with Quit Game, Alt+F4 or the window's close button said Wisp "closed unexpectedly", skipped the restore point Wisp makes after you play, and put a crash in the journal. A game that shuts down normally now counts as quit, whatever its exit code, and the game's last-run log ends with that code so a real crash is easy to look into.
-- **Crouch spam crouches like the game**: the Skins page emote now uses Minecraft's own sneak, with the body tipped forward from the neck, hips back and the head dropping straight down. It snaps on game ticks in quick bursts, and the ghost bobs back.
-- **Tester codes**: if one of Wisp's testers sends you a code, paste it into Settings, About, and Wisp switches itself to tester builds, which keep themselves up to date. Tester builds are only for people who own Minecraft.
+- **Your game settings match in every instance**: FOV, keybinds, sound, video and the rest now start out the same everywhere. The first time you play after updating, every instance takes the settings of the one you played last, and from then on a change in any instance reaches the others when they next start. An instance's old settings are kept beside the new ones as `options.txt.before-sharing`, and any instance can keep its own.
+- **Memory and settings beside Play**: every instance's page shows how much memory it gets and whether its settings are shared, right next to Play. Click either to change it.
+- **Big modpacks get more memory by themselves**: an instance with lots of mods gets 6, 8 or 10 GB instead of the 4 GB vanilla needs, never more than 60% of your computer's memory. Give an instance its own memory and Wisp leaves it alone.
 
 ---
 
