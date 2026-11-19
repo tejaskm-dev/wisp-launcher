@@ -69,6 +69,16 @@ import type {
   PackUpdated,
   ExportOptions,
   ExportedFile,
+  ChatMessage,
+  ConsoleLine,
+  Conversation,
+  HostedView,
+  HostingChange,
+  JoinProgress,
+  NewHostedServer,
+  PlayerList,
+  ServerChanges,
+  ServerPlayers,
 } from "./types";
 
 /** True inside the desktop app; false when the UI runs in a plain browser via `pnpm dev`. */
@@ -251,6 +261,60 @@ export const inviteToParty = (code: string) => call<SocialView>("invite_to_party
 export const joinParty = (partyId: string) => call<SocialView>("join_party", { partyId }, friendsNeedDesktop);
 export const declineParty = (partyId: string) => call<SocialView>("decline_party", { partyId }, friendsNeedDesktop);
 export const leaveParty = () => call<SocialView>("leave_party", undefined, friendsNeedDesktop);
+export const declineServerInvite = (from: string, serverId: string) => call<SocialView>("decline_server_invite", { from, serverId }, friendsNeedDesktop);
+/** A conversation's messages, oldest first; reading it marks it read. */
+export const getChat = (conversation: Conversation) => call<ChatMessage[]>("get_chat", { conversation }, () => Promise.resolve([]));
+export const sendChat = (conversation: Conversation, text: string) => call<ChatMessage[]>("send_chat", { conversation, text }, friendsNeedDesktop);
+/** Joins a friend's server: matches their instance, connects, and starts the game. Resolves with the instance playing it. */
+export const joinFriendServer = (code: string, serverId: string) => call<string>("join_friend_server", { code, serverId }, friendsNeedDesktop);
+
+/** Calls `handler` with each chat message's conversation as it arrives. */
+export function onChat(handler: (conversation: Conversation) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<Conversation>("chat", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
+
+/** Calls `handler` as joining a friend's server goes along. */
+export function onJoinProgress(handler: (progress: JoinProgress) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<JoinProgress>("join", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
+
+// ── Servers hosted on this computer (src-tauri/src/hosting.rs) ──
+
+const hostingNeedsDesktop = () => Promise.reject(new Error("Hosting a server needs the desktop app."));
+export const getHostedServers = () => call<HostedView[]>("get_hosted_servers", undefined, (p) => p.hostedServers());
+export const getHostedServer = (id: string) => call<HostedView>("get_hosted_server", { id }, (p) => p.hostedServer(id));
+export const createHostedServer = (request: NewHostedServer) => call<HostedView>("create_hosted_server", { request }, hostingNeedsDesktop);
+export const updateHostedServer = (id: string, changes: ServerChanges) => call<HostedView>("update_hosted_server", { id, changes }, hostingNeedsDesktop);
+export const deleteHostedServer = (id: string) => call<void>("delete_hosted_server", { id }, hostingNeedsDesktop);
+export const openServerFolder = (id: string) => call<void>("open_server_folder", { id }, hostingNeedsDesktop);
+export const startHostedServer = (id: string) => call<HostedView>("start_hosted_server", { id }, hostingNeedsDesktop);
+export const stopHostedServer = (id: string) => call<HostedView>("stop_hosted_server", { id }, hostingNeedsDesktop);
+export const restartHostedServer = (id: string) => call<HostedView>("restart_hosted_server", { id }, hostingNeedsDesktop);
+export const agreeServerEula = (id: string) => call<HostedView>("agree_server_eula", { id }, hostingNeedsDesktop);
+export const sendServerCommand = (id: string, command: string) => call<void>("send_server_command", { id, command }, hostingNeedsDesktop);
+export const getServerConsole = (id: string) => call<ConsoleLine[]>("get_server_console", { id }, (p) => p.serverConsole());
+export const getServerProperties = (id: string) => call<[string, string][]>("get_server_properties", { id }, (p) => p.serverProperties());
+export const setServerProperties = (id: string, values: [string, string][]) => call<[string, string][]>("set_server_properties", { id, values }, hostingNeedsDesktop);
+export const getServerPlayers = (id: string) => call<ServerPlayers>("get_server_players", { id }, (p) => p.serverPlayers());
+export const setServerPlayer = (id: string, list: PlayerList, name: string, add: boolean) => call<ServerPlayers>("set_server_player", { id, list, name, add }, hostingNeedsDesktop);
+export const setServerWorld = (id: string, source: { instanceId: string; folder: string }) => call<HostedView>("set_server_world", { id, source }, hostingNeedsDesktop);
+export const getServerBackups = (id: string) => call<RestorePoint[]>("get_server_backups", { id }, () => Promise.resolve([]));
+export const backUpServer = (id: string) => call<RestorePoint>("back_up_server", { id }, hostingNeedsDesktop);
+export const restoreServerBackup = (id: string, backup: string) => call<void>("restore_server_backup", { id, backup }, hostingNeedsDesktop);
+/** Starts the game straight into one of your servers. Resolves with the instance playing it. */
+export const playHostedServer = (id: string) => call<string>("play_hosted_server", { id }, hostingNeedsDesktop);
+export const inviteToServer = (id: string, code: string) => call<HostedView>("invite_to_server", { id, code }, hostingNeedsDesktop);
+
+/** Calls `handler` whenever a hosted server changes, with what changed. */
+export function onHostingChange(handler: (change: HostingChange) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<HostingChange>("hosting", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
 
 /** Calls `handler` whenever friends change, with a notice worth showing if there is one. */
 export function onSocialChange(handler: (notice: SocialNotice | null) => void): () => void {

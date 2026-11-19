@@ -76,6 +76,8 @@ const ImportWorldDialog = lazy(() =>
   import("./components/worlds/ImportWorldDialog").then((module) => ({ default: module.ImportWorldDialog })),
 );
 const InstallDialog = lazy(() => import("./components/install/InstallDialog").then((module) => ({ default: module.InstallDialog })));
+const HostedServerPage = lazy(() => import("./pages/HostedServerPage").then((module) => ({ default: module.HostedServerPage })));
+const NewServerDialog = lazy(() => import("./components/hosting/NewServerDialog").then((module) => ({ default: module.NewServerDialog })));
 const NewInstanceDialog = lazy(() =>
   import("./components/instances/NewInstanceDialog").then((module) => ({ default: module.NewInstanceDialog })),
 );
@@ -239,6 +241,16 @@ export default function App() {
     for (const sibling of tabGroupOf(page) ?? []) void tabPageCode[sibling]().catch(() => {});
   }, [page]);
 
+  // A server hosted on this computer, and the page to go back to from it.
+  const [hostedRoute, setHostedRoute] = useState<{ id: string; from: PageId } | null>(null);
+  const openHosted = useCallback(
+    (id: string) => {
+      setHostedRoute((current) => ({ id, from: pageNow.current === "hosted" ? (current?.from ?? "servers") : pageNow.current }));
+      navigate("hosted");
+    },
+    [navigate, pageNow],
+  );
+
   // A Modrinth project's page, and the page to go back to from it.
   const [projectRoute, setProjectRoute] = useState<{ id: string; from: PageId } | null>(null);
   const openProject = useCallback(
@@ -353,6 +365,15 @@ export default function App() {
   const [dialog, setDialog] = useState({ open: false, session: 0 });
   const openNewInstance = useCallback(() => setDialog((current) => (current.open ? current : { open: true, session: current.session + 1 })), []);
   const closeNewInstance = useCallback(() => setDialog((current) => ({ ...current, open: false })), []);
+
+  // ── Host a server dialog, the same way; it can start from an instance and one of its worlds ──
+  const [serverDialog, setServerDialog] = useState<{ open: boolean; session: number; instanceId: string | null; world: string | null }>({ open: false, session: 0, instanceId: null, world: null });
+  const hostServer = useCallback(
+    (from?: { instanceId?: string | null; world?: string | null }) =>
+      setServerDialog((current) => (current.open ? current : { open: true, session: current.session + 1, instanceId: from?.instanceId ?? null, world: from?.world ?? null })),
+    [],
+  );
+  const closeServerDialog = useCallback(() => setServerDialog((current) => ({ ...current, open: false })), []);
 
   const comingSoon = useCallback(
     (feature: string) =>
@@ -790,6 +811,8 @@ export default function App() {
       openProject,
       openWorld,
       openInstance,
+      openHosted,
+      hostServer,
       discoverFor,
       openDiscoverFor,
       importWorlds,
@@ -823,6 +846,8 @@ export default function App() {
       openProject,
       openWorld,
       openInstance,
+      openHosted,
+      hostServer,
       discoverFor,
       openDiscoverFor,
       importWorlds,
@@ -877,6 +902,9 @@ export default function App() {
                   {page === "world" && worldRoute && (
                     <Lazy key={`world-${worldRoute.id}`} page={<WorldPage worldId={worldRoute.id} backTo={worldRoute.from} onBack={() => navigate(worldRoute.from)} />} />
                   )}
+                  {page === "hosted" && hostedRoute && (
+                    <Lazy key={`hosted-${hostedRoute.id}`} page={<HostedServerPage serverId={hostedRoute.id} backTo={hostedRoute.from} onBack={() => navigate(hostedRoute.from)} />} />
+                  )}
                   {page === "instance" && instanceRoute && (
                     <Lazy
                       key={`instance-${instanceRoute.id}-${instanceRoute.session}`}
@@ -891,6 +919,11 @@ export default function App() {
           {dialog.session > 0 && (
             <Suspense fallback={null}>
               <NewInstanceDialog key={dialog.session} open={dialog.open} onClose={closeNewInstance} />
+            </Suspense>
+          )}
+          {serverDialog.session > 0 && (
+            <Suspense fallback={null}>
+              <NewServerDialog key={serverDialog.session} open={serverDialog.open} onClose={closeServerDialog} instanceId={serverDialog.instanceId} world={serverDialog.world} />
             </Suspense>
           )}
           {accountDialog.session > 0 && (

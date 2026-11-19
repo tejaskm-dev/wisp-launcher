@@ -1,6 +1,9 @@
-import { Check, Compass, Copy, MoreHorizontal, Play, Plus, RefreshCw, Server, Square, Trash2, Users } from "lucide-react";
+import { Check, Compass, Copy, MoreHorizontal, Play, Plus, RefreshCw, Server, ServerCog, Square, Trash2, Users } from "lucide-react";
 import { m } from "motion/react";
 import { useRef, useState } from "react";
+import { Ghost } from "../components/brand/Ghost";
+import { HostedServerCard } from "../components/hosting/HostedServerCard";
+import { useHostedServers } from "../components/hosting/useHosted";
 import { describeLaunch } from "../components/launch/describe";
 import { AddServerDialog } from "../components/servers/AddServerDialog";
 import { readDiscoverMode, saveDiscoverMode, sameServer } from "../components/servers/address";
@@ -14,7 +17,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { PageTabs } from "../components/ui/PageTabs";
 import { MenuItem, Popover } from "../components/ui/Popover";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
-import { removeServer } from "../data/api";
+import { removeServer, startHostedServer, stopHostedServer } from "../data/api";
 import type { ServerSummary } from "../data/types";
 import { timeAgo } from "../lib/format";
 import { fadeUp } from "../lib/motion";
@@ -31,7 +34,7 @@ export function useOpenServerDiscovery() {
 
 /** Every server in every instance's list, with live status and Quick Play. */
 export function ServersPage() {
-  const { home } = useApp();
+  const { home, hostServer } = useApp();
   const servers = home?.servers ?? null;
   const { statuses, loading, refresh } = useServerStatuses(servers?.map((server) => server.address) ?? []);
   const [adding, setAdding] = useState(false);
@@ -53,8 +56,11 @@ export function ServersPage() {
             <Button variant="secondary" icon={Compass} onClick={discover}>
               Find servers
             </Button>
-            <Button icon={Plus} onClick={() => setAdding(true)}>
+            <Button variant="secondary" icon={Plus} onClick={() => setAdding(true)}>
               Add server
+            </Button>
+            <Button icon={ServerCog} onClick={() => hostServer()}>
+              Host a server
             </Button>
           </>
         }
@@ -67,6 +73,8 @@ export function ServersPage() {
           { id: "servers", label: "Servers", count: servers?.length },
         ]}
       />
+
+      <HostedSection />
 
       {servers === null ? (
         <Loading label="Loading servers" className="grid gap-3 xl:grid-cols-2">
@@ -103,6 +111,61 @@ export function ServersPage() {
       <AddServerDialog open={adding} onClose={() => setAdding(false)} />
       <JoinServerDialog target={joining} status={joining ? statuses[joining.address] : undefined} onClose={() => setJoining(null)} />
     </Page>
+  );
+}
+
+/** Servers hosted on this computer, above the lists of servers to join. */
+function HostedSection() {
+  const { now, notify, openHosted, hostServer } = useApp();
+  const { servers, reload } = useHostedServers((_, failure) => notify({ tone: "info", title: "A server couldn't start", body: failure }));
+  const [busy, setBusy] = useState<string | null>(null);
+  const act = async (id: string, work: () => Promise<unknown>, failTitle: string) => {
+    setBusy(id);
+    try {
+      await work();
+      reload();
+    } catch (failure: unknown) {
+      notify({ tone: "info", title: failTitle, body: failure instanceof Error ? failure.message : String(failure) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (servers === null) return <Skeleton className="h-[132px] rounded-[22px]" />;
+  if (servers.length === 0) {
+    return (
+      <m.section variants={fadeUp} className="wisp-surface relative flex flex-wrap items-center gap-5 overflow-hidden rounded-[24px] p-6">
+        <div className="pointer-events-none absolute -right-12 -top-16 size-64 rounded-full bg-[radial-gradient(circle,rgba(244,238,228,0.08),transparent_65%)]" />
+        <Ghost size={48} floating className="drop-shadow-[0_0_14px_rgba(244,238,228,0.25)]" />
+        <div className="min-w-[240px] flex-1">
+          <h2 className="font-display text-xl font-extrabold tracking-[-0.01em]">Host your own server</h2>
+          <p className="mt-1 text-sm leading-relaxed text-mute">On this computer, free, modded or not. Friends join with one click in Wisp and get the same mods by themselves, without opening ports or paying for a host.</p>
+        </div>
+        <Button icon={ServerCog} onClick={() => hostServer()}>
+          Host a server
+        </Button>
+      </m.section>
+    );
+  }
+  return (
+    <m.section variants={fadeUp} className="flex flex-col gap-3">
+      <h2 className="text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">Hosted on this computer</h2>
+      <ul className="grid gap-3 xl:grid-cols-2">
+        {servers.map((server) => (
+          <li key={server.id} className="flex">
+            <HostedServerCard
+              server={server}
+              now={now}
+              busy={busy === server.id}
+              onOpen={() => openHosted(server.id)}
+              onStart={() => void act(server.id, () => startHostedServer(server.id), `Couldn't start ${server.name}`)}
+              onStop={() => void act(server.id, () => stopHostedServer(server.id), `Couldn't stop ${server.name}`)}
+            />
+          </li>
+        ))}
+      </ul>
+      <h2 className="mt-3 text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">Servers to join</h2>
+    </m.section>
   );
 }
 

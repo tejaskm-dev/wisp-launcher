@@ -728,6 +728,8 @@ pub async fn summaries(
             icon_url: raw.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
             description: raw.summary.clone(),
             categories: Vec::new(),
+            client_side: String::new(),
+            server_side: String::new(),
         })
         .collect())
 }

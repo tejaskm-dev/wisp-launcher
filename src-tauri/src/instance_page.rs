@@ -39,7 +39,7 @@ fn mrpack_of(paths: &Paths, instance: &Instance) -> Option<PathBuf> {
 }
 
 /// Reads an instance's files (off the main thread) and asks Modrinth about new ones.
-async fn scanned(network: &Network, dir: &Path) -> Result<inventory::Scan, String> {
+pub(crate) async fn scanned(network: &Network, dir: &Path) -> Result<inventory::Scan, String> {
     let scan_dir = dir.to_path_buf();
     let mut scan = blocking(move || Ok(inventory::scan(&scan_dir))).await?;
     scan.identify(&network.client, now_ms()).await;

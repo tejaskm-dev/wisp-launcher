@@ -15,6 +15,7 @@ import {
   Play,
   RotateCw,
   Server,
+  ServerCog,
   Settings2,
   Square,
   type LucideIcon,
@@ -73,7 +74,7 @@ const panel = {
 
 /** One instance, all of it: Play, what's in it, its worlds, screenshots, journal, servers, logs and settings. */
 export function InstancePage({ instanceId, initialTab, backTo, onBack }: { instanceId: string; initialTab: InstanceTab; backTo: PageId; onBack: () => void }) {
-  const { home, now, launches, play, stop, notify, journalVersion } = useApp();
+  const { home, now, launches, play, stop, notify, journalVersion, hostServer } = useApp();
   const instance = home?.instances.find((candidate) => candidate.id === instanceId) ?? null;
   const [tab, setTabState] = useState<InstanceTab>(initialTab);
   // Which way the last tab change went, so the new content slides in from that side.
@@ -242,6 +243,7 @@ export function InstancePage({ instanceId, initialTab, backTo, onBack }: { insta
             <MemoryButton instance={instance} />
             <SharingButton instance={instance} />
             <Action icon={<FolderOpen size={15} aria-hidden="true" />} label="Open folder" onClick={() => void openInstanceFolder(instance.id).catch((failure: unknown) => notify({ tone: "info", title: "Couldn't open the folder", body: message(failure) }))} />
+            <Action icon={<ServerCog size={15} aria-hidden="true" />} label="Host a server" onClick={() => hostServer({ instanceId: instance.id })} />
             {failed && <Action icon={<History size={15} aria-hidden="true" />} label="See the log" onClick={() => setTab("logs")} />}
           </div>
         </div>

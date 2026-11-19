@@ -729,6 +729,38 @@ impl Scan {
     }
 }
 
+/// A turned-on file that can be handed to someone else: where it goes in the game folder, its
+/// SHA-1 and size, and where Modrinth serves it when Modrinth has it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shareable {
+    pub path: String,
+    pub sha1: String,
+    pub size: u64,
+    pub url: Option<String>,
+    pub project_id: Option<String>,
+}
+
+impl Scan {
+    /// Every turned-on file outside the worlds (mods, resource packs, shader packs), for sharing an
+    /// instance with someone.
+    pub fn shareable(&self) -> Vec<Shareable> {
+        self.found
+            .iter()
+            .filter(|(found, cached)| found.enabled && !found.folder && found.world.is_none() && !cached.sha1.is_empty())
+            .map(|(found, cached)| {
+                let known = self.known(&cached.sha1);
+                Shareable {
+                    path: found.file.clone(),
+                    sha1: cached.sha1.clone(),
+                    size: found.size,
+                    url: known.and_then(|known| known.url.clone()),
+                    project_id: known.map(|known| known.project_id.clone()).filter(|id| !id.is_empty()),
+                }
+            })
+            .collect()
+    }
+}
+
 // ── Moving to another version ──
 
 /// A mod in a version move.

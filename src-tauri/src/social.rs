@@ -11,14 +11,16 @@ use tauri::async_runtime::{JoinHandle, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_core::home::instance_label;
 use wisp_core::social::{
-    self, Applied, ClientNotification, Friend, FriendRequest, Message, Net, Party, PartyInvite, Profile, Received,
-    SocialData, SocialStore, Status, StreamExt,
+    self, Applied, ChatLog, ChatMessage, ChatStore, ClientNotification, Friend, FriendRequest, Message, Net, Party, PartyInvite, Profile,
+    Received, ServerCard, ServerInvite, SocialData, SocialStore, Status, StreamExt,
 };
 
 use crate::{Launches, Paths, now_ms};
 
 /// Sent whenever friends change; the payload is a notice worth a toast, if there is one.
 pub const SOCIAL_EVENT: &str = "social";
+/// Sent when a chat message arrives; the payload is its conversation.
+pub const CHAT_EVENT: &str = "chat";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,20 +29,42 @@ pub struct Notice {
     body: Option<String>,
 }
 
+/// A friend's latest status, the servers they host that we can join, and when they said so.
+type Seen = (Status, Vec<ServerCard>, i64);
+
 pub struct Social {
     store: SocialStore,
     data: SyncMutex<SocialData>,
     net: Mutex<Option<Arc<Net>>>,
     tasks: SyncMutex<Vec<JoinHandle<()>>>,
-    /// The latest status from each friend, with when they sent it.
-    presence: SyncMutex<HashMap<String, (Status, i64)>>,
+    presence: SyncMutex<HashMap<String, Seen>>,
+    chat_store: ChatStore,
+    chat: SyncMutex<ChatLog>,
 }
 
 impl Social {
     pub fn new(dir: std::path::PathBuf) -> Self {
-        let store = SocialStore::new(dir);
+        let store = SocialStore::new(&dir);
         let data = store.load();
-        Self { store, data: SyncMutex::new(data), net: Mutex::new(None), tasks: SyncMutex::new(Vec::new()), presence: SyncMutex::new(HashMap::new()) }
+        let chat_store = ChatStore::new(&dir);
+        let chat = chat_store.load();
+        Self {
+            store,
+            data: SyncMutex::new(data),
+            net: Mutex::new(None),
+            tasks: SyncMutex::new(Vec::new()),
+            presence: SyncMutex::new(HashMap::new()),
+            chat_store,
+            chat: SyncMutex::new(chat),
+        }
+    }
+
+    /// Changes the chat log and saves it.
+    fn chat<T>(&self, change: impl FnOnce(&mut ChatLog) -> T) -> T {
+        let mut log = self.chat.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = change(&mut log);
+        let _ = self.chat_store.save(&log);
+        result
     }
 
     fn data(&self) -> std::sync::MutexGuard<'_, SocialData> {
@@ -80,11 +104,16 @@ fn profile(app: &AppHandle, data: &SocialData) -> Profile {
     profile
 }
 
+/// A friend's name, or a short form of their code.
+pub(crate) fn friend_name(app: &AppHandle, code: &str) -> String {
+    app.state::<Social>().data().friends.iter().find(|friend| friend.code == code).map_or_else(|| social::short_code(code), |friend| friend.profile.name.clone())
+}
+
 async fn net(app: &AppHandle) -> Option<Arc<Net>> {
     app.state::<Social>().net.lock().await.clone()
 }
 
-async fn send(app: &AppHandle, code: &str, message: &Message) -> Result<(), String> {
+pub(crate) async fn send(app: &AppHandle, code: &str, message: &Message) -> Result<(), String> {
     let net = net(app).await.ok_or("Friends is off.")?;
     let to = social::parse_code(code).map_err(|error| error.to_string())?;
     net.send(&to, message).await.map_err(|error| format!("Couldn't reach the relays: {error}"))
@@ -124,21 +153,22 @@ fn my_status(app: &AppHandle, share: bool) -> Status {
     Status::Playing { label: instance.as_ref().map(instance_label), world: world_name, since }
 }
 
-/// Tells every friend what we're up to.
+/// Tells every friend what we're up to, and which of our servers they can join.
 pub async fn announce(app: &AppHandle) {
     let Some(net) = net(app).await else {
         return;
     };
-    let (friends, message) = {
+    let (friends, profile, status) = {
         let social = app.state::<Social>();
         let data = social.data();
         let status = my_status(app, data.share_activity);
         let friends: Vec<String> = data.friends.iter().map(|friend| friend.code.clone()).collect();
-        (friends, Message::Presence { profile: profile(app, &data), status })
+        (friends, profile(app, &data), status)
     };
     for code in friends {
+        let hosting = crate::hosting::cards_for(app, &code);
         if let Ok(to) = social::parse_code(&code) {
-            let _ = net.send(&to, &message).await;
+            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: status.clone(), hosting }).await;
         }
     }
 }
@@ -170,6 +200,15 @@ async fn handle(app: &AppHandle, received: Received) {
     let now = now_ms();
     // A message's own time, for presence; never in the future.
     let at = received.at.min(now);
+    // Asking to join and answering only count while someone's waiting on them.
+    if matches!(received.message, Message::JoinRequest { .. } | Message::JoinAnswer { .. }) && now - at > social::JOIN_FRESH_MS {
+        return;
+    }
+    let hosting = match &received.message {
+        Message::Presence { hosting, .. } => hosting.clone(),
+        _ => Vec::new(),
+    };
+    let message_id = received.id.clone();
     let is_presence = matches!(received.message, Message::Presence { .. });
     let applied = {
         let me = social.my_code();
@@ -205,7 +244,7 @@ async fn handle(app: &AppHandle, received: Received) {
         Applied::Presence { code, status } => {
             // Old news (a message that sat on a relay) still updates "last seen", not the status.
             if now - at < social::PRESENCE_TTL_MS {
-                social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code, (status, at));
+                social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code, (status, hosting, at));
             }
             None
         }
@@ -216,6 +255,25 @@ async fn handle(app: &AppHandle, received: Received) {
         }
         Applied::PartyUpdated => None,
         Applied::PartyEnded => notice("The party ended", None),
+        Applied::ServerInvited { from, server } => notice(format!("{} invited you to {server}", name_of(&from)), Some("Join it from the Friends page.".into())),
+        Applied::JoinRequested { from, server_id, session, offer, player } => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { crate::hosting::answer_join(&app, from, server_id, session, offer, player).await });
+            None
+        }
+        Applied::JoinAnswered { session, offer, server, error, .. } => {
+            crate::hosting::answered(app, &session, crate::hosting::Answer { offer, server, error });
+            None
+        }
+        Applied::Chat { from, conversation, text } => {
+            let shown = format!("{}: {}", name_of(&from), text.lines().next().unwrap_or_default());
+            let added = social.chat(|log| log.add(&conversation, ChatMessage { id: message_id, from, text, at }));
+            if !added {
+                return;
+            }
+            let _ = app.emit(CHAT_EVENT, conversation);
+            notice(shown.chars().take(120).collect::<String>(), None)
+        }
     };
     notify(app, shown);
 }
@@ -288,7 +346,7 @@ pub async fn stop(app: &AppHandle) {
     };
     for code in friends {
         if let Ok(to) = social::parse_code(&code) {
-            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: Status::Offline }).await;
+            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: Status::Offline, hosting: Vec::new() }).await;
         }
     }
     for task in social.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain(..) {
@@ -306,6 +364,19 @@ pub struct FriendView {
     #[serde(flatten)]
     friend: Friend,
     status: Status,
+    /// Their servers we can join right now.
+    hosting: Vec<ServerCard>,
+    /// Chat messages from them not read yet.
+    unread: usize,
+}
+
+/// A conversation as the list shows it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSummary {
+    conversation: String,
+    unread: usize,
+    last: Option<ChatMessage>,
 }
 
 #[derive(Serialize)]
@@ -343,13 +414,28 @@ pub struct SocialView {
     outgoing: Vec<FriendRequest>,
     party: Option<PartyView>,
     invites: Vec<PartyInvite>,
+    server_invites: Vec<ServerInvite>,
+    /// The party's chat, when there's a party.
+    party_chat: Option<ChatSummary>,
 }
 
 fn status_of(social: &Social, code: &str, now: i64) -> Status {
     match social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(code) {
-        Some((status, at)) if now - at < social::PRESENCE_TTL_MS => status.clone(),
+        Some((status, _, at)) if now - at < social::PRESENCE_TTL_MS => status.clone(),
         _ => Status::Offline,
     }
+}
+
+fn hosting_of(social: &Social, code: &str, now: i64) -> Vec<ServerCard> {
+    match social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(code) {
+        Some((_, hosting, at)) if now - at < social::PRESENCE_TTL_MS => hosting.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn summary(social: &Social, conversation: &str, me: &str) -> ChatSummary {
+    let log = social.chat.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    ChatSummary { conversation: conversation.to_string(), unread: log.unread(conversation, me), last: log.messages(conversation).last().cloned() }
 }
 
 async fn view(app: &AppHandle) -> SocialView {
@@ -363,13 +449,23 @@ async fn view(app: &AppHandle) -> SocialView {
     let data = social.data().clone();
     let mine = profile(app, &data);
     let my_status = my_status(app, data.share_activity);
-    let mut friends: Vec<FriendView> = data.friends.iter().map(|friend| FriendView { status: status_of(&social, &friend.code, now), friend: friend.clone() }).collect();
-    // Playing first, then online, then the rest by when they were last around.
+    let mut friends: Vec<FriendView> = data
+        .friends
+        .iter()
+        .map(|friend| FriendView {
+            status: status_of(&social, &friend.code, now),
+            hosting: hosting_of(&social, &friend.code, now),
+            unread: summary(&social, &format!("friend:{}", friend.code), &me).unread,
+            friend: friend.clone(),
+        })
+        .collect();
+    // Hosting first, then playing, then online, then the rest by when they were last around.
     friends.sort_by_key(|view| {
         let rank = match view.status {
-            Status::Playing { .. } => 0,
-            Status::Online => 1,
-            Status::Offline => 2,
+            _ if !view.hosting.is_empty() => 0,
+            Status::Playing { .. } => 1,
+            Status::Online => 2,
+            Status::Offline => 3,
         };
         (rank, std::cmp::Reverse(view.friend.last_seen.unwrap_or(0)))
     });
@@ -398,14 +494,16 @@ async fn view(app: &AppHandle) -> SocialView {
         enabled: data.enabled,
         relays_connected: connected,
         relays: data.relays.clone(),
-        code: me,
+        code: me.clone(),
         profile: mine,
         share_activity: data.share_activity,
         friends,
         incoming: data.incoming.clone(),
         outgoing: data.outgoing.clone(),
+        party_chat: party.as_ref().map(|party| summary(&social, &format!("party:{}", party.party.id), &me)),
         party,
         invites: data.invites.clone(),
+        server_invites: data.server_invites.clone(),
     }
 }
 
@@ -480,6 +578,7 @@ pub async fn decline_friend(code: String, app: AppHandle, social: State<'_, Soci
 pub async fn remove_friend(code: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
     social.change(|data| data.remove(&code));
     social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&code);
+    social.chat(|log| log.forget(&format!("friend:{code}")));
     let _ = send(&app, &code, &Message::Remove).await;
     Ok(view(&app).await)
 }
@@ -541,4 +640,62 @@ async fn leave(app: &AppHandle) {
 pub async fn leave_party(app: AppHandle) -> Result<SocialView, String> {
     leave(&app).await;
     Ok(view(&app).await)
+}
+
+#[tauri::command]
+pub async fn decline_server_invite(from: String, server_id: String, app: AppHandle, social: State<'_, Social>) -> Result<SocialView, String> {
+    social.change(|data| data.server_invites.retain(|invite| !(invite.from == from && invite.server.id == server_id)));
+    Ok(view(&app).await)
+}
+
+/// Who a conversation goes to: a friend, or everyone else in our party.
+fn recipients(social: &Social, conversation: &str, me: &str) -> Result<(Vec<String>, Option<String>), String> {
+    if let Some(code) = conversation.strip_prefix("friend:") {
+        if !social.data().is_friend(code) {
+            return Err("You aren't friends with them anymore.".into());
+        }
+        return Ok((vec![code.to_string()], None));
+    }
+    if let Some(party_id) = conversation.strip_prefix("party:") {
+        let party = social.data().party.clone().filter(|party| party.id == party_id).ok_or("That party is over.")?;
+        return Ok((party.members.into_iter().filter(|member| member != me).collect(), Some(party.id)));
+    }
+    Err("There's no such conversation.".into())
+}
+
+/// A conversation's messages, oldest first. Reading it marks it read.
+#[tauri::command]
+pub async fn get_chat(conversation: String, social: State<'_, Social>) -> Result<Vec<ChatMessage>, String> {
+    Ok(social.chat(|log| {
+        log.mark_read(&conversation, now_ms());
+        log.messages(&conversation).to_vec()
+    }))
+}
+
+#[tauri::command]
+pub async fn send_chat(conversation: String, text: String, app: AppHandle, social: State<'_, Social>) -> Result<Vec<ChatMessage>, String> {
+    let text = social::clean_chat(&text);
+    if text.is_empty() {
+        return Err("Write something first.".into());
+    }
+    let me = social.my_code();
+    let (to, party_id) = recipients(&social, &conversation, &me)?;
+    let message = Message::Chat { party_id, text: text.clone() };
+    let mut delivered = 0;
+    let mut failure = None;
+    for code in &to {
+        match send(&app, code, &message).await {
+            Ok(()) => delivered += 1,
+            Err(error) => failure = Some(error),
+        }
+    }
+    if delivered == 0 && let Some(error) = failure {
+        return Err(error);
+    }
+    let now = now_ms();
+    Ok(social.chat(|log| {
+        log.add(&conversation, ChatMessage { id: wisp_core::journal::new_id(now), from: me, text, at: now });
+        log.mark_read(&conversation, now);
+        log.messages(&conversation).to_vec()
+    }))
 }

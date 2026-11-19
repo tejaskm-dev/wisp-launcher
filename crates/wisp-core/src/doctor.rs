@@ -68,6 +68,9 @@ pub struct ModInfo {
     pub loaders: Vec<Platform>,
     /// Mods it can't run without, from each loader's metadata in it.
     pub requires: Vec<Requirement>,
+    /// It says it only runs in the game, never on a server (Fabric's and Quilt's "environment":
+    /// "client", Forge's `clientSideOnly`).
+    pub client_only: bool,
 }
 
 /// A mod a jar can't run without, as one loader's metadata in it says.
@@ -279,6 +282,9 @@ fn read_fabric(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<St
         return;
     }
     info.loaders.push(Platform::Fabric);
+    if text_at(&value, "environment") == "client" {
+        info.client_only = true;
+    }
     if info.id.is_empty() {
         info.id = id;
     }
@@ -307,6 +313,9 @@ fn read_quilt(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<Str
     let Some(loader) = value.get("quilt_loader") else {
         return;
     };
+    if depth == 0 && value.get("minecraft").map(|minecraft| text_at(minecraft, "environment")) == Some("client") {
+        info.client_only = true;
+    }
     let id = text_at(loader, "id").to_string();
     if !id.is_empty() {
         info.provides.push(id.clone());
@@ -369,6 +378,9 @@ fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) 
     info.provides.extend(ids.iter().cloned());
     if depth > 0 {
         return;
+    }
+    if table.get("clientSideOnly").and_then(toml::Value::as_bool) == Some(true) {
+        info.client_only = true;
     }
     let dependencies = table.get("dependencies").and_then(toml::Value::as_table);
     // NeoForge for 1.20.1 to 1.20.4 used mods.toml too; requiring "neoforge" gives it away. A jar
@@ -1635,6 +1647,7 @@ mod tests {
             provides: vec![id.into()],
             loaders: loaders.to_vec(),
             requires: requires.iter().map(|(id, range)| Requirement { id: id.to_string(), versions: range.to_string(), platform: loaders.first().copied().unwrap_or(Platform::Fabric) }).collect(),
+            client_only: false,
         }
     }
 

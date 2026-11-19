@@ -56,9 +56,20 @@ pub async fn run(java: &Path, installer: &Path, data_dir: &Path) -> Result<(), L
     if !profiles.exists() {
         std::fs::write(&profiles, br#"{"profiles":{}}"#)?;
     }
+    run_with(java, installer, data_dir, &["--installClient", "--install-client"]).await
+}
+
+/// Runs the installer headlessly to set up a server in `server_dir` (its libraries, the vanilla
+/// server, and the files that start it).
+pub async fn run_server(java: &Path, installer: &Path, server_dir: &Path) -> Result<(), LaunchError> {
+    run_with(java, installer, server_dir, &["--installServer", "--install-server"]).await
+}
+
+async fn run_with(java: &Path, installer: &Path, data_dir: &Path, options: &[&str]) -> Result<(), LaunchError> {
     let work_dir = installer.parent().unwrap_or(data_dir);
-    // Forge spells the option --installClient; some NeoForge installers use --install-client.
-    for option in ["--installClient", "--install-client"] {
+    // Forge spells the options --installClient and --installServer; some NeoForge installers use
+    // --install-client and --install-server.
+    for option in options {
         let mut command = tokio::process::Command::new(java);
         command
             .arg("-jar")
@@ -93,7 +104,7 @@ pub async fn run(java: &Path, installer: &Path, data_dir: &Path) -> Result<(), L
         return Err(LaunchError::Installer(tail.join(" · ")));
     }
     Err(LaunchError::Installer(
-        "the installer didn't accept the client install option".into(),
+        "the installer didn't accept the install option".into(),
     ))
 }
 

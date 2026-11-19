@@ -47,7 +47,7 @@ async fn main() {
     println!("alice got {:?}", accept.message);
 
     let status = Status::Playing { label: Some("Fabric 26.3".into()), world: Some("Island".into()), since: 0 };
-    b.send(&alice.public_key(), &Message::Presence { profile: profile("Bob"), status }).await.expect("bob shares presence");
+    b.send(&alice.public_key(), &Message::Presence { profile: profile("Bob"), status, hosting: vec![] }).await.expect("bob shares presence");
     let presence = next_message(&alice, &mut a_events).await;
     println!("alice got {:?}", presence.message);
 

@@ -807,6 +807,12 @@ pub struct ProjectSummary {
     /// Modrinth's categories ("library", "optimization", ...).
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Where it runs: "required", "optional", "unsupported" or "unknown" in the game and on a
+    /// server.
+    #[serde(default, alias = "client_side")]
+    pub client_side: String,
+    #[serde(default, alias = "server_side")]
+    pub server_side: String,
 }
 
 pub async fn projects(client: &HttpClient, ids: &[String]) -> Result<Vec<ProjectSummary>, Error> {
