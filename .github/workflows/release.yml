@@ -9,8 +9,13 @@ name: Release
 # doesn't pay for all six again (macOS minutes count ten times on private repositories).
 #
 # Tick "tester" for a tester build: offline accounts on (for a closed group who own Minecraft,
-# until Microsoft sign-in is approved), no self-updating (a public release would take offline
-# accounts away again), and never released.
+# until Microsoft sign-in is approved), and never released. Its installers are kept as artifacts
+# for a first install. After that, tester builds update themselves from a feed of their own
+# (tester.json, beside latest.json), never the public one (which would take offline accounts away
+# again). The feed's files are locked with a tester code that only tester builds hold (and show,
+# so their owner can invite people; pasting it into any other copy of Wisp switches that copy to
+# tester builds); see scripts/tester-updates.mjs. Each tester build is numbered by its run, as in
+# 0.1.8+145.
 
 on:
   push:
@@ -22,7 +27,7 @@ on:
         required: false
         default: ""
       tester:
-        description: "Tester build: offline accounts on, no self-updating, never released. Only for people who own Minecraft."
+        description: "Tester build: offline accounts on, never released, updates installed tester builds. Only for people who own Minecraft."
         type: boolean
         required: false
         default: false
@@ -120,16 +125,30 @@ jobs:
       # TAURI_SIGNING_PRIVATE_KEY_PASSWORD, builds are signed and the release gets a latest.json
       # that installed copies check. Without them, builds are made as before and don't update.
       - name: Turn on updates
-        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && !inputs.tester
+        if: vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
         shell: bash
         env:
           PUBKEY: ${{ vars.WISP_UPDATER_PUBKEY }}
           URL: ${{ vars.WISP_UPDATES_URL }}
+          TESTER: ${{ inputs.tester && '1' || '' }}
+          RUN: ${{ github.run_number }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           # Pasted values often carry a trailing newline, which would break the JSON.
           PUBKEY=$(printf '%s' "$PUBKEY" | tr -d '[:space:]')
           URL=$(printf '%s' "$URL" | tr -d '[:space:]')
-          printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["%s"]}}}' "$PUBKEY" "$URL" > src-tauri/tauri.updates.conf.json
+          if [ "$TESTER" = "1" ]; then
+            # A tester build: numbered by this run, looking at the tester feed, and holding the
+            # tester code its updates are locked with (masked: the logs are public).
+            VERSION="$(node -p "require('./package.json').version")+$RUN"
+            CODE=$(node scripts/tester-updates.mjs code)
+            echo "::add-mask::$CODE"
+            echo "WISP_TESTER_CODE=$CODE" >> "$GITHUB_ENV"
+            echo "VITE_WISP_TESTER_BUILD=$RUN" >> "$GITHUB_ENV"
+            printf '{"version":"%s","bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["%s"]}}}' "$VERSION" "$PUBKEY" "${URL%/*}/tester.json" > src-tauri/tauri.updates.conf.json
+          else
+            printf '{"bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["%s"]}}}' "$PUBKEY" "$URL" > src-tauri/tauri.updates.conf.json
+          fi
 
       - name: Build
         uses: tauri-apps/tauri-action@v0
@@ -142,7 +161,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: pnpm tauri
-          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && !inputs.tester && ' --config src-tauri/tauri.updates.conf.json' || '' }}
+          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && ' --config src-tauri/tauri.updates.conf.json' || '' }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Wisp {0}', github.ref_name) || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}
@@ -163,6 +182,63 @@ jobs:
             target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
             target/${{ matrix.target }}/release/bundle/deb/*.deb
             target/${{ matrix.target }}/release/bundle/rpm/*.rpm
+
+      # Tester builds: this system's signed update files, locked for the tester feed (which the
+      # tester-feed job publishes once every build has passed).
+      - name: Lock the tester update
+        if: inputs.tester && vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+        shell: bash
+        run: node scripts/tester-updates.mjs pack "target/${{ matrix.target }}/release/bundle" tester-update "${{ matrix.name }}" "${{ github.run_number }}"
+
+      - name: Keep the tester update for the feed
+        if: inputs.tester && vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tester-update-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 1
+          path: tester-update/
+
+  # Installed tester builds look in releases/download/updater/tester.json. Only locked files go
+  # there; the previous tester build's files are removed once the new feed is up. Only a run that
+  # built every system replaces the feed, so no tester is left without an update for theirs.
+  tester-feed:
+    name: Publish the tester update
+    needs: build
+    if: inputs.tester && inputs.builds == '' && vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 40
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tester-update-*
+          path: tester-update
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL: ${{ vars.WISP_UPDATES_URL }}
+          RUN: ${{ github.run_number }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          URL=$(printf '%s' "$URL" | tr -d '[:space:]')
+          # The feed carries a check on the tester code (never the code), for codes pasted into Wisp.
+          WISP_TESTER_CODE=$(node scripts/tester-updates.mjs code)
+          echo "::add-mask::$WISP_TESTER_CODE"
+          export WISP_TESTER_CODE
+          VERSION="$(node -p "require('./package.json').version")+$RUN"
+          { echo "### What's new"; echo; git log --no-merges --format='- %s' -n 6; } > tester-notes.md
+          node scripts/tester-updates.mjs feed tester-update "$VERSION" "${URL%/*}" tester-notes.md > tester.json
+          # The files first, then the feed that points at them, then the old files.
+          gh release upload updater tester-update/*.bin --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload updater tester.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view updater --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq ".assets[].name | select(startswith(\"tester-\") and (startswith(\"tester-$RUN-\") | not))" \
+            | while read -r old; do gh release delete-asset updater "$old" --repo "$GITHUB_REPOSITORY" --yes; done
 
   publish:
     name: Publish the release

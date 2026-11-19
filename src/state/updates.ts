@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
-import { isDesktop } from "../data/api";
+import { isDesktop, testerBuild } from "../data/api";
 
 /**
  * Wisp updating itself: release builds check for a new version now and then, offer it, and
@@ -46,7 +46,8 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : St
 /** In the browser preview, `?update=available` shows the update window (the desktop app never does this). */
 function previewUpdate(): boolean {
   if (isDesktop || typeof location === "undefined" || new URLSearchParams(location.search).get("update") !== "available") return false;
-  set({ phase: "available", version: "0.1.9", notes: "### What's new\n\n- **Instance pages**: every instance has its own page.\n- **Fixed**: something that was broken.", later: false });
+  const version = testerBuild ? "0.1.8+145" : "0.1.9";
+  set({ phase: "available", version, notes: "### What's new\n\n- **Instance pages**: every instance has its own page.\n- **Fixed**: something that was broken.", later: false });
   return true;
 }
 
@@ -80,11 +81,19 @@ export async function installUpdate() {
   let total: number | null = null;
   set({ phase: "downloading", version, done, total });
   try {
-    await update.downloadAndInstall((event) => {
-      if (event.event === "Started") total = event.data.contentLength ?? null;
-      else if (event.event === "Progress") done += event.data.chunkLength;
-      set({ phase: "downloading", version, done, total });
-    });
+    if (testerBuild) {
+      // Tester updates arrive locked; Wisp's own side unlocks them before the updater checks and
+      // installs them (src-tauri/src/tester_updates.rs).
+      const onProgress = new Channel<{ done: number; total: number | null }>();
+      onProgress.onmessage = (progress) => set({ phase: "downloading", version, done: progress.done, total: progress.total });
+      await invoke("install_tester_update", { onProgress });
+    } else {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") total = event.data.contentLength ?? null;
+        else if (event.event === "Progress") done += event.data.chunkLength;
+        set({ phase: "downloading", version, done, total });
+      });
+    }
     set({ phase: "restarting", version });
     const { relaunch } = await import("@tauri-apps/plugin-process");
     await relaunch();

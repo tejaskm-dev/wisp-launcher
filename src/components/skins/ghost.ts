@@ -6,6 +6,7 @@
 // tails, and the ember sparkle from Wisp's logo floating at its shoulder.
 
 import { BoxGeometry, Color, Group, Mesh, MeshBasicMaterial, Vector3, type Material, type Texture } from "three";
+import { crouchedAt } from "./emotes";
 import { box, halo, paint } from "./voxel";
 
 type Mood = "hover" | "wander" | "orbit" | "peek" | "boop" | "perch" | "spin";
@@ -235,7 +236,7 @@ export class WispGhost {
         break;
       case "crouch":
         // Bobbing back: the Minecraft hello, returned.
-        goal.set(28, 2 + (0.5 + 0.5 * Math.tanh(Math.sin(playmate.since * 15) * 5)) * -6 + 8, 8);
+        goal.set(28, crouchedAt(playmate.since) ? 4 : 10, 8);
         faceTarget = playmate.camera;
         break;
       default: {

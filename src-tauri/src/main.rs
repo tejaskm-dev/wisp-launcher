@@ -12,6 +12,7 @@ mod shared_options;
 mod skins;
 mod social;
 mod sync;
+mod tester_updates;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1725,10 +1726,26 @@ fn main() {
             sync::bring_sync_item,
             sync::remove_sync_item,
             sync::check_launch,
-            sync::open_sync_folder
+            sync::open_sync_folder,
+            tester_updates::install_tester_update,
+            tester_updates::get_tester_code,
+            tester_updates::join_tester_builds
         ]);
     let builder = if updates {
-        builder.plugin(tauri_plugin_updater::Builder::new().build())
+        let updater = tauri_plugin_updater::Builder::new();
+        // Tester builds count their build numbers too: 0.1.8+145 follows 0.1.8+144.
+        let updater = if tester_updates::on() {
+            updater.default_version_comparator(|current, release| {
+                let offered = &release.version;
+                tester_updates::newer(
+                    (current.major, current.minor, current.patch, current.build.as_str()),
+                    (offered.major, offered.minor, offered.patch, offered.build.as_str()),
+                )
+            })
+        } else {
+            updater
+        };
+        builder.plugin(updater.build())
     } else {
         builder
     };

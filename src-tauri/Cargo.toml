@@ -9,6 +9,9 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Already built for TLS; tester updates (tester_updates.rs) use its AES-GCM and HKDF. Same
+# features, so nothing new compiles.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.22"
 serde = { version = "1.0.229", features = ["derive"] }
 # The release config (with the updater's settings) makes generate_context! embed JSON.

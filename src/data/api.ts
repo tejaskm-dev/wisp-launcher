@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -348,10 +348,41 @@ export function onLaunchEvent(handler: (event: LaunchEvent) => void): () => void
 }
 
 /**
- * A tester build: made for a closed group of people who own Minecraft, with offline accounts on
- * and no self-updating (a public release would take offline accounts away). Never released.
+ * A tester build: made for a closed group of people who own Minecraft, with offline accounts on.
+ * Never released. It updates from a tester channel of its own, never from the public one (which
+ * would take offline accounts away).
  */
 export const testerBuild = import.meta.env.VITE_WISP_TESTER === "1";
+/** This tester build's number, when it has one (tester builds made before tester updates don't). */
+export const testerBuildNumber = testerBuild ? (import.meta.env.VITE_WISP_TESTER_BUILD ?? null) : null;
+
+/** This tester build's code, to invite someone with; null outside tester builds. */
+export const getTesterCode = () => call<string | null>("get_tester_code", undefined, (p) => p.testerCode());
+
+/** Whether text could be a tester code: WISP- (or not) and 24 letters and digits, dashes anywhere. */
+export function looksLikeTesterCode(text: string): boolean {
+  let symbols = text.toUpperCase().replace(/[^0-9A-Z]/g, "");
+  if (symbols.length === 28 && symbols.startsWith("WISP")) symbols = symbols.slice(4);
+  return /^[0-9A-TV-Z]{24}$/.test(symbols);
+}
+
+/**
+ * Switches this copy of Wisp to tester builds with a tester code: the code is checked against the
+ * tester feed, then the newest tester build downloads and installs in this one's place. Wisp has to
+ * restart after; on Windows the installer does that itself.
+ */
+export function joinTesterBuilds(code: string, onProgress: (done: number, total: number | null) => void): Promise<void> {
+  if (!isDesktop) return browserPreview().then((p) => p.joinTesterBuilds(code, onProgress));
+  const channel = new Channel<{ done: number; total: number | null }>();
+  channel.onmessage = (progress) => onProgress(progress.done, progress.total);
+  return invoke<void>("join_tester_builds", { code, onProgress: channel });
+}
+
+/** How a version reads to people: "0.1.9", or "tester build 145" for a tester build's "0.1.8+145". */
+export function versionLabel(version: string): string {
+  const build = /\+(\d+)$/.exec(version);
+  return testerBuild && build ? `tester build ${build[1]}` : version;
+}
 /** Developer and tester builds can make offline accounts; public releases need Microsoft sign-in. */
 export const canAddOfflineAccounts = import.meta.env.DEV || testerBuild;
 

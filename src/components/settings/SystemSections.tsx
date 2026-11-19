@@ -1,6 +1,6 @@
-import { ArrowUpCircle, Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
-import { useState } from "react";
-import { clearCache, getDataFolder, getStorageUsage, openDataFolder, testerBuild, openExternal } from "../../data/api";
+import { ArrowUpCircle, Check, Copy, Download, Eraser, FolderOpen, HardDrive, Info, KeyRound, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
+import { useId, useState } from "react";
+import { clearCache, getDataFolder, getStorageUsage, getTesterCode, isDesktop, joinTesterBuilds, looksLikeTesterCode, openDataFolder, openExternal, testerBuild, testerBuildNumber, versionLabel } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
 import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
@@ -11,6 +11,7 @@ import { Ghost } from "../brand/Ghost";
 import { Button } from "../ui/Button";
 import { Dialog } from "../ui/Dialog";
 import { Panel } from "../ui/Page";
+import { ProgressBar } from "../ui/ProgressBar";
 import { Loading, Skeleton } from "../ui/Skeleton";
 import { Slider } from "../ui/Slider";
 import { Toggle } from "../ui/Toggle";
@@ -171,9 +172,18 @@ export function AboutSection({ settings, update }: SectionProps) {
           <div className="text-[13px] leading-relaxed text-mute">
             <p className="text-[15px] font-bold text-cream">
               Wisp {__APP_VERSION__}
-              {testerBuild && <span className="ml-2 rounded-full bg-ember/15 px-2 py-0.5 align-middle text-[11px] font-bold text-ember-soft">Tester build</span>}
+              {testerBuild && (
+                <span className="ml-2 rounded-full bg-ember/15 px-2 py-0.5 align-middle text-[11px] font-bold text-ember-soft">
+                  {testerBuildNumber ? `Tester build ${testerBuildNumber}` : "Tester build"}
+                </span>
+              )}
             </p>
-            {testerBuild && <p>Made for testers who own Minecraft: offline accounts are on and it doesn't update itself. Please don't share it.</p>}
+            {testerBuild && (
+              <p>
+                Made for testers who own Minecraft: offline accounts are on.{" "}
+                {testerBuildNumber ? "New tester builds arrive by themselves, like any update." : "It doesn't update itself."} Keep it between testers.
+              </p>
+            )}
             <p>A Minecraft: Java Edition launcher that keeps your worlds on every computer.</p>
             <p className="mt-1 text-mute-2">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
             <p className="mt-1 text-mute-2">
@@ -185,6 +195,7 @@ export function AboutSection({ settings, update }: SectionProps) {
           </div>
         </div>
         <UpdateRow />
+        {testerBuild ? <InviteTesterRow /> : <JoinTesterRow />}
       </Panel>
 
       <Panel title="Start over" icon={<RotateCcw size={19} aria-hidden="true" />}>
@@ -225,16 +236,20 @@ function UpdateRow() {
       : update.phase === "checking"
         ? "Looking for a newer Wisp…"
         : update.phase === "available"
-          ? `Wisp ${update.version} is ready to install.`
+          ? `Wisp ${versionLabel(update.version)} is ready to install.`
           : update.phase === "downloading"
-            ? `Downloading Wisp ${update.version}…`
+            ? `Downloading Wisp ${versionLabel(update.version)}…`
             : update.phase === "restarting"
               ? "Restarting on the new version…"
               : update.phase === "failed"
                 ? `Couldn't check: ${update.message}`
                 : update.checkedAt
-                  ? "You have the newest Wisp."
-                  : "Wisp looks for new versions on its own every few hours.";
+                  ? testerBuild
+                    ? "You have the newest tester build."
+                    : "You have the newest Wisp."
+                  : testerBuild
+                    ? "Wisp looks for new tester builds on its own every few hours."
+                    : "Wisp looks for new versions on its own every few hours.";
   return (
     <Row label="Updates" description={description}>
       {update.phase === "available" ? (
@@ -245,6 +260,99 @@ function UpdateRow() {
         <Button variant="secondary" icon={RefreshCw} disabled={update.phase === "off" || update.phase === "checking" || update.phase === "downloading" || update.phase === "restarting"} onClick={() => void checkForUpdate()}>
           Check now
         </Button>
+      )}
+    </Row>
+  );
+}
+
+/** A tester build's own code, to invite a friend with: pasted into their Wisp, it switches it over. */
+function InviteTesterRow() {
+  const [code] = useResource(getTesterCode);
+  const [copied, setCopied] = useState(false);
+  if (code.status !== "ready" || !code.data) return null;
+  const value = code.data;
+  const copy = async () => {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <Row label="Invite a tester" description="Send this code to a friend who owns Minecraft. Pasted into Settings, About in their Wisp, it switches their copy to tester builds too." stacked>
+      <div className="flex max-w-md items-center gap-2 rounded-xl bg-ink-900/60 py-1.5 pl-3.5 pr-1.5">
+        <code className="min-w-0 flex-1 truncate font-mono text-[13px] tracking-wide text-cream-300" title={value}>
+          {value}
+        </code>
+        <button type="button" onClick={() => void copy()} className="flex h-8 items-center gap-1.5 rounded-lg bg-cream px-3 text-xs font-bold text-ink-900">
+          {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </Row>
+  );
+}
+
+type Joining = { phase: "idle"; error: string | null } | { phase: "checking" } | { phase: "downloading"; done: number; total: number | null } | { phase: "restarting" };
+
+/** Any copy of Wisp that updates itself becomes a tester build with a tester code. */
+function JoinTesterRow() {
+  const update = useUpdate();
+  const id = useId();
+  const [code, setCode] = useState("");
+  const [joining, setJoining] = useState<Joining>({ phase: "idle", error: null });
+  if (update.phase === "off") return null;
+  const busy = joining.phase !== "idle";
+  const ready = looksLikeTesterCode(code);
+  const join = async () => {
+    setJoining({ phase: "checking" });
+    try {
+      await joinTesterBuilds(code, (done, total) => setJoining({ phase: "downloading", done, total }));
+      setJoining({ phase: "restarting" });
+      // On Windows the installer has already closed Wisp and starts it again itself.
+      if (isDesktop) {
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      }
+    } catch (error) {
+      setJoining({ phase: "idle", error: failure(error) });
+    }
+  };
+  const label = joining.phase === "checking" ? "Checking the code…" : joining.phase === "downloading" ? "Downloading…" : joining.phase === "restarting" ? "Restarting…" : "Switch to tester builds";
+  return (
+    <Row label="Tester builds" description="Got a tester code from a friend? Paste it to switch this Wisp to tester builds: offline accounts on, and each new tester build as it comes out. Only for people who own Minecraft." stacked>
+      <form
+        className="flex max-w-xl flex-wrap items-center gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (ready && !busy) void join();
+        }}
+      >
+        <label htmlFor={id} className="sr-only">
+          Tester code
+        </label>
+        <input
+          id={id}
+          value={code}
+          disabled={busy}
+          placeholder="WISP-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
+          spellCheck={false}
+          autoCapitalize="characters"
+          autoCorrect="off"
+          autoComplete="off"
+          onChange={(event) => {
+            setCode(event.target.value);
+            if (joining.phase === "idle" && joining.error) setJoining({ phase: "idle", error: null });
+          }}
+          className="h-11 min-w-0 flex-1 basis-64 rounded-xl border border-cream/12 bg-ink-900/60 px-3.5 font-mono text-[13px] tracking-wide text-cream placeholder:text-mute-2 transition-colors hover:border-cream/25 focus:border-cream/40 focus:outline-none disabled:opacity-60"
+        />
+        <Button type="submit" icon={busy ? LoaderCircle : KeyRound} disabled={!ready || busy} className={busy ? "[&>svg]:animate-spin" : undefined}>
+          {label}
+        </Button>
+      </form>
+      {joining.phase === "downloading" && <ProgressBar value={joining.total ? joining.done / joining.total : null} label="Downloading the tester build" className="max-w-xl" />}
+      {joining.phase === "idle" && joining.error && (
+        <p role="alert" className="text-[13px] font-semibold text-coral">
+          {joining.error}
+        </p>
       )}
     </Row>
   );
