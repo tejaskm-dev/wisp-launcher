@@ -9,6 +9,7 @@ pub mod feeds;
 pub mod game_logs;
 pub mod game_options;
 pub mod home;
+pub mod hosting;
 pub mod imports;
 pub mod instances;
 pub mod inventory;
@@ -28,6 +29,7 @@ pub mod social;
 pub mod snapshots;
 pub mod storage;
 pub mod sync;
+pub mod tunnel;
 pub mod versions;
 pub mod worlds;
 

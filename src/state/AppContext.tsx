@@ -43,6 +43,10 @@ export interface AppContextValue {
   openWorld: (worldId: string) => void;
   /** Opens an instance's page, on one of its tabs. */
   openInstance: (instanceId: string, tab?: InstanceTab) => void;
+  /** Opens the page of a server hosted on this computer. */
+  openHosted: (serverId: string) => void;
+  /** Opens the "Host a server" dialog, starting from an instance (and one of its worlds) when given. */
+  hostServer: (from?: { instanceId?: string | null; world?: string | null }) => void;
   /** The instance Discover was last opened for (its page's Add), so installs offer it first. */
   discoverFor: string | null;
   openDiscoverFor: (instanceId: string) => void;

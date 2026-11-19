@@ -14,7 +14,8 @@ export type PageId =
   | "settings"
   | "project"
   | "world"
-  | "instance";
+  | "instance"
+  | "hosted";
 
 export interface Account {
   id: string;
@@ -316,6 +317,10 @@ export interface Friend {
   since: number;
   lastSeen: number | null;
   status: FriendStatus;
+  /** Their servers you can join right now. */
+  hosting: ServerCard[];
+  /** Chat messages from them you haven't read. */
+  unread: number;
 }
 
 export interface FriendRequest {
@@ -368,6 +373,180 @@ export interface SocialView {
   outgoing: FriendRequest[];
   party: PartyView | null;
   invites: PartyInvite[];
+  /** Invites to friends' servers. */
+  serverInvites: ServerInvite[];
+  /** The party's chat, when you're in a party. */
+  partyChat: ChatSummary | null;
+}
+
+/** A server a friend hosts, as you see it (crates/wisp-core/src/social.rs). */
+export interface ServerCard {
+  id: string;
+  name: string;
+  gameVersion: string;
+  /** "vanilla", "fabric", "quilt", "forge" or "neoforge". */
+  loader: string;
+  loaderVersion: string | null;
+  /** Up and taking players right now. */
+  online: boolean;
+  players: number;
+  maxPlayers: number;
+  /** How many mods joining brings along. */
+  mods: number;
+}
+
+export interface ServerInvite {
+  server: ServerCard;
+  /** Who invited you (their friend code). */
+  from: string;
+  at: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  /** The sender's friend code. */
+  from: string;
+  text: string;
+  at: number;
+}
+
+/** "party:<id>" or "friend:<code>". */
+export type Conversation = string;
+
+export interface ChatSummary {
+  conversation: Conversation;
+  unread: number;
+  last: ChatMessage | null;
+}
+
+/** What joining a friend's server is doing (src-tauri/src/hosting.rs). */
+export interface JoinProgress {
+  code: string;
+  serverId: string;
+  step: "asking" | "connecting" | "mods" | "launching" | "done" | "failed";
+  doneBytes: number;
+  totalBytes: number;
+  message: string | null;
+}
+
+// ── Servers hosted on this computer (src-tauri/src/hosting.rs) ──
+
+export type HostedState = "stopped" | "preparing" | "starting" | "running" | "stopping" | "crashed";
+
+export interface ServerExit {
+  code: number | null;
+  crashed: boolean;
+  /** Why, when the server said: it needs the EULA agreed to, or its port is taken. */
+  reason: "eula" | "port" | null;
+}
+
+/** How friends reach a server over the link between Wisps. */
+export interface LinkReach {
+  /** This computer's address as the internet sees it. */
+  public: string | null;
+  /** The router changes ports per destination: direct links rarely get through it. */
+  strictRouter: boolean;
+  /** The router opened a way in (UPnP). */
+  routerOpened: boolean;
+}
+
+export interface HostedServer {
+  id: string;
+  name: string;
+  gameVersion: string;
+  loader: Loader;
+  loaderVersion: string | null;
+  created: number;
+  lastStarted: number | null;
+  /** Its own memory in MB; absent when Wisp picks. */
+  memoryMb?: number;
+  /** The instance people play it with. */
+  instanceId?: string;
+  eula: boolean;
+  friendsJoin: boolean;
+  invited: string[];
+  openPort: boolean;
+  backups: boolean;
+  icon?: string;
+}
+
+export interface HostedView extends HostedServer {
+  state: HostedState;
+  /** Setting up: downloads and installers. */
+  progress: LaunchUpdate | null;
+  players: string[];
+  maxPlayers: number;
+  port: number;
+  lanAddress: string | null;
+  publicAddress: string | null;
+  startedAt: number | null;
+  readyAt: number | null;
+  exit: ServerExit | null;
+  failure: string | null;
+  effectiveMemoryMb: number;
+  automaticMemory: boolean;
+  modCount: number;
+  motd: string;
+  onlineMode: boolean;
+  whitelist: boolean;
+  worldExists: boolean;
+  instanceName: string | null;
+  /**
+   * How players sign in: Microsoft accounts checked by Mojang, accounts checked by Wisp's skin
+   * server (developer and tester builds, which play offline accounts), or nobody checked.
+   */
+  accounts: "mojang" | "wisp" | "offline";
+  /** Friends let in this run. */
+  friendsIn: string[];
+  reach: LinkReach | null;
+}
+
+export interface NewHostedServer {
+  name: string;
+  gameVersion: string;
+  loader: Loader;
+  loaderVersion: string | null;
+  instanceId: string | null;
+  world: { instanceId: string; folder: string } | null;
+  properties: [string, string][];
+  /** Ticked "I agree to the Minecraft EULA". */
+  eula: boolean;
+}
+
+export interface ServerChanges {
+  name?: string;
+  friendsJoin?: boolean;
+  openPort?: boolean;
+  backups?: boolean;
+  memoryMb?: number;
+  automaticMemory?: boolean;
+}
+
+export interface ConsoleLine {
+  at: number;
+  text: string;
+  level: "info" | "warn" | "error" | "input";
+}
+
+export type HostingChange =
+  | { serverId: string; kind: "changed" }
+  | { serverId: string; kind: "progress"; update: LaunchUpdate }
+  | { serverId: string; kind: "lines"; lines: ConsoleLine[] }
+  | { serverId: string; kind: "players"; players: string[] }
+  | { serverId: string; kind: "failed"; message: string };
+
+export type PlayerList = "whitelist" | "ops" | "banned";
+
+export interface PlayerEntry {
+  uuid: string;
+  name: string;
+}
+
+export interface ServerPlayers {
+  whitelist: PlayerEntry[];
+  ops: PlayerEntry[];
+  banned: PlayerEntry[];
+  online: string[];
 }
 
 export interface SocialNotice {

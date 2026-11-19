@@ -34,6 +34,12 @@ const NAME_LIMIT: usize = 32;
 const NOTE_LIMIT: usize = 200;
 const PARTY_LIMIT: usize = 12;
 const SEEN_LIMIT: usize = 2000;
+/// The longest chat message.
+pub const CHAT_TEXT_LIMIT: usize = 1000;
+/// Messages kept per conversation.
+const CHAT_KEPT: usize = 300;
+/// Asking to join and answering only count while fresh: an old one sitting on a relay is ignored.
+pub const JOIN_FRESH_MS: i64 = 2 * 60 * 1000;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -70,6 +76,52 @@ pub enum Status {
     Offline,
 }
 
+/// A server someone hosts, as friends see it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerCard {
+    pub id: String,
+    pub name: String,
+    pub game_version: String,
+    /// "vanilla", "fabric", "quilt", "forge" or "neoforge".
+    pub loader: String,
+    #[serde(default)]
+    pub loader_version: Option<String>,
+    /// Up and taking players right now.
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub players: u32,
+    #[serde(default)]
+    pub max_players: u32,
+    /// How many mods its instance has (friends who join get them).
+    #[serde(default)]
+    pub mods: u32,
+}
+
+impl ServerCard {
+    fn cleaned(mut self) -> Self {
+        self.name = self.name.trim().chars().filter(|c| !c.is_control()).take(48).collect();
+        if self.name.is_empty() {
+            self.name = "Server".into();
+        }
+        self.id = self.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(64).collect();
+        self.game_version = self.game_version.chars().filter(|c| !c.is_control()).take(32).collect();
+        self.loader = self.loader.chars().filter(char::is_ascii_lowercase).take(16).collect();
+        self.loader_version = self.loader_version.map(|version| version.chars().filter(|c| !c.is_control()).take(48).collect());
+        self
+    }
+}
+
+/// Who's asking to join, as Minecraft knows them (so the host can let them in by name).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Player {
+    pub name: String,
+    /// 32 hex digits.
+    pub uuid: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Party {
@@ -88,12 +140,45 @@ pub enum Message {
     Request { profile: Profile, note: Option<String> },
     Accept { profile: Profile },
     Remove,
-    Presence { profile: Profile, status: Status },
+    Presence {
+        profile: Profile,
+        status: Status,
+        /// Servers they host that friends can join right now.
+        #[serde(default)]
+        hosting: Vec<ServerCard>,
+    },
     PartyInvite { party: Party },
     PartyJoin { party_id: String },
     /// From the leader: who's in the party now (empty when it ends).
     PartyUpdate { party: Party },
     PartyLeave { party_id: String },
+    /// An invite to a server the sender hosts.
+    ServerInvite { server: ServerCard },
+    /// Asks to join a server the receiver hosts, with how to reach the asker (see `tunnel`).
+    JoinRequest {
+        server_id: String,
+        /// Ties the answer to this ask.
+        session: String,
+        offer: crate::tunnel::Offer,
+        #[serde(default)]
+        player: Option<Player>,
+    },
+    /// The host's answer: how to reach it, or why not.
+    JoinAnswer {
+        session: String,
+        #[serde(default)]
+        offer: Option<crate::tunnel::Offer>,
+        #[serde(default)]
+        server: Option<ServerCard>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// A chat message to a friend, or to everyone in a party (sent to each of them).
+    Chat {
+        #[serde(default)]
+        party_id: Option<String>,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,6 +209,14 @@ pub struct PartyInvite {
     pub at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInvite {
+    pub server: ServerCard,
+    pub from: String,
+    pub at: i64,
+}
+
 /// Everything kept on disk.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -139,6 +232,8 @@ pub struct SocialData {
     pub outgoing: Vec<FriendRequest>,
     pub party: Option<Party>,
     pub invites: Vec<PartyInvite>,
+    /// Invites to friends' servers.
+    pub server_invites: Vec<ServerInvite>,
     pub relays: Vec<String>,
     /// Inner event ids already handled: the same wrap can arrive from several relays.
     pub seen: Vec<String>,
@@ -177,6 +272,13 @@ pub enum Applied {
     PartyChanged,
     PartyUpdated,
     PartyEnded,
+    ServerInvited { from: String, server: String },
+    /// A friend wants to join a server we host (the app checks it and answers).
+    JoinRequested { from: String, server_id: String, session: String, offer: crate::tunnel::Offer, player: Option<Player> },
+    /// A host answered our ask to join.
+    JoinAnswered { from: String, session: String, offer: Option<crate::tunnel::Offer>, server: Option<ServerCard>, error: Option<String> },
+    /// A chat message, already cleaned, for `conversation` ("party:<id>" or "friend:<code>").
+    Chat { from: String, conversation: String, text: String },
 }
 
 /// The friend code (npub) for a public key.
@@ -276,6 +378,7 @@ impl SocialData {
         self.outgoing.retain(|request| request.code != code);
         self.incoming.retain(|request| request.code != code);
         self.invites.retain(|invite| invite.from != code);
+        self.server_invites.retain(|invite| invite.from != code);
     }
 
     /// Starts a party with us as its leader.
@@ -366,7 +469,7 @@ impl SocialData {
                 }
                 Applied::Removed { code: from.to_string() }
             }
-            Message::Presence { profile, status } => {
+            Message::Presence { profile, status, .. } => {
                 let Some(known) = self.friends.iter_mut().find(|known| known.code == from) else {
                     return Applied::Nothing;
                 };
@@ -432,7 +535,141 @@ impl SocialData {
                 }
                 Applied::Nothing
             }
+            Message::ServerInvite { server } => {
+                if !friend {
+                    return Applied::Nothing;
+                }
+                let server = server.cleaned();
+                let name = server.name.clone();
+                self.server_invites.retain(|invite| !(invite.from == from && invite.server.id == server.id));
+                self.server_invites.push(ServerInvite { server, from: from.to_string(), at: now });
+                Applied::ServerInvited { from: from.to_string(), server: name }
+            }
+            Message::JoinRequest { server_id, session, offer, player } => {
+                if !friend {
+                    return Applied::Nothing;
+                }
+                Applied::JoinRequested { from: from.to_string(), server_id, session, offer, player }
+            }
+            Message::JoinAnswer { session, offer, server, error } => {
+                if !friend {
+                    return Applied::Nothing;
+                }
+                let error = error.map(|error| error.chars().filter(|c| !c.is_control()).take(NOTE_LIMIT).collect());
+                Applied::JoinAnswered { from: from.to_string(), session, offer, server: server.map(ServerCard::cleaned), error }
+            }
+            Message::Chat { party_id, text } => {
+                let text = clean_chat(&text);
+                if text.is_empty() {
+                    return Applied::Nothing;
+                }
+                let conversation = match party_id {
+                    // Party chat counts from whoever is in our party with us.
+                    Some(party_id) => {
+                        let member = self.party.as_ref().is_some_and(|party| party.id == party_id && party.members.iter().any(|member| member == from));
+                        if !member {
+                            return Applied::Nothing;
+                        }
+                        format!("party:{party_id}")
+                    }
+                    None if friend => format!("friend:{from}"),
+                    None => return Applied::Nothing,
+                };
+                Applied::Chat { from: from.to_string(), conversation, text }
+            }
         }
+    }
+}
+
+/// Chat text as it's kept and shown: trimmed, no control characters but line breaks, not too long.
+pub fn clean_chat(text: &str) -> String {
+    text.trim().chars().filter(|c| *c == '\n' || !c.is_control()).take(CHAT_TEXT_LIMIT).collect::<String>().trim().to_string()
+}
+
+/// One chat message, sent or received.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    /// The sender's friend code.
+    pub from: String,
+    pub text: String,
+    /// Unix milliseconds, when it was written.
+    pub at: i64,
+}
+
+/// Every conversation's messages ("party:<id>" or "friend:<code>"), and when each was last read.
+/// Kept apart from the rest of the friends data, which is saved far more often.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatLog {
+    pub conversations: std::collections::HashMap<String, Vec<ChatMessage>>,
+    pub read: std::collections::HashMap<String, i64>,
+}
+
+impl ChatLog {
+    /// Adds a message in time order; false if it was already there.
+    pub fn add(&mut self, conversation: &str, message: ChatMessage) -> bool {
+        let messages = self.conversations.entry(conversation.to_string()).or_default();
+        if messages.iter().any(|known| known.id == message.id) {
+            return false;
+        }
+        let at = messages.partition_point(|known| known.at <= message.at);
+        messages.insert(at, message);
+        if messages.len() > CHAT_KEPT {
+            let extra = messages.len() - CHAT_KEPT;
+            messages.drain(..extra);
+        }
+        true
+    }
+
+    pub fn messages(&self, conversation: &str) -> &[ChatMessage] {
+        self.conversations.get(conversation).map_or(&[], Vec::as_slice)
+    }
+
+    /// Messages from others since the conversation was last read.
+    pub fn unread(&self, conversation: &str, me: &str) -> usize {
+        let read = self.read.get(conversation).copied().unwrap_or(0);
+        self.messages(conversation).iter().filter(|message| message.from != me && message.at > read).count()
+    }
+
+    pub fn mark_read(&mut self, conversation: &str, now: i64) {
+        self.read.insert(conversation.to_string(), now);
+    }
+
+    /// Forgets a conversation (a friend removed, a party over).
+    pub fn forget(&mut self, conversation: &str) {
+        self.conversations.remove(conversation);
+        self.read.remove(conversation);
+    }
+}
+
+pub struct ChatStore {
+    path: PathBuf,
+}
+
+impl ChatStore {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { path: dir.into().join("chat.json") }
+    }
+
+    pub fn load(&self) -> ChatLog {
+        std::fs::read(&self.path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    }
+
+    /// Saves atomically, readable only by this user.
+    pub fn save(&self, log: &ChatLog) -> std::io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let temp = self.path.with_extension("json.tmp");
+        std::fs::write(&temp, serde_json::to_vec(log).map_err(std::io::Error::other)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(temp, &self.path)
     }
 }
 
@@ -451,6 +688,8 @@ pub fn wrap(keys: &Keys, to: &PublicKey, message: &Message) -> Result<Event, Soc
     let rumor = EventBuilder::new(Kind::Custom(RUMOR_KIND), content).finalize_unsigned(keys.public_key());
     let lasts = match message {
         Message::Presence { .. } => Duration::from_secs(15 * 60),
+        // Only useful for the minute or two someone waits to join.
+        Message::JoinRequest { .. } | Message::JoinAnswer { .. } => Duration::from_secs(10 * 60),
         _ => Duration::from_secs(30 * 24 * 60 * 60),
     };
     // The wrap's own time is backdated at random (up to two days) to hide when it was sent, and
@@ -582,9 +821,9 @@ mod tests {
 
         // Presence only counts from friends.
         let playing = Status::Playing { label: Some("Fabric 26.3".into()), world: Some("Island".into()), since: 5 };
-        assert!(matches!(a.apply("m4", bob, alice, Message::Presence { profile: profile("Bob"), status: playing.clone() }, 6), Applied::Presence { .. }));
+        assert!(matches!(a.apply("m4", bob, alice, Message::Presence { profile: profile("Bob"), status: playing.clone(), hosting: vec![] }, 6), Applied::Presence { .. }));
         assert_eq!(a.friends[0].last_seen, Some(6));
-        assert_eq!(a.apply("m5", "npub1stranger", alice, Message::Presence { profile: profile("S"), status: playing }, 6), Applied::Nothing);
+        assert_eq!(a.apply("m5", "npub1stranger", alice, Message::Presence { profile: profile("S"), status: playing, hosting: vec![] }, 6), Applied::Nothing);
 
         // Alice starts a party and invites Bob; Bob joins; Alice adds him and tells everyone.
         let party = a.create_party("Build night", alice, 7);
@@ -606,6 +845,74 @@ mod tests {
         // Removing someone ends the friendship on both sides.
         assert_eq!(b.apply("m12", alice, bob, Message::Remove, 13), Applied::Removed { code: alice.into() });
         assert!(!b.is_friend(alice));
+    }
+
+    fn card(id: &str) -> ServerCard {
+        ServerCard {
+            id: id.into(),
+            name: " Build\u{7} night ".into(),
+            game_version: "26.3".into(),
+            loader: "fabric".into(),
+            loader_version: Some("0.20.1".into()),
+            online: true,
+            players: 1,
+            max_players: 10,
+            mods: 40,
+        }
+    }
+
+    #[test]
+    fn server_invites_join_requests_and_chat() {
+        let (alice, bob, eve) = ("npub1alice", "npub1bob", "npub1eve");
+        let mut b = SocialData { friends: vec![Friend { code: alice.into(), profile: profile("Alice"), since: 1, last_seen: None }], ..Default::default() };
+        // Invites and asks only count from friends.
+        assert_eq!(b.apply("i1", alice, bob, Message::ServerInvite { server: card("build") }, 5), Applied::ServerInvited { from: alice.into(), server: "Build night".into() });
+        assert_eq!(b.server_invites.len(), 1);
+        assert_eq!(b.apply("i2", alice, bob, Message::ServerInvite { server: card("build") }, 6), Applied::ServerInvited { from: alice.into(), server: "Build night".into() });
+        assert_eq!(b.server_invites.len(), 1, "a second invite to the same server replaces the first");
+        assert_eq!(b.apply("i3", eve, bob, Message::ServerInvite { server: card("x") }, 6), Applied::Nothing);
+        let offer = crate::tunnel::Offer { candidates: vec!["192.168.1.2:5000".into()], fingerprint: "ab".repeat(32) };
+        let asked = b.apply("j1", alice, bob, Message::JoinRequest { server_id: "build".into(), session: "s1".into(), offer: offer.clone(), player: None }, 7);
+        assert!(matches!(asked, Applied::JoinRequested { ref server_id, .. } if server_id == "build"));
+        assert_eq!(b.apply("j2", eve, bob, Message::JoinRequest { server_id: "build".into(), session: "s2".into(), offer, player: None }, 7), Applied::Nothing);
+        let answered = b.apply("j3", alice, bob, Message::JoinAnswer { session: "s1".into(), offer: None, server: None, error: Some("It isn't running\n".into()) }, 8);
+        assert_eq!(answered, Applied::JoinAnswered { from: alice.into(), session: "s1".into(), offer: None, server: None, error: Some("It isn't running".into()) });
+
+        // Chat: from friends directly, and from people in our party.
+        assert_eq!(b.apply("c1", alice, bob, Message::Chat { party_id: None, text: "  hi\u{1b}[31m  ".into() }, 9), Applied::Chat { from: alice.into(), conversation: format!("friend:{alice}"), text: "hi[31m".into() });
+        assert_eq!(b.apply("c2", eve, bob, Message::Chat { party_id: None, text: "hello?".into() }, 9), Applied::Nothing);
+        b.party = Some(Party { id: "p".into(), name: "P".into(), leader: alice.into(), members: vec![alice.into(), bob.into(), eve.into()], created: 1 });
+        assert_eq!(b.apply("c3", eve, bob, Message::Chat { party_id: Some("p".into()), text: "party time".into() }, 10), Applied::Chat { from: eve.into(), conversation: "party:p".into(), text: "party time".into() });
+        assert_eq!(b.apply("c4", eve, bob, Message::Chat { party_id: Some("other".into()), text: "x".into() }, 10), Applied::Nothing);
+        assert_eq!(b.apply("c5", alice, bob, Message::Chat { party_id: None, text: "   ".into() }, 10), Applied::Nothing);
+        // Removing a friend drops their server invites.
+        b.remove(alice);
+        assert!(b.server_invites.is_empty());
+
+        // A presence from an older Wisp (no servers in it) still reads.
+        let old: Message = serde_json::from_str(r#"{"type":"presence","profile":{"name":"Old"},"status":{"state":"online"}}"#).unwrap();
+        assert_eq!(old, Message::Presence { profile: profile("Old"), status: Status::Online, hosting: vec![] });
+    }
+
+    #[test]
+    fn chat_logs_keep_order_and_count_unread() {
+        let mut log = ChatLog::default();
+        let message = |id: &str, from: &str, at: i64| ChatMessage { id: id.into(), from: from.into(), text: id.into(), at };
+        assert!(log.add("party:p", message("b", "npub1bob", 20)));
+        assert!(log.add("party:p", message("a", "npub1alice", 10)));
+        assert!(!log.add("party:p", message("a", "npub1alice", 10)), "the same message twice is kept once");
+        assert_eq!(log.messages("party:p").iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(log.unread("party:p", "npub1alice"), 1);
+        log.mark_read("party:p", 20);
+        assert_eq!(log.unread("party:p", "npub1alice"), 0);
+        for n in 0..400 {
+            log.add("friend:x", message(&n.to_string(), "npub1x", n));
+        }
+        assert_eq!(log.messages("friend:x").len(), 300);
+        assert_eq!(log.messages("friend:x")[0].id, "100");
+        log.forget("party:p");
+        assert!(log.messages("party:p").is_empty());
+        assert_eq!(clean_chat("  two\nlines\r\n "), "two\nlines");
     }
 
     #[test]

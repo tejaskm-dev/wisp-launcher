@@ -5,7 +5,7 @@
 
 pub mod class_cache;
 pub(crate) mod download;
-mod installer;
+pub(crate) mod installer;
 pub(crate) mod java;
 pub mod macos;
 mod version;
@@ -76,7 +76,7 @@ impl GameFiles {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
-    fn versions(&self) -> PathBuf {
+    pub(crate) fn versions(&self) -> PathBuf {
         self.root.join("versions")
     }
     fn libraries(&self) -> PathBuf {
@@ -579,6 +579,100 @@ pub async fn prepare(
     })
 }
 
+/// authlib-injector (see `AUTHLIB_INJECTOR`), downloaded and checked when missing: for a hosted
+/// server whose players sign in through Wisp's skin server (builds with offline accounts).
+pub async fn authlib_injector(client: &HttpClient, files: &GameFiles, concurrency: usize, report: &(dyn Fn(LaunchUpdate) + Send + Sync)) -> Result<PathBuf, LaunchError> {
+    let path = files.root.join("authlib-injector").join(AUTHLIB_INJECTOR.0);
+    let download = Download { url: AUTHLIB_INJECTOR.1.to_string(), path: path.clone(), sha1: Some(AUTHLIB_INJECTOR.2.to_string()), size: Some(AUTHLIB_INJECTOR.3), executable: false };
+    download_with_progress(client, download::missing([download]), concurrency, report).await?;
+    Ok(path)
+}
+
+/// What a hosted server runs on: Java, and Mojang's server jar for its version.
+#[derive(Debug, Clone)]
+pub struct ServerRuntime {
+    pub java: PathBuf,
+    pub server_jar: PathBuf,
+    /// Java's major version (8, 17, 21, 25), when known.
+    pub java_major: Option<u32>,
+}
+
+/// Java and Mojang's server jar for a version, downloaded when missing, for hosting a server.
+/// A server has no natives, so on Apple Silicon it runs on Apple's own Java, except Forge before
+/// 1.17, which needs Java 8 (Intel only, so Rosetta).
+#[allow(clippy::too_many_arguments)]
+pub async fn server_runtime(
+    client: &HttpClient,
+    files: &GameFiles,
+    game_version: &str,
+    loader: Loader,
+    java_major: Option<u32>,
+    java_paths: &HashMap<u32, PathBuf>,
+    concurrency: usize,
+    report: &(dyn Fn(LaunchUpdate) + Send + Sync),
+) -> Result<ServerRuntime, LaunchError> {
+    report(LaunchUpdate::Checking);
+    let vanilla = vanilla_version(client, files, game_version).await?;
+    let artifact = vanilla
+        .downloads
+        .as_ref()
+        .and_then(|downloads| downloads.server.clone())
+        .ok_or_else(|| LaunchError::BadVersion(format!("Mojang has no server for Minecraft {game_version}")))?;
+    let mut component = vanilla
+        .java_version
+        .as_ref()
+        .map_or("jre-legacy", |java| java.component.as_str())
+        .to_string();
+    if let Some(wanted) = java_major
+        && java::major_version(&component).is_some_and(|current| wanted > current)
+        && let Some(newer) = java::component_for(wanted)
+    {
+        component = newer.to_string();
+    }
+    let env = Environment::current();
+    let mut needs_intel = false;
+    if env.os == "osx" && env.arch == "arm64" && macos::apple_silicon_java(&component) != component {
+        if loader == Loader::Forge {
+            if !macos::rosetta_installed().await {
+                return Err(LaunchError::NeedsRosetta {
+                    game: game_version.into(),
+                    reason: "Forge for this version needs Java 8, which only comes as an Intel app.",
+                });
+            }
+            needs_intel = true;
+        } else {
+            component = macos::apple_silicon_java(&component).to_string();
+        }
+    }
+    let platforms = java_platforms(needs_intel)?;
+    let major = java::major_version(&component).or_else(|| vanilla.java_version.as_ref().map(|java| java.major_version));
+    // The Java picked in Settings for this major version wins, as it does for the game.
+    let custom = major
+        .and_then(|major| java_paths.get(&major).or_else(|| (major == 16).then(|| java_paths.get(&17)).flatten()))
+        .filter(|path| path.is_file())
+        .cloned();
+    let (java, plan) = match custom {
+        Some(java) => (java, None),
+        None => plan_java(client, files, &component, &platforms).await?,
+    };
+    let server_jar = files.versions().join(game_version).join(format!("{game_version}-server.jar"));
+    let mut downloads = vec![Download {
+        url: artifact.url.clone(),
+        path: server_jar.clone(),
+        sha1: artifact.sha1.clone(),
+        size: artifact.size,
+        executable: false,
+    }];
+    if let Some(plan) = &plan {
+        downloads.extend(plan.downloads.iter().cloned());
+    }
+    download_with_progress(client, download::missing(downloads), concurrency, report).await?;
+    if let Some(plan) = &plan {
+        plan.finish()?;
+    }
+    Ok(ServerRuntime { java, server_jar, java_major: major })
+}
+
 /// The Java picked in settings for this major version (Java 16 runs on the Java 17 one).
 fn custom_java(options: &LaunchOptions, major: u32) -> Option<Result<PathBuf, LaunchError>> {
     let path = options
@@ -719,7 +813,7 @@ async fn ensure_java(
 }
 
 /// Downloads a batch, sending progress to `report` while it runs.
-async fn download_with_progress(
+pub(crate) async fn download_with_progress(
     client: &HttpClient,
     items: Vec<Download>,
     concurrency: usize,
@@ -1105,7 +1199,7 @@ async fn meta_profile(
     serde_json::from_slice(&bytes).map_err(|error| LaunchError::BadVersion(error.to_string()))
 }
 
-async fn fetch_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn fetch_json<T: serde::de::DeserializeOwned>(
     client: &HttpClient,
     url: &str,
 ) -> Result<T, LaunchError> {

@@ -1,4 +1,4 @@
-import { ArrowLeft, Archive, Clock, FolderOpen, HardDrive, History, Images, LoaderCircle, Play, RotateCcw, Square, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, Archive, Clock, FolderOpen, HardDrive, History, Images, LoaderCircle, Play, RotateCcw, Square, Trash2, Upload, ServerCog } from "lucide-react";
 import { m } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { InstanceAvatar } from "../components/instances/InstanceAvatar";
@@ -34,7 +34,7 @@ const BACK_LABELS: Partial<Record<PageId, string>> = { home: "Home", worlds: "Wo
 
 /** One world: its picture and numbers, Play, its journal, restore points and screenshots. */
 export function WorldPage({ worldId, backTo, onBack }: { worldId: string; backTo: PageId; onBack: () => void }) {
-  const { home, now, launches, launchWorlds, play, stop, notify, journalVersion, openWorld } = useApp();
+  const { home, now, launches, launchWorlds, play, stop, notify, journalVersion, openWorld, hostServer } = useApp();
   const world = home?.worlds.find((candidate) => candidate.id === worldId) ?? null;
   const instance = world ? (home?.instances.find((candidate) => candidate.id === world.instanceId) ?? null) : null;
 
@@ -157,6 +157,7 @@ export function WorldPage({ worldId, backTo, onBack }: { worldId: string; backTo
               )}
               {running ? "Stop" : starting ? view?.label : "Play"}
             </button>
+            <Action icon={<ServerCog size={15} aria-hidden="true" />} label="Host it" onClick={() => hostServer({ instanceId: world.instanceId, world: world.folder })} />
             <Action icon={<FolderOpen size={15} aria-hidden="true" />} label="Open folder" onClick={() => void openWorldFolder(world.instanceId, world.folder).catch(fail("Couldn't open the folder"))} />
             <Action
               icon={busy === "export" ? <LoaderCircle size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}

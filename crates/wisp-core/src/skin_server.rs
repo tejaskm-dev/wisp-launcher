@@ -49,6 +49,10 @@ pub enum Who<'a> {
 /// game asks).
 pub type Lookup = Arc<dyn Fn(Who<'_>) -> Option<Player> + Send + Sync>;
 
+/// Friends playing on a server hosted here, by UUID (plain lowercase hex), with the skins they
+/// handed in: the skin server answers for them too.
+pub type Guests = Arc<std::sync::RwLock<std::collections::HashMap<String, Player>>>;
+
 /// Told about each question the game asked and the status it got back (method, path, status),
 /// for checking what a game really asks.
 pub type Observe = Arc<dyn Fn(&str, &str, u16) + Send + Sync>;
@@ -60,6 +64,14 @@ pub struct SkinServer {
     pub api_root: String,
     /// The server's description, handed to authlib-injector up front so it needn't ask.
     pub metadata: String,
+    /// Its port on 127.0.0.1 (skin addresses in its answers name it).
+    pub port: u16,
+}
+
+/// Whether bytes are a skin the game can wear: a PNG, 64 by 64 or 64 by 32, and small.
+pub fn valid_skin(png: &[u8]) -> bool {
+    png.len() <= 64 * 1024
+        && image::load_from_memory_with_format(png, image::ImageFormat::Png).is_ok_and(|picture| picture.width() == 64 && (picture.height() == 64 || picture.height() == 32))
 }
 
 struct Inner {
@@ -118,7 +130,7 @@ pub async fn start_observed(key: RsaPrivateKey, lookup: Lookup, observe: Option<
             });
         }
     });
-    Ok(SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata })
+    Ok(SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata, port })
 }
 
 struct Response {

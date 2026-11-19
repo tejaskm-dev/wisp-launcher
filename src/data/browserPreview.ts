@@ -37,6 +37,9 @@ import type {
   Settings,
   SkinLayerData,
   VersionList,
+  ConsoleLine,
+  HostedView,
+  ServerPlayers,
 } from "./types";
 
 const LOADERS = [
@@ -759,3 +762,82 @@ export async function setInstanceMemory(id: string, memoryMb: number | null): Pr
   writeStorage("wisp.preview.instances", instances);
   return instance;
 }
+
+// ── Hosting ──
+// Add ?hosting=running, ?hosting=stopped, ?hosting=preparing or ?hosting=crashed to the URL to see
+// a hosted server in that state. Without it there are none, as on a computer that hasn't hosted.
+const hostingState = new URLSearchParams(window.location.search).get("hosting");
+
+function hostedPreview(): HostedView | null {
+  const state = hostingState;
+  if (state !== "running" && state !== "stopped" && state !== "preparing" && state !== "crashed") return null;
+  const now = Date.now();
+  return {
+    id: "preview-server",
+    name: "Preview server",
+    gameVersion: "26.3",
+    loader: "fabric",
+    loaderVersion: "0.20.1",
+    created: now - 86_400_000,
+    lastStarted: now - 3_600_000,
+    eula: true,
+    friendsJoin: true,
+    invited: [],
+    openPort: false,
+    backups: true,
+    state,
+    progress: state === "preparing" ? { phase: "downloading", doneBytes: 31_000_000, totalBytes: 62_000_000, doneFiles: 0, totalFiles: 1 } : null,
+    players: state === "running" ? ["Preview_Player"] : [],
+    maxPlayers: 10,
+    port: 25565,
+    lanAddress: "192.168.1.20:25565",
+    publicAddress: null,
+    startedAt: state === "running" ? now - 1_800_000 : null,
+    readyAt: state === "running" ? now - 1_780_000 : null,
+    exit: state === "crashed" ? { code: 1, crashed: true, reason: null } : null,
+    failure: state === "crashed" ? "The server stopped unexpectedly. Its console shows the last thing it said." : null,
+    effectiveMemoryMb: 4096,
+    automaticMemory: true,
+    modCount: 12,
+    motd: "Preview server",
+    onlineMode: false,
+    whitelist: true,
+    worldExists: state !== "preparing",
+    instanceName: null,
+    accounts: "wisp",
+    friendsIn: [],
+    reach: null,
+  };
+}
+
+export const hostedServers = () => simulate(() => Promise.resolve([hostedPreview()].filter((server): server is HostedView => server !== null)));
+export const hostedServer = (id: string) =>
+  simulate(() => {
+    const server = hostedPreview();
+    return server && server.id === id ? Promise.resolve(server) : Promise.reject(new Error("That server no longer exists."));
+  });
+export const serverConsole = (): Promise<ConsoleLine[]> =>
+  Promise.resolve(
+    hostingState === "running"
+      ? [
+          { at: Date.now() - 60_000, level: "info", text: "[12:00:01] [Server thread/INFO]: Starting minecraft server version 26.3" },
+          { at: Date.now() - 50_000, level: "warn", text: "[12:00:02] [Server thread/WARN]: Can't keep up! Is the server overloaded?" },
+          { at: Date.now() - 40_000, level: "info", text: '[12:00:04] [Server thread/INFO]: Done (3.4s)! For help, type "help"' },
+          { at: Date.now() - 30_000, level: "input", text: "> list" },
+        ]
+      : [],
+  );
+export const serverProperties = (): Promise<[string, string][]> =>
+  Promise.resolve([
+    ["motd", "Preview server"],
+    ["difficulty", "normal"],
+    ["gamemode", "survival"],
+    ["max-players", "10"],
+    ["pvp", "true"],
+    ["white-list", "true"],
+    ["online-mode", "false"],
+    ["view-distance", "10"],
+    ["server-port", "25565"],
+  ]);
+export const serverPlayers = (): Promise<ServerPlayers> =>
+  Promise.resolve({ whitelist: [{ uuid: "9a439d5f-cb53-3739-aca3-f8e1ccb9148b", name: "Preview_Player" }], ops: [], banned: [], online: hostingState === "running" ? ["Preview_Player"] : [] });

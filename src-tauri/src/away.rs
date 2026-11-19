@@ -46,6 +46,16 @@ impl Away {
 
 /// Closes the window for a game, remembering where it was, and puts up the tray icon.
 pub fn close_for_game(app: &AppHandle) {
+    close_to_tray(app, "Wisp is waiting for your game");
+}
+
+/// Closes the window while a server Wisp hosts keeps running, the same way: the tray brings it
+/// back, and quitting from there stops the servers first.
+pub fn close_for_hosting(app: &AppHandle) {
+    close_to_tray(app, "Wisp is hosting a server");
+}
+
+fn close_to_tray(app: &AppHandle, tooltip: &str) {
     let Some(window) = app.get_webview_window(MAIN) else {
         return;
     };
@@ -56,7 +66,7 @@ pub fn close_for_game(app: &AppHandle) {
     };
     let away = app.state::<Away>();
     away.set(Some(placement));
-    show_tray(app);
+    show_tray(app, tooltip);
     away.1.store(true, Ordering::SeqCst);
     let _ = window.destroy();
 }
@@ -65,9 +75,10 @@ pub fn close_for_game(app: &AppHandle) {
 pub fn come_back(app: &AppHandle) {
     let away = app.state::<Away>();
     away.1.store(false, Ordering::SeqCst);
-    let Some(placement) = away.set(None) else {
+    let placement = away.set(None);
+    if placement.is_none() && app.tray_by_id(TRAY).is_none() {
         return;
-    };
+    }
     let _ = app.remove_tray_by_id(TRAY);
     if let Some(window) = app.get_webview_window(MAIN) {
         let _ = window.set_focus();
@@ -86,17 +97,22 @@ pub fn come_back(app: &AppHandle) {
     let Ok(window) = built else {
         return;
     };
-    let _ = window.set_position(placement.position);
-    let _ = window.set_size(placement.size);
-    if placement.maximized {
-        let _ = window.maximize();
+    if let Some(placement) = placement {
+        let _ = window.set_position(placement.position);
+        let _ = window.set_size(placement.size);
+        if placement.maximized {
+            let _ = window.maximize();
+        }
+    } else {
+        let _ = window.center();
     }
     let _ = window.show();
     let _ = window.set_focus();
 }
 
-fn show_tray(app: &AppHandle) {
-    if app.tray_by_id(TRAY).is_some() {
+fn show_tray(app: &AppHandle, tooltip: &str) {
+    if let Some(tray) = app.tray_by_id(TRAY) {
+        let _ = tray.set_tooltip(Some(tooltip));
         return;
     }
     let menu = MenuItem::with_id(app, "open", "Open Wisp", true, None::<&str>).and_then(|open| {
@@ -107,11 +123,11 @@ fn show_tray(app: &AppHandle) {
         return;
     };
     let mut tray = TrayIconBuilder::with_id(TRAY)
-        .tooltip("Wisp is waiting for your game")
+        .tooltip(tooltip)
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => come_back(app),
-            // The game keeps running on its own.
+            // The game keeps running on its own; servers Wisp hosts stop first (see main).
             "quit" => app.exit(0),
             _ => {}
         });

@@ -3,6 +3,7 @@
 
 mod away;
 mod fixes;
+mod hosting;
 mod imports;
 mod instance_page;
 mod library;
@@ -531,9 +532,15 @@ async fn launch_instance(
     }
     // Offline accounts wear their Wisp skin in game through the skin server (Microsoft accounts get
     // theirs from Mojang). WISP_SKIN_SERVER=0 leaves it out, to rule it out when a game won't start.
+    // A game joining a friend's server signs in through the host's skin server instead (over the
+    // link), so everyone there sees everyone's skin.
     let skin_server = match account.kind {
         wisp_core::accounts::AccountKind::Offline if std::env::var_os("WISP_SKIN_SERVER").is_none_or(|value| value != "0") => {
-            skins_state.0.get_or_init(|| start_skin_server(paths.data.clone())).await.clone()
+            let joined = skins_state.2.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned();
+            match joined {
+                Some(host) => Some(host),
+                None => skins_state.0.get_or_init(|| start_skin_server(paths.data.clone(), skins_state.1.clone())).await.clone(),
+            }
         }
         _ => None,
     };
@@ -1517,36 +1524,64 @@ async fn clear_cache(
         .map_err(|error| format!("Couldn't clear everything: {error}"))
 }
 
-/// The skin server (see wisp_core::skin_server), started with the first game on an offline
-/// account; None inside if it couldn't start (games then just use the default skins).
+/// The skin server (see wisp_core::skin_server), started with the first game on an offline account
+/// or the first hosted server (None inside if it couldn't start: games then use the default
+/// skins); the friends playing on servers hosted here, whom it answers for too; and the host skin
+/// servers that games joining friends' servers sign in through instead, by instance.
 #[derive(Default)]
-struct SkinServerState(tokio::sync::OnceCell<Option<wisp_core::skin_server::SkinServer>>);
+struct SkinServerState(
+    tokio::sync::OnceCell<Option<wisp_core::skin_server::SkinServer>>,
+    wisp_core::skin_server::Guests,
+    SyncMutex<HashMap<String, wisp_core::skin_server::SkinServer>>,
+);
 
-/// Starts the skin server: it answers for the account playing, wearing the skin worn in Wisp.
-async fn start_skin_server(data: PathBuf) -> Option<wisp_core::skin_server::SkinServer> {
-    use wisp_core::skin_server::{self, Player, Skin, Who};
+/// The skin worn in Wisp, read fresh.
+fn worn_skin(data: &Path) -> Option<wisp_core::skin_server::Skin> {
+    let store = SkinStore::new(data.join("skins"));
+    let library = store.library();
+    let worn = library.active.as_ref().and_then(|id| library.skins.iter().find(|skin| &skin.id == id))?;
+    Some(wisp_core::skin_server::Skin { png: std::fs::read(store.png_path(&worn.id)).ok()?, slim: worn.model == wisp_core::skins::SkinModel::Slim })
+}
+
+/// The skin server, started if it isn't yet.
+async fn skin_server(app: &AppHandle) -> Option<wisp_core::skin_server::SkinServer> {
+    let state = app.state::<SkinServerState>();
+    let data = app.state::<Paths>().data.clone();
+    state.0.get_or_init(|| start_skin_server(data, state.1.clone())).await.clone()
+}
+
+/// Starts the skin server: it answers for the account playing, wearing the skin worn in Wisp, and
+/// for friends playing on a server hosted here. Anyone else asked for by name is an offline
+/// player (a server looks names up to put them on its whitelist).
+async fn start_skin_server(data: PathBuf, guests: wisp_core::skin_server::Guests) -> Option<wisp_core::skin_server::SkinServer> {
+    use wisp_core::skin_server::{self, Player, Who};
     let key_path = data.join("skins").join("signing-key.der");
     let key = tauri::async_runtime::spawn_blocking(move || skin_server::load_or_make_key(&key_path)).await.ok()?.ok()?;
     let lookup: skin_server::Lookup = std::sync::Arc::new(move |who| {
-        let account = AccountStore::new(data.join("accounts.json")).active()?;
-        let uuid = account.uuid.replace('-', "").to_lowercase();
-        let matches = match who {
-            Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
-            Who::Name(asked) => asked.eq_ignore_ascii_case(&account.name),
-        };
-        if !matches {
-            return None;
+        if let Some(account) = AccountStore::new(data.join("accounts.json")).active() {
+            let uuid = account.uuid.replace('-', "").to_lowercase();
+            let matches = match who {
+                Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
+                Who::Name(asked) => asked.eq_ignore_ascii_case(&account.name),
+            };
+            if matches {
+                return Some(Player { uuid, name: account.name, skin: worn_skin(&data) });
+            }
         }
-        let store = SkinStore::new(data.join("skins"));
-        let library = store.library();
-        let worn = library.active.as_ref().and_then(|id| library.skins.iter().find(|skin| &skin.id == id));
-        let skin = worn.and_then(|skin| {
-            Some(Skin {
-                png: std::fs::read(store.png_path(&skin.id)).ok()?,
-                slim: skin.model == wisp_core::skins::SkinModel::Slim,
-            })
-        });
-        Some(Player { uuid, name: account.name, skin })
+        let found = {
+            let guests = guests.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            match who {
+                Who::Uuid(asked) => guests.get(&asked.replace('-', "").to_lowercase()).cloned(),
+                Who::Name(asked) => guests.values().find(|guest| guest.name.eq_ignore_ascii_case(asked)).cloned(),
+            }
+        };
+        if found.is_some() {
+            return found;
+        }
+        match who {
+            Who::Name(name) if wisp_core::accounts::valid_username(name) => Some(Player { uuid: wisp_core::accounts::offline_uuid(name), name: name.to_string(), skin: None }),
+            _ => None,
+        }
     });
     skin_server::start(key, lookup).await.ok()
 }
@@ -1599,6 +1634,7 @@ fn main() {
         .manage(Installs::default())
         .manage(multiplayer::StatusCache::default())
         .manage(sync::SyncHub::default())
+        .manage(hosting::Hosting::default())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let settings_path = app.path().app_config_dir()?.join("settings.json");
@@ -1727,6 +1763,32 @@ fn main() {
             social::join_party,
             social::decline_party,
             social::leave_party,
+            social::decline_server_invite,
+            social::get_chat,
+            social::send_chat,
+            hosting::get_hosted_servers,
+            hosting::get_hosted_server,
+            hosting::create_hosted_server,
+            hosting::update_hosted_server,
+            hosting::delete_hosted_server,
+            hosting::open_server_folder,
+            hosting::start_hosted_server,
+            hosting::stop_hosted_server,
+            hosting::restart_hosted_server,
+            hosting::agree_server_eula,
+            hosting::send_server_command,
+            hosting::get_server_console,
+            hosting::get_server_properties,
+            hosting::set_server_properties,
+            hosting::get_server_players,
+            hosting::set_server_player,
+            hosting::set_server_world,
+            hosting::get_server_backups,
+            hosting::back_up_server,
+            hosting::restore_server_backup,
+            hosting::play_hosted_server,
+            hosting::invite_to_server,
+            hosting::join_friend_server,
             multiplayer::get_server_statuses,
             multiplayer::get_public_servers,
             multiplayer::add_server,
@@ -1773,8 +1835,16 @@ fn main() {
         .build(context)
         .expect("failed to start Wisp")
         .run(|app, event| match event {
-            // The window closing for a game isn't quitting: Wisp waits for the game to end.
+            // The window closing for a game (or a running server) isn't quitting: Wisp waits in the tray.
             tauri::RunEvent::ExitRequested { code: None, api, .. } if app.state::<away::Away>().closing_for_game() => api.prevent_exit(),
+            // The window's close button while a server runs: the server keeps going, and the tray
+            // brings the window back. (Quitting on purpose still quits, below.)
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. } if label == "main" && hosting::any_running(app) => {
+                api.prevent_close();
+                away::close_for_hosting(app);
+            }
+            // Quitting with servers running: they stop (and save) first.
+            tauri::RunEvent::ExitRequested { api, .. } if hosting::hold_exit_for_servers(app) => api.prevent_exit(),
             // Clicking the Dock icon while the window is closed for a game opens it.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => away::come_back(app),

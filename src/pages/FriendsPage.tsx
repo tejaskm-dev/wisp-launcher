@@ -1,7 +1,8 @@
-import { Check, Copy, Crown, Gamepad2, KeyRound, LoaderCircle, LogOut, Lock, PartyPopper, Plus, Send, ShieldCheck, UserPlus, UserRoundX, Users, X } from "lucide-react";
+import { Check, Copy, Crown, Gamepad2, KeyRound, LoaderCircle, LogIn, LogOut, Lock, MessageCircle, PartyPopper, Plus, Send, Server, ShieldCheck, UserPlus, UserRoundX, Users, X } from "lucide-react";
 import { m } from "motion/react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Ghost } from "../components/brand/Ghost";
+import { ChatPanel } from "../components/friends/ChatPanel";
 import { loadSkinImage } from "../components/skins/SkinDoll";
 import { skinSource } from "../components/skins/skinSource";
 import { drawFace } from "../components/skins/skinTexture";
@@ -17,21 +18,25 @@ import {
   createParty,
   declineFriend,
   declineParty,
+  declineServerInvite,
   getSkins,
   getSocial,
   inviteToParty,
   isDesktop,
+  joinFriendServer,
   joinParty,
   leaveParty,
+  onChat,
+  onJoinProgress,
   onSocialChange,
   removeFriend,
   setShareActivity,
   setSocialEnabled,
   setSocialProfile,
 } from "../data/api";
-import type { Friend, FriendStatus, SocialView } from "../data/types";
+import type { Friend, FriendStatus, JoinProgress, ServerCard, SocialView } from "../data/types";
 import { cn } from "../lib/cn";
-import { timeAgo } from "../lib/format";
+import { formatBytes, loaderName, timeAgo } from "../lib/format";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 
@@ -57,6 +62,9 @@ export function FriendsPage() {
   const [social, setSocial] = useState<SocialView | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Joining a friend's server, as it goes; and the friend whose chat is open.
+  const [joining, setJoining] = useState<(JoinProgress & { name: string }) | null>(null);
+  const [chatWith, setChatWith] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     getSocial().then(
@@ -67,6 +75,25 @@ export function FriendsPage() {
       (failure: unknown) => setFailed(failure instanceof Error ? failure.message : String(failure)),
     );
   }, []);
+  useEffect(() => {
+    return onJoinProgress((progress) => {
+      setJoining((current) => (current && current.serverId === progress.serverId ? { ...progress, name: current.name } : current));
+      if (progress.step === "done" || progress.step === "failed") window.setTimeout(() => setJoining((current) => (current?.serverId === progress.serverId ? null : current)), progress.step === "done" ? 2500 : 0);
+    });
+  }, []);
+  // Unread counts move as messages arrive.
+  useEffect(() => onChat(() => reload()), [reload]);
+
+  const join = async (code: string, server: ServerCard) => {
+    setJoining({ code, serverId: server.id, name: server.name, step: "asking", doneBytes: 0, totalBytes: 0, message: null });
+    try {
+      await joinFriendServer(code, server.id);
+    } catch (failure: unknown) {
+      setJoining(null);
+      notify({ tone: "info", title: `Couldn't join ${server.name}`, body: failure instanceof Error ? failure.message : String(failure) });
+    }
+  };
+
   useEffect(() => {
     reload();
     const stop = onSocialChange(() => reload());
@@ -109,7 +136,7 @@ export function FriendsPage() {
 
   return (
     <Page>
-      <PageHeader title="Friends" subtitle="See who's on and what they're playing, and get a party together. Chat comes later." />
+      <PageHeader title="Friends" subtitle="See who's on and what they're playing, join their servers, get a party together and chat." />
 
       {failed && !social ? (
         <EmptyState
@@ -128,6 +155,40 @@ export function FriendsPage() {
       ) : (
         <m.div variants={fadeUp} className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="flex min-w-0 flex-col gap-5">
+            {joining && <JoinBanner joining={joining} />}
+
+            {social.serverInvites.length > 0 && (
+              <Panel title="Server invites" icon={<Server size={19} aria-hidden="true" />}>
+                <ul className="flex flex-col divide-y divide-cream/7">
+                  {social.serverInvites.map((invite) => {
+                    const host = social.friends.find((friend) => friend.code === invite.from);
+                    const live = host?.hosting.find((server) => server.id === invite.server.id);
+                    return (
+                      <li key={`${invite.from}-${invite.server.id}`} className="flex items-center gap-3 py-3">
+                        <Face face={host?.profile.face ?? null} name={host?.profile.name ?? "?"} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-bold">{invite.server.name}</p>
+                          <p className="truncate text-xs text-mute">
+                            {host?.profile.name ?? shortCode(invite.from)} · {serverLine(live ?? invite.server)} · {live?.online ? "Up now" : "Not running right now"}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void act(`decline-server-${invite.server.id}`, () => declineServerInvite(invite.from, invite.server.id), "Couldn't decline it")}
+                          className="h-9 rounded-full px-3 text-xs font-bold text-cream-300 hover:bg-cream/8 hover:text-cream"
+                        >
+                          Decline
+                        </button>
+                        <Button icon={LogIn} disabled={joining !== null} onClick={() => void join(invite.from, live ?? invite.server)}>
+                          Join
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </Panel>
+            )}
+
             <AddFriend busy={busy === "add"} onAdd={(code, note) => act("add", () => addFriend(code, note), "Couldn't send the request")} />
 
             {(social.incoming.length > 0 || social.outgoing.length > 0) && (
@@ -195,6 +256,10 @@ export function FriendsPage() {
                       inParty={social.party?.members.includes(friend.code) ?? false}
                       canInvite={social.party?.leading ?? false}
                       busy={busy}
+                      joining={joining !== null}
+                      onJoin={(server) => void join(friend.code, server)}
+                      chatting={chatWith === friend.code}
+                      onChat={() => setChatWith((current) => (current === friend.code ? null : friend.code))}
                       onInvite={() =>
                         void act(`invite-${friend.code}`, () => inviteToParty(friend.code), "Couldn't send the invite").then(
                           (sent) => sent && notify({ tone: "success", title: `Invited ${friend.profile.name}`, body: "They'll see it on their Friends page." }),
@@ -209,8 +274,20 @@ export function FriendsPage() {
           </div>
 
           <aside className="flex flex-col gap-5 lg:sticky lg:top-24">
+            {chatWith && social.friends.some((friend) => friend.code === chatWith) && (
+              <ChatPanel
+                key={chatWith}
+                conversation={`friend:${chatWith}`}
+                title={social.friends.find((friend) => friend.code === chatWith)?.profile.name ?? "Chat"}
+                me={social.code}
+                nameOf={(code) => social.friends.find((friend) => friend.code === code)?.profile.name ?? shortCode(code)}
+                now={now}
+                onClose={() => setChatWith(null)}
+                onFailed={(message) => notify({ tone: "info", title: "Couldn't send it", body: message })}
+              />
+            )}
             <YouCard social={social} busy={busy} act={act} />
-            <PartyCard social={social} now={now} busy={busy} act={act} />
+            <PartyCard social={social} now={now} busy={busy} act={act} onFailed={(message) => notify({ tone: "info", title: "Couldn't send it", body: message })} />
           </aside>
         </m.div>
       )}
@@ -339,12 +416,51 @@ function Face({ face, name, status }: { face: string | null; name: string; statu
   );
 }
 
+/** "Fabric 26.3 · 40 mods". */
+function serverLine(server: ServerCard): string {
+  return [`${loaderName(server.loader)} ${server.gameVersion}`, server.mods > 0 ? `${server.mods} mods` : null].filter(Boolean).join(" · ");
+}
+
+const JOIN_STEPS: Record<JoinProgress["step"], string> = {
+  asking: "Asking their Wisp…",
+  connecting: "Connecting to their computer…",
+  mods: "Getting the server's mods…",
+  launching: "Starting Minecraft…",
+  done: "In the game",
+  failed: "Couldn't join",
+};
+
+function JoinBanner({ joining }: { joining: JoinProgress & { name: string } }) {
+  const share = joining.step === "mods" && joining.totalBytes > 0 ? Math.min(1, joining.doneBytes / joining.totalBytes) : null;
+  return (
+    <m.section variants={fadeUp} initial="hidden" animate="show" className="wisp-surface flex items-center gap-4 rounded-[22px] p-4">
+      {joining.step === "done" ? <Check size={20} className="shrink-0 text-moss-soft" aria-hidden="true" /> : <LoaderCircle size={20} className="shrink-0 animate-spin text-cream-300" aria-hidden="true" />}
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-bold">Joining {joining.name}</p>
+        <p className="truncate text-xs text-mute">
+          {JOIN_STEPS[joining.step]}
+          {share !== null && ` ${Math.floor(share * 100)}% · ${formatBytes(joining.doneBytes)} of ${formatBytes(joining.totalBytes)}`}
+        </p>
+        {share !== null && (
+          <span className="mt-2 block h-1.5 overflow-hidden rounded-full bg-cream/10">
+            <span className="block h-full rounded-full bg-cream transition-[width] duration-300" style={{ width: `${share * 100}%` }} />
+          </span>
+        )}
+      </div>
+    </m.section>
+  );
+}
+
 function FriendRow({
   friend,
   now,
   inParty,
   canInvite,
   busy,
+  joining,
+  onJoin,
+  chatting,
+  onChat,
   onInvite,
   onRemove,
 }: {
@@ -353,18 +469,33 @@ function FriendRow({
   inParty: boolean;
   canInvite: boolean;
   busy: string | null;
+  joining: boolean;
+  onJoin: (server: ServerCard) => void;
+  chatting: boolean;
+  onChat: () => void;
   onInvite: () => void;
   onRemove: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const line = statusLine(friend.status, friend.lastSeen, now);
   return (
-    <li className="group flex items-center gap-3 py-3">
+    <li className="group flex flex-col gap-2 py-3">
+      <div className="flex items-center gap-3">
       <Face face={friend.profile.face} name={friend.profile.name} status={friend.status} />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-bold">{friend.profile.name}</p>
         <p className={cn("truncate text-xs font-semibold", line.tone)}>{line.text}</p>
       </div>
+      <button
+        type="button"
+        aria-label={`Chat with ${friend.profile.name}`}
+        aria-pressed={chatting}
+        onClick={onChat}
+        className={cn("relative grid size-8 place-items-center rounded-full transition-colors hover:bg-cream/8 hover:text-cream", chatting ? "bg-cream/10 text-cream" : "text-mute")}
+      >
+        <MessageCircle size={15} aria-hidden="true" />
+        {friend.unread > 0 && <span className="absolute -right-0.5 -top-0.5 grid min-w-4 place-items-center rounded-full bg-ember px-1 text-[10px] font-bold text-ink-900">{friend.unread}</span>}
+      </button>
       {confirming ? (
         <span className="flex items-center gap-1 text-xs">
           <span className="font-semibold text-cream-300">Remove {friend.profile.name}?</span>
@@ -404,6 +535,27 @@ function FriendRow({
           </button>
         </>
       )}
+      </div>
+      {friend.hosting.map((server) => (
+        <div key={server.id} className="ml-[52px] flex items-center gap-3 rounded-xl bg-cream/[0.04] p-2.5">
+          <Server size={15} className="shrink-0 text-ember-soft" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-bold">{server.name}</p>
+            <p className="truncate text-xs text-mute">
+              {serverLine(server)} · {server.players} of {server.maxPlayers} on
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onJoin(server)}
+            disabled={joining}
+            className="tail wag flex h-8 items-center gap-1.5 rounded-full bg-cream px-3.5 text-xs font-bold text-ink-900 transition-transform active:scale-95 disabled:opacity-50 [--tail:17px]"
+          >
+            <LogIn size={12} aria-hidden="true" />
+            Join
+          </button>
+        </div>
+      ))}
     </li>
   );
 }
@@ -469,7 +621,7 @@ function YouCard({ social, busy, act }: { social: SocialView; busy: string | nul
   );
 }
 
-function PartyCard({ social, now, busy, act }: { social: SocialView; now: number; busy: string | null; act: Act }) {
+function PartyCard({ social, now, busy, act, onFailed }: { social: SocialView; now: number; busy: string | null; act: Act; onFailed: (message: string) => void }) {
   const [name, setName] = useState("");
   const party = social.party;
   const nameOf = (code: string) => social.friends.find((friend) => friend.code === code)?.profile.name ?? shortCode(code);
@@ -499,7 +651,16 @@ function PartyCard({ social, now, busy, act }: { social: SocialView; now: number
               );
             })}
           </ul>
-          <p className="mt-3 text-xs leading-relaxed text-mute">{party.leading ? "Invite friends from your list. Party chat is on the way." : "Party chat is on the way."}</p>
+          {party.leading && <p className="mt-3 text-xs leading-relaxed text-mute">Invite friends from your list.</p>}
+          <ChatPanel
+            conversation={`party:${party.id}`}
+            title={`${party.name} chat`}
+            me={social.code}
+            nameOf={(code) => (code === social.code ? "You" : nameOf(code))}
+            now={now}
+            className="mt-3"
+            onFailed={onFailed}
+          />
           <button
             type="button"
             onClick={() => void act("leave", leaveParty, "Couldn't leave the party")}

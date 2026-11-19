@@ -33,6 +33,12 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = ["
 rsa = { version = "0.9", features = ["sha1"] }
 sha1_10 = { package = "sha1", version = "0.10", features = ["oid"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# The link between friends' Wisps (tunnel/): QUIC over a hole-punched UDP socket, each side's
+# self-made certificate pinned by its SHA-256, and the router asked to let it through (UPnP).
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
+sha2 = "0.10"
+igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

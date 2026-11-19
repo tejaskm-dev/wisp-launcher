@@ -28,6 +28,7 @@ export function navParent(page: PageId): PageId {
       return "discover";
     case "world":
     case "servers":
+    case "hosted":
       return "worlds";
     case "screenshots":
       return "journal";
