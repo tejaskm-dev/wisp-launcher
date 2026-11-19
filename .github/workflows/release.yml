@@ -10,7 +10,8 @@ name: Release
 #
 # Tick "tester" for a tester build: offline accounts on (for a closed group who own Minecraft,
 # until Microsoft sign-in is approved), and never released. Its installers are kept as artifacts
-# for a first install. After that, tester builds update themselves from a feed of their own
+# for one day only, for a first install (the repository is public, so anyone signed in to GitHub
+# could download them). After that, tester builds update themselves from a feed of their own
 # (tester.json, beside latest.json), never the public one (which would take offline accounts away
 # again). The feed's files are locked with a tester code that only tester builds hold (and show,
 # so their owner can invite people; pasting it into any other copy of Wisp switches that copy to
@@ -175,6 +176,9 @@ jobs:
         with:
           name: wisp-${{ matrix.name }}${{ inputs.tester && '-tester' || '' }}
           if-no-files-found: error
+          # Tester installers for a day (new testers join with a tester code instead); others for
+          # the repository's default (0).
+          retention-days: ${{ inputs.tester && 1 || 0 }}
           path: |
             target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             target/${{ matrix.target }}/release/bundle/nsis/*.exe
