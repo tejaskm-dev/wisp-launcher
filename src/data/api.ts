@@ -348,10 +348,19 @@ export function onLaunchEvent(handler: (event: LaunchEvent) => void): () => void
 }
 
 /**
- * A tester build: made for a closed group of people who own Minecraft, with offline accounts on
- * and no self-updating (a public release would take offline accounts away). Never released.
+ * A tester build: made for a closed group of people who own Minecraft, with offline accounts on.
+ * Never released. It updates from a tester channel of its own, never from the public one (which
+ * would take offline accounts away).
  */
 export const testerBuild = import.meta.env.VITE_WISP_TESTER === "1";
+/** This tester build's number, when it has one (tester builds made before tester updates don't). */
+export const testerBuildNumber = testerBuild ? (import.meta.env.VITE_WISP_TESTER_BUILD ?? null) : null;
+
+/** How a version reads to people: "0.1.9", or "tester build 145" for a tester build's "0.1.8+145". */
+export function versionLabel(version: string): string {
+  const build = /\+(\d+)$/.exec(version);
+  return testerBuild && build ? `tester build ${build[1]}` : version;
+}
 /** Developer and tester builds can make offline accounts; public releases need Microsoft sign-in. */
 export const canAddOfflineAccounts = import.meta.env.DEV || testerBuild;
 

@@ -6561,6 +6561,7 @@ dependencies = [
 name = "wisp"
 version = "0.1.8"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
  "serde",
  "serde_json",

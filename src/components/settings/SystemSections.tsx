@@ -1,6 +1,6 @@
 import { ArrowUpCircle, Download, Eraser, FolderOpen, HardDrive, Info, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { useState } from "react";
-import { clearCache, getDataFolder, getStorageUsage, openDataFolder, testerBuild, openExternal } from "../../data/api";
+import { clearCache, getDataFolder, getStorageUsage, openDataFolder, openExternal, testerBuild, testerBuildNumber, versionLabel } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
 import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
@@ -171,9 +171,18 @@ export function AboutSection({ settings, update }: SectionProps) {
           <div className="text-[13px] leading-relaxed text-mute">
             <p className="text-[15px] font-bold text-cream">
               Wisp {__APP_VERSION__}
-              {testerBuild && <span className="ml-2 rounded-full bg-ember/15 px-2 py-0.5 align-middle text-[11px] font-bold text-ember-soft">Tester build</span>}
+              {testerBuild && (
+                <span className="ml-2 rounded-full bg-ember/15 px-2 py-0.5 align-middle text-[11px] font-bold text-ember-soft">
+                  {testerBuildNumber ? `Tester build ${testerBuildNumber}` : "Tester build"}
+                </span>
+              )}
             </p>
-            {testerBuild && <p>Made for testers who own Minecraft: offline accounts are on and it doesn't update itself. Please don't share it.</p>}
+            {testerBuild && (
+              <p>
+                Made for testers who own Minecraft: offline accounts are on.{" "}
+                {testerBuildNumber ? "New tester builds arrive by themselves, like any update." : "It doesn't update itself."} Please don't share it.
+              </p>
+            )}
             <p>A Minecraft: Java Edition launcher that keeps your worlds on every computer.</p>
             <p className="mt-1 text-mute-2">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
             <p className="mt-1 text-mute-2">
@@ -225,16 +234,20 @@ function UpdateRow() {
       : update.phase === "checking"
         ? "Looking for a newer Wisp…"
         : update.phase === "available"
-          ? `Wisp ${update.version} is ready to install.`
+          ? `Wisp ${versionLabel(update.version)} is ready to install.`
           : update.phase === "downloading"
-            ? `Downloading Wisp ${update.version}…`
+            ? `Downloading Wisp ${versionLabel(update.version)}…`
             : update.phase === "restarting"
               ? "Restarting on the new version…"
               : update.phase === "failed"
                 ? `Couldn't check: ${update.message}`
                 : update.checkedAt
-                  ? "You have the newest Wisp."
-                  : "Wisp looks for new versions on its own every few hours.";
+                  ? testerBuild
+                    ? "You have the newest tester build."
+                    : "You have the newest Wisp."
+                  : testerBuild
+                    ? "Wisp looks for new tester builds on its own every few hours."
+                    : "Wisp looks for new versions on its own every few hours.";
   return (
     <Row label="Updates" description={description}>
       {update.phase === "available" ? (

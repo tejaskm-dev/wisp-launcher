@@ -10,6 +10,12 @@
     {
       "name": "wisp-ui-attach",
       "url": "http://localhost:1420"
+    },
+    {
+      "name": "wisp-ui-tester",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["VITE_WISP_TESTER=1", "VITE_WISP_TESTER_BUILD=144", "pnpm", "vite", "--port", "1421", "--strictPort"],
+      "port": 1421
     }
   ]
 }

@@ -1,5 +1,6 @@
 import { ArrowUpCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { testerBuild, testerBuildNumber, versionLabel } from "../data/api";
 import { formatBytes } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
 import { useApp } from "../state/AppContext";
@@ -74,6 +75,10 @@ export function UpdatePanel() {
   const open = offered || busy || (update.phase === "failed" && update.version !== null);
   void dismissed;
 
+  // A tester build names builds by number ("tester build 145"); everyone else sees versions.
+  const current = testerBuildNumber ? `tester build ${testerBuildNumber}` : __APP_VERSION__;
+  const next = version ? versionLabel(version) : "";
+  const heading = testerBuild ? `${next.charAt(0).toUpperCase()}${next.slice(1)} is here` : `Wisp ${next} is here`;
   const notes = update.phase === "available" ? whatsNew(update.notes) : "";
   const html = useMemo(() => (notes ? renderMarkdown(notes, { externalImages: false }).html : ""), [notes]);
   const progress = update.phase === "downloading" && update.total ? update.done / update.total : null;
@@ -88,18 +93,18 @@ export function UpdatePanel() {
     <Dialog
       open={open}
       onClose={busy ? () => {} : later}
-      title={update.phase === "failed" ? "The update didn't finish" : update.phase === "restarting" ? "Restarting on the new Wisp" : `Wisp ${version ?? ""} is here`}
+      title={update.phase === "failed" ? "The update didn't finish" : update.phase === "restarting" ? "Restarting on the new Wisp" : heading}
       description={
         update.phase === "failed"
           ? update.message
           : busy
             ? "Back in a moment, right where you were."
-            : `You have ${__APP_VERSION__}. Updating takes a moment, and Wisp restarts right where you were.`
+            : `You have ${current}. Updating takes a moment, and Wisp restarts right where you were.`
       }
       footer={
         update.phase === "downloading" || update.phase === "restarting" ? (
           <div className="flex w-full flex-col gap-2">
-            <ProgressBar pixel value={update.phase === "restarting" ? 1 : progress} label={`Updating to Wisp ${version ?? ""}`} />
+            <ProgressBar pixel value={update.phase === "restarting" ? 1 : progress} label={`Updating to ${testerBuild ? next : `Wisp ${next}`}`} />
             <p className="text-xs text-mute">
               {update.phase === "restarting" ? "Installed. Restarting…" : update.total ? `${formatBytes(update.done)} of ${formatBytes(update.total)}` : `${formatBytes(update.done)} so far`}
             </p>
@@ -123,7 +128,7 @@ export function UpdatePanel() {
             <Sparkle className="absolute -right-1 -top-1 size-3.5 text-ember" />
           </span>
           <p className="text-sm leading-relaxed text-cream-300">
-            <span className="font-bold text-cream">{__APP_VERSION__}</span> to <span className="font-bold text-cream">{version}</span>
+            <span className="font-bold text-cream">{current}</span> to <span className="font-bold text-cream">{next}</span>
           </p>
         </div>
         {html && (
