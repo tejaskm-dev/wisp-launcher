@@ -6559,7 +6559,7 @@ dependencies = [
 
 [[package]]
 name = "wisp"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -6578,7 +6578,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "flate2",
