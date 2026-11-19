@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ContentTab } from "../components/instance/ContentTab";
 import { LogsTab } from "../components/instance/LogsTab";
 import { JournalTab, ScreenshotsTab, ServersTab, WorldsTab } from "../components/instance/PlayTabs";
+import { MemoryButton, SharingButton } from "../components/instance/QuickSettings";
 import { SettingsTab } from "../components/instance/SettingsTab";
 import { message } from "../components/instance/shared";
 import { InstanceAvatar } from "../components/instances/InstanceAvatar";
@@ -238,6 +239,8 @@ export function InstancePage({ instanceId, initialTab, backTo, onBack }: { insta
                 </>
               )}
             </div>
+            <MemoryButton instance={instance} />
+            <SharingButton instance={instance} />
             <Action icon={<FolderOpen size={15} aria-hidden="true" />} label="Open folder" onClick={() => void openInstanceFolder(instance.id).catch((failure: unknown) => notify({ tone: "info", title: "Couldn't open the folder", body: message(failure) }))} />
             {failed && <Action icon={<History size={15} aria-hidden="true" />} label="See the log" onClick={() => setTab("logs")} />}
           </div>

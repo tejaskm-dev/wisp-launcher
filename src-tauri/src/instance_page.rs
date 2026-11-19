@@ -228,6 +228,40 @@ pub async fn set_local_settings(id: String, settings: LocalSettings, paths: Stat
     paths.instances().set_local_settings(&id, &settings).map_err(|error| error.to_string())
 }
 
+/// What an instance's game gets for memory, and where that comes from.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceMemory {
+    /// What the game gets.
+    mb: u32,
+    /// Set for this instance (by hand, or by a fix after it ran out).
+    own: bool,
+    /// Wisp's setting, in Settings > Game.
+    setting_mb: u32,
+    /// What Wisp picks when the instance has none of its own: the setting, or more for a big modpack.
+    automatic_mb: u32,
+    /// The mods turned on, which the automatic memory goes by.
+    mods: usize,
+    /// The computer's memory, when it can be read.
+    system_mb: Option<u64>,
+}
+
+/// An instance's memory as its next start will have it.
+#[tauri::command]
+pub async fn get_instance_memory(id: String, paths: State<'_, Paths>, settings: State<'_, SettingsState>) -> Result<InstanceMemory, String> {
+    let instances = paths.instances();
+    let instance = instances.get(&id).ok_or("That instance no longer exists.")?;
+    let game_dir = instances.game_dir(&id).ok_or("That instance no longer exists.")?;
+    let setting_mb = current_settings(&settings).memory_mb;
+    blocking(move || {
+        let mods = wisp_core::instances::mod_count(&game_dir);
+        let system_mb = wisp_core::device::total_memory_mb();
+        let automatic = wisp_core::instances::automatic_memory_mb(setting_mb, mods, system_mb);
+        Ok(InstanceMemory { mb: instance.memory_mb.unwrap_or(automatic), own: instance.memory_mb.is_some(), setting_mb, automatic_mb: automatic, mods, system_mb })
+    })
+    .await
+}
+
 /// Memory for an instance (None: the one in Settings).
 #[tauri::command]
 pub async fn set_instance_memory(id: String, memory_mb: Option<u32>, paths: State<'_, Paths>) -> Result<Instance, String> {

@@ -14,6 +14,7 @@ import type {
   SyncOverview,
   SyncStatus,
   Instance,
+  InstanceMemory,
   JournalEntry,
   JournalQuery,
   Skin,
@@ -736,4 +737,25 @@ export async function joinTesterBuilds(code: string, onProgress: (done: number, 
     onProgress(done, total);
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
+}
+
+/** Memory as the desktop app works it out (instances.rs), with made-up mod counts: modpacks 214, other modded 12. */
+export async function instanceMemory(id: string): Promise<InstanceMemory> {
+  const settings = await getSettings();
+  const instance = listInstances().find((item) => item.id === id);
+  const mods = instance?.modpack ? 214 : instance && instance.loader !== "vanilla" ? 12 : 0;
+  const systemMb = 16384;
+  const wanted = mods >= 250 ? 10240 : mods >= 150 ? 8192 : mods >= 60 ? 6144 : 0;
+  const automaticMb = Math.max(settings.memoryMb, Math.min(wanted, Math.floor((systemMb * 0.6) / 512) * 512));
+  const own = instance?.memoryMb ?? null;
+  return { mb: own ?? automaticMb, own: own !== null, settingMb: settings.memoryMb, automaticMb, mods, systemMb };
+}
+
+export async function setInstanceMemory(id: string, memoryMb: number | null): Promise<Instance> {
+  const instances = listInstances();
+  const instance = instances.find((item) => item.id === id);
+  if (!instance) throw new Error("That instance no longer exists.");
+  instance.memoryMb = memoryMb;
+  writeStorage("wisp.preview.instances", instances);
+  return instance;
 }

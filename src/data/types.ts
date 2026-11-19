@@ -50,6 +50,22 @@ export interface Instance {
   javaMajor?: number | null;
 }
 
+/** An instance's memory as its next start will have it (src-tauri/src/instance_page.rs). */
+export interface InstanceMemory {
+  /** What the game gets, in MB. */
+  mb: number;
+  /** Set for this instance (by hand, or by a fix after it ran out). */
+  own: boolean;
+  /** Wisp's setting, in Settings > Game. */
+  settingMb: number;
+  /** What Wisp picks when the instance has none of its own: the setting, or more for a big modpack. */
+  automaticMb: number;
+  /** The mods turned on, which the automatic memory goes by. */
+  mods: number;
+  /** The computer's memory, when it can be read. */
+  systemMb: number | null;
+}
+
 export interface ModpackOrigin {
   projectId: string;
   versionId: string;

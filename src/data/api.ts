@@ -59,6 +59,7 @@ import type {
   ItemUpdate,
   RemovedItem,
   InstanceStats,
+  InstanceMemory,
   LocalSettings,
   MovePlan,
   MovedInstance,
@@ -459,7 +460,9 @@ export const getLocalSettings = (id: string) => call<LocalSettings>("get_local_s
 export const setLocalSettings = (id: string, settings: LocalSettings) =>
   call<void>("set_local_settings", { id, settings }, (p) => p.needsDesktop("Instance settings"));
 export const setInstanceMemory = (id: string, memoryMb: number | null) =>
-  call<Instance>("set_instance_memory", { id, memoryMb }, (p) => p.needsDesktop("Instance settings"));
+  call<Instance>("set_instance_memory", { id, memoryMb }, (p) => p.setInstanceMemory(id, memoryMb));
+/** What an instance's next start gets for memory, and where that comes from. */
+export const getInstanceMemory = (id: string) => call<InstanceMemory>("get_instance_memory", { id }, (p) => p.instanceMemory(id));
 export const setInstanceJava = (id: string, javaMajor: number | null) =>
   call<Instance>("set_instance_java", { id, javaMajor }, (p) => p.needsDesktop("Instance settings"));
 export const planInstanceMove = (id: string, gameVersion: string, loader: Loader) =>

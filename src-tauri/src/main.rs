@@ -541,7 +541,10 @@ async fn launch_instance(
     let local = instances.local_settings(&id);
     let window = local.game_window.as_ref().unwrap_or(&settings.game_window);
     let hooks = local.hooks.as_ref().unwrap_or(&settings.hooks);
-    let memory_mb = instance.memory_mb.unwrap_or(settings.memory_mb);
+    let memory_mb = match instance.memory_mb {
+        Some(own) => own,
+        None => automatic_memory(&game_dir, settings.memory_mb).await,
+    };
     let options = LaunchOptions {
         instance,
         game_dir,
@@ -664,6 +667,16 @@ fn stop_pressed(app: &AppHandle, id: &str) -> bool {
 /// Runs a launch from start to finish. Before starting, the mods folder gets a quick look and
 /// whatever would stop the game is fixed; after a crash, the loader's report is read and fixed
 /// the same way. A crash fixed before the window even opened starts the game again, once.
+/// What an instance without memory of its own gets: Wisp's setting, or more for a big modpack.
+pub(crate) async fn automatic_memory(game_dir: &Path, setting_mb: u32) -> u32 {
+    let game_dir = game_dir.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        wisp_core::instances::automatic_memory_mb(setting_mb, wisp_core::instances::mod_count(&game_dir), device::total_memory_mb())
+    })
+    .await
+    .unwrap_or(setting_mb)
+}
+
 async fn play(
     app: AppHandle,
     id: String,
@@ -748,7 +761,10 @@ async fn play(
                     let restart = fixes.changes.iter().any(|change| {
                         matches!(change, doctor::Change::LoaderChanged { .. } | doctor::Change::JavaChanged { .. } | doctor::Change::MemoryChanged { .. })
                     });
-                    options.memory_mb = updated.memory_mb.unwrap_or(settings.memory_mb);
+                    options.memory_mb = match updated.memory_mb {
+                        Some(own) => own,
+                        None => automatic_memory(&options.game_dir, settings.memory_mb).await,
+                    };
                     options.instance = updated;
                     if restart {
                         prepared = tokio::select! {
@@ -818,7 +834,10 @@ async fn play(
             retried = true;
             let _ = app.emit(FIXED_EVENT, FixedEvent { instance_id: id.clone(), report: help });
             if let Some(updated) = store.get(&id) {
-                options.memory_mb = updated.memory_mb.unwrap_or(settings.memory_mb);
+                options.memory_mb = match updated.memory_mb {
+                    Some(own) => own,
+                    None => automatic_memory(&options.game_dir, settings.memory_mb).await,
+                };
                 options.instance = updated;
             }
             let (stop, receiver) = oneshot::channel();
@@ -1640,6 +1659,7 @@ fn main() {
             instance_page::get_local_settings,
             instance_page::set_local_settings,
             instance_page::set_instance_memory,
+            instance_page::get_instance_memory,
             instance_page::set_instance_java,
             instance_page::plan_instance_move,
             instance_page::move_instance,
