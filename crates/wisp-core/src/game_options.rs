@@ -5,7 +5,9 @@
 //! held when Wisp last brought it up to date, so whatever differs from the note now is something
 //! the player changed (or cloud sync brought from another computer). Changes go into one store
 //! for the computer, the newest winning, and an instance takes everything in the store each time
-//! it starts. A setting nobody has changed stays the way each instance has it.
+//! it starts. So that sharing is on from the start, not only from each setting's next change, the
+//! first launch that shares a span of versions starts the store from the instance played last:
+//! every instance then plays with those settings, its own kept aside in a file the first time.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,6 +25,8 @@ const STORE: &str = "shared-options.json";
 /// Beside an instance's instance.json: its settings as of the last time Wisp brought it up to
 /// date.
 const NOTE: &str = "shared-options-note.json";
+/// Beside options.txt: what an instance had before shared settings first changed it.
+pub const BEFORE_SHARING: &str = "options.txt.before-sharing";
 /// Settings that belong to one instance: the data version Minecraft stamps the file with, its
 /// resource packs, and the server address last typed in.
 const OWN: &[&str] = &["version", "resourcePacks", "incompatibleResourcePacks", "lastServer"];
@@ -154,6 +158,8 @@ struct Store {
     settings: BTreeMap<String, BTreeMap<String, Setting>>,
     /// Instances that keep their own settings.
     keep_own: BTreeSet<String>,
+    /// Spans of versions already started from the instance played last.
+    started: BTreeSet<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +240,21 @@ fn styled(value: &str, like: &str) -> String {
     }
 }
 
+/// When a file last changed, in Unix milliseconds (0 when that can't be read).
+fn modified_ms(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_millis() as i64)
+}
+
+/// Whether the game itself has saved this options.txt (Wisp's start for a new instance lists only
+/// a few settings).
+fn saved_by_game(settings: &BTreeMap<String, String>) -> bool {
+    settings.contains_key("version") && settings.len() >= SAVED_BY_GAME
+}
+
 /// Puts what changed in one instance since its note into the store (the newest change to a
 /// setting wins) and brings the note up to date. Returns whether the store changed.
 fn gather(store: &mut Store, era: Era, instance_dir: &Path, game_dir: &Path) -> bool {
@@ -241,11 +262,7 @@ fn gather(store: &mut Store, era: Era, instance_dir: &Path, game_dir: &Path) -> 
     let Some(now) = read_complete(&path) else {
         return false;
     };
-    let at = std::fs::metadata(&path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |since| since.as_millis() as i64);
+    let at = modified_ms(&path);
     let before = read_note(instance_dir, era);
     let mut changed = false;
     if let Some(before) = &before {
@@ -271,6 +288,21 @@ fn gather(store: &mut Store, era: Era, instance_dir: &Path, game_dir: &Path) -> 
     changed
 }
 
+/// Starts a span of versions' shared settings from one instance's: each of its settings goes
+/// into the store unless something newer was changed there.
+fn start_from(store: &mut Store, era: Era, settings: BTreeMap<String, String>, at: i64) {
+    let shared = store.settings.entry(era.key().to_string()).or_default();
+    for (key, value) in settings {
+        if OWN.contains(&key.as_str()) {
+            continue;
+        }
+        if shared.get(&key).is_none_or(|newest| newest.at <= at && !same(&newest.value, &value)) {
+            shared.insert(key, Setting { value, at });
+        }
+    }
+    store.started.insert(era.key().to_string());
+}
+
 /// Sets the shared settings in an instance's options.txt, rewriting lines where they are. A file
 /// the game has saved lists every setting its version and mods know, so a setting it doesn't
 /// list (from a mod this instance hasn't got, say) stays out; a file the game hasn't saved yet
@@ -290,8 +322,7 @@ fn apply(game_dir: &Path, shared: &BTreeMap<String, Setting>) -> std::io::Result
         changed |= replacement.is_some();
         lines.push(replacement.unwrap_or_else(|| line.to_string()));
     }
-    let saved_by_game = before.contains_key("version") && before.len() >= SAVED_BY_GAME;
-    if !saved_by_game {
+    if !saved_by_game(&before) {
         for (key, setting) in shared {
             if !before.contains_key(key) && !OWN.contains(&key.as_str()) {
                 lines.push(format!("{key}:{}", setting.value));
@@ -301,6 +332,11 @@ fn apply(game_dir: &Path, shared: &BTreeMap<String, Setting>) -> std::io::Result
     }
     if !changed {
         return Ok(before);
+    }
+    // The first time shared settings change an instance's own, those are kept aside.
+    let aside = game_dir.join(BEFORE_SHARING);
+    if !text.is_empty() && !aside.exists() {
+        let _ = write_atomic(&aside, text.as_bytes());
     }
     let mut out = lines.join(newline);
     out.push_str(newline);
@@ -321,20 +357,36 @@ fn sharing_dirs(store: &Store, instances: &InstanceStore, id: &str, game_version
 /// Just before an instance starts: every instance's changes go into the store (cloud sync may
 /// have brought some, and a game Wisp didn't see close may have left some), then this instance
 /// takes everything in it. While sharing is off in Settings this isn't called, so turning it
-/// back on counts what changed meanwhile, newest first, like any other change.
+/// back on counts what changed meanwhile, newest first, like any other change. A span of versions
+/// that hasn't shared before starts from the instance played last (see the top of this file).
 pub fn before_launch(data: &Path, instances: &InstanceStore, id: &str) -> std::io::Result<()> {
     let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut store = load(data);
     let mut changed = false;
     let mut starting = None;
+    // For each span not started yet: the settings of the instance whose game saved them last.
+    let mut latest: BTreeMap<&'static str, (Era, i64, BTreeMap<String, String>)> = BTreeMap::new();
     for instance in instances.list() {
         let Some((era, dir, game)) = sharing_dirs(&store, instances, &instance.id, &instance.game_version) else {
             continue;
         };
+        if !store.started.contains(era.key()) {
+            let path = game.join(FILE);
+            let at = modified_ms(&path);
+            if latest.get(era.key()).is_none_or(|(_, newest, _)| at > *newest)
+                && let Some(settings) = read_complete(&path).filter(saved_by_game)
+            {
+                latest.insert(era.key(), (era, at, settings));
+            }
+        }
         changed |= gather(&mut store, era, &dir, &game);
         if instance.id == id {
             starting = Some((era, dir, game));
         }
+    }
+    for (era, at, settings) in latest.into_values() {
+        start_from(&mut store, era, settings, at);
+        changed = true;
     }
     if changed {
         save(data, &store)?;
@@ -528,6 +580,61 @@ mod tests {
         parse(&std::fs::read_to_string(game_dir.join(FILE)).unwrap_or_default()).get(key).cloned()
     }
 
+    /// Dates an instance's options.txt, as if its game last saved it then.
+    fn age(game_dir: &Path, at_secs: u64) {
+        let file = std::fs::File::options().write(true).open(game_dir.join(FILE)).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(at_secs)).unwrap();
+    }
+
+    #[test]
+    fn sharing_starts_from_the_instance_played_last() {
+        let root = std::env::temp_dir().join(format!("wisp-shared-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        let instances = InstanceStore::new(data.join("instances"));
+        let make = |name: &str, contents: &str, at_secs: u64| {
+            let made = instances
+                .create(NewInstance { name: name.into(), game_version: "1.21.1".into(), loader: Loader::Vanilla, loader_version: None, icon: None }, None, 0)
+                .unwrap();
+            let game = instances.game_dir(&made.id).unwrap();
+            std::fs::create_dir_all(&game).unwrap();
+            std::fs::write(game.join(FILE), contents).unwrap();
+            age(&game, at_secs);
+            (made.id, game)
+        };
+        // Set up before sharing: one played long ago, one played last, one that keeps its own
+        // (newest of all, but not a starting point), and a new one whose few lines Wisp wrote
+        // just now (a start, not the player's choices).
+        let (old, old_game) = make("Old", &saved(&[("fov", "0.2")]), 100);
+        let (_last, last_game) = make("Last", &saved(&[("fov", "0.8"), ("key_key.jump", "key.keyboard.j")]), 900);
+        let (apart, apart_game) = make("Apart", &saved(&[("fov", "1.0")]), 1_000);
+        set_keeps_own(&data, &instances, &apart, true).unwrap();
+        let (new, new_game) = make("New", "autoJump:false\n", 2_000);
+
+        // The first start of any of them starts everyone from the one played last.
+        before_launch(&data, &instances, &new).unwrap();
+        assert_eq!(get(&new_game, "fov").as_deref(), Some("0.8"));
+        assert_eq!(get(&new_game, "autoJump").as_deref(), Some("false"));
+        before_launch(&data, &instances, &old).unwrap();
+        assert_eq!(get(&old_game, "fov").as_deref(), Some("0.8"));
+        assert_eq!(get(&old_game, "key_key.jump").as_deref(), Some("key.keyboard.j"));
+        assert_eq!(get(&apart_game, "fov").as_deref(), Some("1.0"));
+        assert_eq!(get(&last_game, "fov").as_deref(), Some("0.8"));
+        // What Old had is kept aside, from the first time only.
+        let aside = |game: &Path| parse(&std::fs::read_to_string(game.join(BEFORE_SHARING)).unwrap_or_default()).get("fov").cloned();
+        assert_eq!(aside(&old_game).as_deref(), Some("0.2"));
+        assert_eq!(aside(&last_game), None);
+
+        // That happens once: from then on, changes are what travel.
+        assert!(load(&data).started.contains("1.19"));
+        play(&old_game, "fov", "0.4", 3_000);
+        after_game(&data, &instances, &old).unwrap();
+        before_launch(&data, &instances, &old).unwrap();
+        assert_eq!(get(&old_game, "fov").as_deref(), Some("0.4"));
+        assert_eq!(aside(&old_game).as_deref(), Some("0.2"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn settings_follow_the_player_between_instances() {
         let root = std::env::temp_dir().join(format!("wisp-shared-options-{}", std::process::id()));
@@ -550,12 +657,17 @@ mod tests {
         std::fs::write(b_game.join(FILE), saved(&[("fov", "0.25"), ("key_key.sneak", "key.keyboard.left.shift")])).unwrap();
         std::fs::write(old_game.join(FILE), saved(&[])).unwrap();
         std::fs::write(ancient_game.join(FILE), "version:1343\nkey_key.jump:57\nfov:0.0\n").unwrap();
+        // Main was played a while ago, the pack last.
+        age(&a_game, 500);
+        age(&b_game, 600);
+        age(&old_game, 600);
 
-        // The first look only takes notes: nothing has changed yet, so nothing is shared, and
-        // each instance keeps the settings it had.
+        // Sharing starts from the instance played last, so Main takes the pack's FOV at its
+        // first start. A setting Main's game doesn't list (the pack's sneak key) stays out.
         before_launch(&data, &instances, &a).unwrap();
+        assert_eq!(get(&a_game, "fov").as_deref(), Some("0.25"));
+        assert_eq!(get(&a_game, "key_key.sneak"), None);
         assert_eq!(get(&b_game, "fov").as_deref(), Some("0.25"));
-        assert_eq!(load(&data).settings.values().map(BTreeMap::len).sum::<usize>(), 0);
 
         // Playing Main, the player turns up the FOV and moves jump to J.
         play(&a_game, "fov", "0.5", 1_000);
