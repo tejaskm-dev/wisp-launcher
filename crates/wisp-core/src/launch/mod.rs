@@ -857,6 +857,7 @@ pub async fn run(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console window behind the game
+    let launched_at = std::time::SystemTime::now();
     let mut child = command.spawn().map_err(LaunchError::Spawn)?;
     report(LaunchUpdate::Starting);
 
@@ -914,23 +915,65 @@ pub async fn run(
         .lock()
         .map(|tail| tail.iter().cloned().collect())
         .unwrap_or_default();
+    let code = status.code();
+    // Quitting (the Quit button, Alt+F4, the window's close button) has Minecraft say "Stopping!"
+    // on its way out. Some computers report a failing exit code after that anyway (a graphics
+    // driver tripping over the closing window, say), but the game had saved and was leaving: a
+    // quit, not a crash. A crash report on the way out still counts.
+    let crashed = !stopping && code != Some(0) && !quit_on_purpose(&lines, &prepared.game_dir, launched_at);
     // Keep the end of the output beside Minecraft's own logs, for when something goes wrong.
     let logs = prepared.game_dir.join("logs");
     if std::fs::create_dir_all(&logs).is_ok() {
-        let _ = std::fs::write(logs.join("wisp-last-run.log"), lines.join("\n"));
+        let ending = match code {
+            Some(code) => format!("[Wisp] Java exited with code {code}"),
+            None => "[Wisp] Java was stopped from outside".to_string(),
+        };
+        let _ = std::fs::write(logs.join("wisp-last-run.log"), format!("{}\n{ending}\n", lines.join("\n")));
     }
     if let Some(line) = &prepared.hooks.post_exit {
         // Left running on its own: a slow post-exit command shouldn't hold up the launcher.
         let _ = hook_command(line, &prepared).spawn();
     }
-    let code = status.code();
-    let crashed = !stopping && code != Some(0);
     Ok(Exit {
         code,
         crashed,
         log_tail: lines.iter().rev().take(40).rev().cloned().collect(),
         output: lines,
         window_seen: window_up,
+    })
+}
+
+/// What Minecraft prints when it crashes: the report, and where it saved it (or couldn't).
+const CRASH_MARKERS: [&str; 3] = ["---- Minecraft Crash Report ----", "#@!@# Game crashed!", "#@?@# Game crashed!"];
+
+/// Whether a game that exited with a failing code had in fact been quit: Minecraft said it was
+/// stopping, and no crash report came after. Its own log is the second witness, for when the
+/// output came up short.
+fn quit_on_purpose(output: &[String], game_dir: &Path, launched_at: std::time::SystemTime) -> bool {
+    if let Some(quit) = stopped_cleanly(output.iter().map(String::as_str)) {
+        return quit;
+    }
+    // With a little slack for file systems that keep times to the second or two.
+    let written_since = std::fs::metadata(game_dir.join("logs").join("latest.log"))
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| modified + Duration::from_secs(2) >= launched_at);
+    written_since && crate::game_logs::read(game_dir, "logs/latest.log").is_ok_and(|log| stopped_cleanly(log.lines()) == Some(true))
+}
+
+/// Reading back from the end: `Some(true)` when the last thing of note is Minecraft saying
+/// "Stopping!", `Some(false)` when it's a crash report, `None` when it got to neither. A crash
+/// the game came back from (some mods catch them) is followed by a later "Stopping!", so it reads
+/// as a quit; Java itself failing after "Stopping!" (in a graphics driver, say) does too.
+fn stopped_cleanly<'a>(lines: impl DoubleEndedIterator<Item = &'a str>) -> Option<bool> {
+    lines.rev().find_map(|line| {
+        let line = line.trim_end();
+        if CRASH_MARKERS.iter().any(|marker| line.contains(marker)) {
+            Some(false)
+        } else if line == "Stopping!" || line.ends_with("]: Stopping!") || line.contains("[CDATA[Stopping!]]") {
+            Some(true)
+        } else {
+            None
+        }
     })
 }
 
@@ -1237,6 +1280,77 @@ fn extract_natives(jars: &[(PathBuf, Vec<String>)], target: &Path) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_game_that_said_stopping_was_quit() {
+        let read = |text: &str| stopped_cleanly(text.lines());
+        // Vanilla and Fabric, Forge, and the XML log format.
+        assert_eq!(read("[20:01:02] [Render thread/INFO]: Stopping!\n[20:01:02] [Sound engine/INFO]: closed"), Some(true));
+        assert_eq!(read("[20:01:02] [Render thread/INFO] [minecraft/Minecraft]: Stopping!"), Some(true));
+        assert_eq!(read("<log4j:Message><![CDATA[Stopping!]]></log4j:Message>"), Some(true));
+        // Java tripping after the game said goodbye is still a quit.
+        assert_eq!(read("[20:01:02] [Render thread/INFO]: Stopping!\n# A fatal error has been detected by the Java Runtime Environment:"), Some(true));
+        // A crash on the way out (saving the world, say) is a crash.
+        assert_eq!(read("[20:01:02] [Render thread/INFO]: Stopping!\n---- Minecraft Crash Report ----\n// Oops."), Some(false));
+        // A crash the game came back from, then a quit.
+        assert_eq!(read("#@!@# Game crashed! Crash report saved to: #@!@# x.txt\n[20:09:00] [Render thread/INFO]: Stopping!"), Some(true));
+        // Neither: a game that just died, or a mod saying something else.
+        assert_eq!(read("[20:01:02] [Render thread/INFO]: Loaded 7 recipes\nSegmentation fault"), None);
+        assert_eq!(read("[20:01:02] [Server thread/INFO]: Stopping server"), None);
+    }
+
+    /// Runs a stand-in for the game (a shell script) through `run`, in a folder of its own.
+    #[cfg(unix)]
+    async fn run_stand_in(name: &str, script: &str, before: impl FnOnce(&Path)) -> (Exit, String) {
+        let game_dir = std::env::temp_dir().join(format!("wisp-quit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&game_dir);
+        std::fs::create_dir_all(&game_dir).unwrap();
+        before(&game_dir);
+        let prepared = Prepared {
+            java: PathBuf::from("/bin/sh"),
+            jvm_args: vec!["-c".into(), script.into()],
+            main_class: "minecraft".into(),
+            game_args: Vec::new(),
+            game_dir: game_dir.clone(),
+            hooks: Hooks::default(),
+            hook_env: Vec::new(),
+            quick_play: None,
+        };
+        let (_keep_running, stop) = oneshot::channel();
+        let exit = run(prepared, &|_| {}, stop, || 0).await.unwrap();
+        let last_run = std::fs::read_to_string(game_dir.join("logs").join("wisp-last-run.log")).unwrap();
+        let _ = std::fs::remove_dir_all(&game_dir);
+        (exit, last_run)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quitting_is_not_crashing_whatever_the_exit_code() {
+        const STOPPING: &str = "echo '[20:01:02] [Render thread/INFO]: Stopping!'";
+        // Quit, then Java fails on the way out (the Windows case): a quit.
+        let (exit, last_run) = run_stand_in("driver", &format!("{STOPPING}; exit 1"), |_| {}).await;
+        assert!(!exit.crashed);
+        assert_eq!(exit.code, Some(1));
+        assert!(last_run.ends_with("[Wisp] Java exited with code 1\n"), "{last_run}");
+        // A plain quit.
+        assert!(!run_stand_in("clean", &format!("{STOPPING}; exit 0"), |_| {}).await.0.crashed);
+        // A crash, with and without a report.
+        assert!(run_stand_in("crash", "echo 'java.lang.IllegalStateException: boom'; exit 255", |_| {}).await.0.crashed);
+        let crashed_saving = format!("{STOPPING}; echo '#@!@# Game crashed! Crash report saved to: #@!@# c.txt'; exit 255");
+        assert!(run_stand_in("saving", &crashed_saving, |_| {}).await.0.crashed);
+        // Nothing on the console, but Minecraft's own log says it was quitting.
+        let logged = "mkdir -p logs; echo '[20:01:02] [Render thread/INFO]: Stopping!' > logs/latest.log; exit 1";
+        assert!(!run_stand_in("logged", logged, |_| {}).await.0.crashed);
+        // A latest.log from an earlier session doesn't count.
+        let stale = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("logs")).unwrap();
+            let log = dir.join("logs").join("latest.log");
+            std::fs::write(&log, "[20:01:02] [Render thread/INFO]: Stopping!\n").unwrap();
+            let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+            std::fs::File::options().write(true).open(&log).unwrap().set_modified(hour_ago).unwrap();
+        };
+        assert!(run_stand_in("stale", "exit 1", stale).await.0.crashed);
+    }
 
     #[test]
     fn launch_updates_serialize_the_way_the_ui_reads_them() {
