@@ -721,3 +721,19 @@ export async function skinDataUrl(id: string): Promise<string> {
 export async function setActiveSkin(id: string | null): Promise<void> {
   writeStorage("wisp.preview.skins", { ...readSkins(), active: id });
 }
+
+/** A tester build's code, made up (the preview has no real one). */
+export async function testerCode(): Promise<string | null> {
+  return import.meta.env.VITE_WISP_TESTER === "1" ? "WISP-7KQ2-M4XD-9FHT-B3NC-0WRE-5JVA" : null;
+}
+
+/** Acts out switching to tester builds: a check, a download, then the restart. A code ending in 0000 is turned away. */
+export async function joinTesterBuilds(code: string, onProgress: (done: number, total: number | null) => void): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  if (code.replace(/[^0-9a-z]/gi, "").endsWith("0000")) throw new Error("That tester code doesn't work any more. Ask for the current one.");
+  const total = 24_000_000;
+  for (let done = 0; done <= total; done += 1_500_000) {
+    onProgress(done, total);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+}
