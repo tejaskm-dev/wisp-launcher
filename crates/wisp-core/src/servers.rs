@@ -289,6 +289,9 @@ pub struct ServerStatus {
     pub ping_ms: Option<u32>,
     /// Why it couldn't be reached, when it couldn't.
     pub error: Option<String>,
+    /// Hosted with Wisp: joining from Wisp brings its mods and your skin along.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub wisp: bool,
 }
 
 /// A run of the MOTD in one style.
@@ -350,7 +353,7 @@ pub async fn statuses(addresses: Vec<String>) -> Vec<ServerStatus> {
 
 /// Where to connect: an address without a port may point elsewhere through an SRV record, the
 /// way the game looks it up.
-async fn resolve(address: &ServerAddress) -> (String, u16) {
+pub(crate) async fn resolve(address: &ServerAddress) -> (String, u16) {
     if let Some(port) = address.port {
         return (address.host.clone(), port);
     }
@@ -498,6 +501,7 @@ fn read_status(address: &str, answer: &Value, ping: u32) -> ServerStatus {
         icon,
         ping_ms: Some(ping),
         error: None,
+        wisp: answer.get("wisp").is_some_and(Value::is_object),
     }
 }
 

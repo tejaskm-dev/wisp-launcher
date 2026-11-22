@@ -1,5 +1,19 @@
-import type { HostedView } from "../../data/types";
-import { timeAgo } from "../../lib/format";
+import type { HostedView, ServerSoftware } from "../../data/types";
+import { loaderName, timeAgo } from "../../lib/format";
+
+const SOFTWARE_NAMES: Record<ServerSoftware, string> = { paper: "Paper", purpur: "Purpur", folia: "Folia", spigot: "Spigot" };
+
+/** What a server runs, by name: "Paper", "Fabric", "Vanilla". */
+export function softwareName(server: Pick<HostedView, "software" | "loader">): string {
+  return server.software ? SOFTWARE_NAMES[server.software] : loaderName(server.loader);
+}
+
+/** "12 mods", "3 plugins", or nothing for none. */
+export function contentCount(server: Pick<HostedView, "software" | "modCount">): string | null {
+  if (server.modCount === 0) return null;
+  const noun = server.software ? "plugin" : "mod";
+  return `${server.modCount} ${noun}${server.modCount === 1 ? "" : "s"}`;
+}
 import { describeLaunch } from "../launch/describe";
 
 export interface HostedStatus {

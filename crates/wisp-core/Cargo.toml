@@ -38,7 +38,23 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "0.10"
+# The same link through a server's door (tunnel/door.rs), as TLS over TCP.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 igd-next = { version = "0.18", default-features = false, features = ["aio_tokio"] }
+
+# playit.gg's own agent (BSD-2-Clause), for a public address per hosted server without installing
+# anything. Only tester builds carry it (feature "playit"), until playit agrees in writing to Wisp
+# bundling it (their terms 3.4); public builds guide players through playit's own app instead.
+playit-agent-core = { git = "https://github.com/playit-cloud/playit-agent", tag = "v2.0.2", optional = true }
+playit-api-client = { git = "https://github.com/playit-cloud/playit-agent", tag = "v2.0.2", optional = true }
+tokio-util = { version = "0.7", optional = true }
+
+[features]
+playit = ["dep:playit-agent-core", "dep:playit-api-client", "dep:tokio-util"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "playit_check"
+required-features = ["playit"]

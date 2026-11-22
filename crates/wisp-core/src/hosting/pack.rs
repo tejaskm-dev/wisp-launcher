@@ -82,14 +82,15 @@ impl Pack {
         Self::with_files(server, files)
     }
 
-    /// The pack for a server with no instance of its own: the mods in its folder (hashed here;
-    /// Modrinth's addresses can be added after).
+    /// The pack for a server with no instance of its own: the mods in its folder that players need
+    /// too (not those that say they only run on a server), hashed here; Modrinth's addresses can
+    /// be added after.
     pub fn from_server_mods(server: &HostedServer, dir: &Path) -> Self {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(dir.join("mods")).into_iter().flatten().flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = format!("mods/{name}");
-            if !safe_path(&path) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            if !safe_path(&path) || !entry.file_type().is_ok_and(|kind| kind.is_file()) || crate::doctor::read_jar(&entry.path()).server_only {
                 continue;
             }
             if let Some((sha1, size)) = hash_file(&entry.path()) {
@@ -221,6 +222,31 @@ pub fn sync_server_mods(instance_game_dir: &Path, server_dir: &Path, shareable: 
     Ok(synced)
 }
 
+/// A modpack's files meant for its server (a `.mrpack`'s `server-overrides`), into the server's
+/// folder.
+pub fn apply_server_overrides(pack: &Path, server_dir: &Path) -> std::io::Result<usize> {
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(pack)?)).map_err(std::io::Error::other)?;
+    let mut written = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(std::io::Error::other)?;
+        let Ok(full) = entry.name() else { continue };
+        let Some(relative) = full.strip_prefix("server-overrides/").map(str::to_string) else { continue };
+        // Nothing that climbs out of the folder.
+        let safe = !relative.is_empty() && !relative.starts_with('/') && !relative.split(['/', '\\']).any(|part| part == ".." || part.contains(':'));
+        if !safe || !entry.is_file() {
+            continue;
+        }
+        let target = server_dir.join(&relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::fs::File::create(&target)?;
+        std::io::copy(&mut entry, &mut out)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
 /// Copies the instance's settings folders the server reads too (mods' configs, KubeJS and
 /// CraftTweaker scripts), without replacing anything the server already has.
 pub fn copy_configs(instance_game_dir: &Path, server_dir: &Path) -> std::io::Result<()> {
@@ -248,12 +274,18 @@ fn copy_missing(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A plain server record for tests elsewhere in the crate.
+#[cfg(test)]
+pub(crate) fn tests_server() -> HostedServer {
+    tests::server()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::instances::Loader;
 
-    fn server() -> HostedServer {
+    pub(super) fn server() -> HostedServer {
         HostedServer {
             id: "build".into(),
             name: "Build".into(),
@@ -268,6 +300,14 @@ mod tests {
             friends_join: true,
             invited: vec![],
             open_port: false,
+            address: None,
+            software: None,
+            start_with_wisp: false,
+            restart_every_hours: None,
+            aikar_flags: false,
+            jvm_args: None,
+            java_major: None,
+            pack_file: None,
             backups: true,
             icon: None,
         }
@@ -278,6 +318,31 @@ mod tests {
         writer.start_file("fabric.mod.json", zip::write::SimpleFileOptions::default()).unwrap();
         std::io::Write::write_all(&mut writer, fabric_json.as_bytes()).unwrap();
         writer.finish().unwrap();
+    }
+
+    #[test]
+    fn lays_out_a_modpacks_server_files_and_nothing_outside() {
+        let root = std::env::temp_dir().join(format!("wisp-server-overrides-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("server")).unwrap();
+        let pack = root.join("pack.mrpack");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
+        for (name, text) in [
+            ("modrinth.index.json", "{}"),
+            ("overrides/config/client.toml", "client"),
+            ("server-overrides/config/server.toml", "server"),
+            ("server-overrides/../escape.txt", "no"),
+            ("server-overrides/server.properties", "motd=Pack"),
+        ] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut writer, text.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(apply_server_overrides(&pack, &root.join("server")).unwrap(), 2);
+        assert_eq!(std::fs::read_to_string(root.join("server/config/server.toml")).unwrap(), "server");
+        assert!(root.join("server/server.properties").is_file());
+        assert!(!root.join("server/config/client.toml").exists() && !root.join("escape.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

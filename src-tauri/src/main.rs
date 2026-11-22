@@ -8,6 +8,7 @@ mod imports;
 mod instance_page;
 mod library;
 mod multiplayer;
+mod playit;
 mod protocol;
 mod shared_options;
 mod skins;
@@ -710,7 +711,10 @@ async fn play(
                         let _ = window.minimize();
                     }
                 }
-                // The window closes outright, so the game gets the memory its web view used.
+                // The window closes outright, so the game gets the memory its web view used; while
+                // a server Wisp hosts runs it's only hidden, so nothing can end Wisp (and the
+                // server) on the way.
+                WhilePlaying::Hide if hosting::any_running(&app) => away::hide_for_hosting(&app),
                 WhilePlaying::Hide => away::close_for_game(&app),
             }
         }
@@ -1595,6 +1599,32 @@ fn updates_on(updates: State<'_, UpdatesOn>) -> bool {
     updates.0
 }
 
+/// Writes down any mistake Wisp makes (a panic) in `logs/problems.log`, with where it happened, so
+/// one can be found and fixed. The job it happened in stops; Wisp keeps going.
+fn note_problems(data: &std::path::Path) {
+    let log = data.join("logs").join("problems.log");
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let place = info.location().map(|place| format!("{}:{}", place.file(), place.line())).unwrap_or_default();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| text.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let line = format!("{} {} [{}] {message} at {place}\n", now_ms(), env!("CARGO_PKG_VERSION"), thread.name().unwrap_or("?"));
+        if let Some(folder) = log.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
     let network = Network {
         client: http_client().expect("failed to create the HTTP client"),
@@ -1637,6 +1667,7 @@ fn main() {
         .manage(hosting::Hosting::default())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
+            note_problems(&data);
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             app.manage(SettingsState(SyncMutex::new(Settings::load(
                 &settings_path,
@@ -1646,6 +1677,8 @@ fn main() {
                 data,
                 settings: settings_path,
             });
+            playit::manage(app);
+            hosting::start_with_wisp(app.handle());
             social::start_if_enabled(app.handle());
             sync::start(app.handle());
             Ok(())
@@ -1767,6 +1800,26 @@ fn main() {
             social::get_chat,
             social::send_chat,
             hosting::get_hosted_servers,
+            hosting::put_back_server_mod,
+            hosting::set_up_server_address,
+            hosting::get_server_software_versions,
+            hosting::get_server_content,
+            hosting::pick_server_icon,
+            hosting::join_server_address,
+            hosting::look_up_server_code,
+            hosting::join_server_code,
+            hosting::create_server_from_modpack,
+            hosting::add_server_files,
+            hosting::search_server_content,
+            hosting::install_server_content,
+            hosting::get_server_content_updates,
+            hosting::update_server_content,
+            hosting::set_server_content_enabled,
+            hosting::remove_server_content,
+            hosting::check_server_address,
+            playit::get_playit,
+            playit::link_playit,
+            playit::unlink_playit,
             hosting::get_hosted_server,
             hosting::create_hosted_server,
             hosting::update_hosted_server,
@@ -1837,11 +1890,11 @@ fn main() {
         .run(|app, event| match event {
             // The window closing for a game (or a running server) isn't quitting: Wisp waits in the tray.
             tauri::RunEvent::ExitRequested { code: None, api, .. } if app.state::<away::Away>().closing_for_game() => api.prevent_exit(),
-            // The window's close button while a server runs: the server keeps going, and the tray
-            // brings the window back. (Quitting on purpose still quits, below.)
+            // The window's close button while a server runs: the window hides, the server keeps
+            // going, and the tray brings the window back. (Quitting on purpose still quits, below.)
             tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. } if label == "main" && hosting::any_running(app) => {
                 api.prevent_close();
-                away::close_for_hosting(app);
+                away::hide_for_hosting(app);
             }
             // Quitting with servers running: they stop (and save) first.
             tauri::RunEvent::ExitRequested { api, .. } if hosting::hold_exit_for_servers(app) => api.prevent_exit(),

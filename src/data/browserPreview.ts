@@ -766,7 +766,11 @@ export async function setInstanceMemory(id: string, memoryMb: number | null): Pr
 // ── Hosting ──
 // Add ?hosting=running, ?hosting=stopped, ?hosting=preparing or ?hosting=crashed to the URL to see
 // a hosted server in that state. Without it there are none, as on a computer that hasn't hosted.
+// &address=1 gives it a playit address, &aside=1 a mod Wisp set aside, and &playit=built-in (or
+// linked) shows the tester builds' own playit instead of the guide public builds show.
 const hostingState = new URLSearchParams(window.location.search).get("hosting");
+const previewParams = new URLSearchParams(window.location.search);
+let previewAddress: string | undefined = previewParams.get("address") === "1" ? "salmon-crop.gl.joinmc.link" : undefined;
 
 function hostedPreview(): HostedView | null {
   const state = hostingState;
@@ -798,6 +802,7 @@ function hostedPreview(): HostedView | null {
     failure: state === "crashed" ? "The server stopped unexpectedly. Its console shows the last thing it said." : null,
     effectiveMemoryMb: 4096,
     automaticMemory: true,
+    pickedMemoryMb: 4096,
     modCount: 12,
     motd: "Preview server",
     onlineMode: false,
@@ -807,8 +812,46 @@ function hostedPreview(): HostedView | null {
     accounts: "wisp",
     friendsIn: [],
     reach: null,
+    address: previewAddress,
+    code: "WISP-7K2M-9QXA-4F2P",
+    software: previewParams.get("software") === "paper" ? "paper" : undefined,
+    setAside: previewParams.get("aside") === "1" ? [{ file: "xaeros-minimap-25.2.jar", name: "Xaero's Minimap", sha1: "0".repeat(40), at: now - 600_000 }] : [],
   };
 }
+
+export const serverContent = () =>
+  simulate(() =>
+    Promise.resolve({
+      kind: previewParams.get("software") ? ("plugins" as const) : ("mods" as const),
+      items: [
+        { file: "LuckPerms-Bukkit-5.5.71.jar", name: "LuckPerms", version: "5.5.71", enabled: true, projectId: "Vebnzrzj" },
+        { file: "EssentialsX-2.21.0.jar", name: "Essentials", version: "2.21.0", enabled: false, projectId: null },
+      ],
+      instanceName: null,
+      instanceId: null,
+    }),
+  );
+export const setUpServerAddress = (id: string) =>
+  simulate(async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 900));
+    previewAddress = "salmon-crop.gl.joinmc.link";
+    const server = hostedPreview();
+    return server && server.id === id ? server : Promise.reject(new Error("That server no longer exists."));
+  });
+export const checkServerAddress = () =>
+  simulate(async () => {
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    return hostingState === "running" ? { reachable: true, hint: null } : { reachable: false, hint: "Start the server, then check again: the address only answers while it runs." };
+  });
+const playitMode = previewParams.get("playit");
+let playitLinked = playitMode === "linked";
+export const playit = () =>
+  simulate(() => Promise.resolve({ builtIn: playitMode === "built-in" || playitMode === "linked", linked: playitLinked, linking: null, running: playitLinked && hostingState === "running", notice: null }));
+export const linkPlayit = () =>
+  simulate(() => {
+    playitLinked = true;
+    return Promise.resolve("https://playit.gg/claim/0a1b2c3d4e");
+  });
 
 export const hostedServers = () => simulate(() => Promise.resolve([hostedPreview()].filter((server): server is HostedView => server !== null)));
 export const hostedServer = (id: string) =>

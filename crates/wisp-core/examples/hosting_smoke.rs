@@ -1,7 +1,8 @@
 //! Sets up and starts a hosted server end to end in a throwaway folder, using Wisp's real data
 //! folder for Java and the game files (so what it downloads, the app reuses).
 //!
-//!   cargo run -p wisp-core --example hosting_smoke -- 26.3 fabric   (or vanilla, quilt, forge, neoforge)
+//!   cargo run -p wisp-core --example hosting_smoke -- 26.3 fabric
+//!   (or vanilla, quilt, forge, neoforge; or the plugin servers paper, purpur, folia, spigot)
 //!
 //! Without WISP_EULA=1 the server stops at Minecraft's EULA check, which proves everything up to
 //! the game itself. With it (set it only if you, the person running this, agree to the Minecraft
@@ -41,6 +42,14 @@ async fn main() {
         Some("neoforge") => Loader::NeoForge,
         _ => Loader::Vanilla,
     };
+    use wisp_core::hosting::software::Software;
+    let software = match args.get(1).map(String::as_str) {
+        Some("paper") => Some(Software::Paper),
+        Some("purpur") => Some(Software::Purpur),
+        Some("folia") => Some(Software::Folia),
+        Some("spigot") => Some(Software::Spigot),
+        _ => None,
+    };
     let client = wisp_core::download_client().expect("client");
     let loader_version = if loader == Loader::Vanilla { None } else { wisp_core::loaders::recommended(&client, loader, &version).await.expect("loader meta") };
     println!("Server: Minecraft {version}, {} {}", loader.display_name(), loader_version.as_deref().unwrap_or(""));
@@ -57,6 +66,7 @@ async fn main() {
                 instance_id: None,
                 icon: None,
                 properties: vec![("online-mode".into(), "false".into()), ("level-type".into(), "minecraft:flat".into())],
+                software,
             },
             now_ms(),
         )
@@ -70,7 +80,7 @@ async fn main() {
 
     let files = GameFiles::new(data_dir());
     let java_paths = Default::default();
-    let options = PrepareOptions { memory_mb: 2048, java_paths: &java_paths, jvm_args: Vec::new(), concurrency: 16 };
+    let options = PrepareOptions { memory_mb: 2048, java_major: None, java_paths: &java_paths, jvm_args: Vec::new(), concurrency: 16 };
     let started = std::time::Instant::now();
     let report = |update: LaunchUpdate| match update {
         LaunchUpdate::Downloading { done_bytes, total_bytes, done_files, total_files } if done_files == total_files => {
@@ -79,7 +89,10 @@ async fn main() {
         LaunchUpdate::Installing { loader } => println!("  running {loader}'s installer"),
         _ => {}
     };
-    let plan = install::prepare(&client, &files, &server, &dir, &options, &report).await.expect("prepare");
+    let mut plan = install::prepare(&client, &files, &server, &dir, &options, &report).await.expect("prepare");
+    // As the app does: the server on a port of its own, behind Wisp's door on the usual one.
+    let inner = std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|listener| listener.local_addr()).expect("a free port").port();
+    plan.listen_on(inner);
     println!("Ready to start after {:.1}s: {} {}", started.elapsed().as_secs_f64(), plan.java.display(), plan.args.join(" "));
 
     let events = Arc::new(|event: ServerEvent| match event {
@@ -95,6 +108,7 @@ async fn main() {
     }
     if running.state() == RunState::Running {
         println!("Up after {:.1}s.", (running.ready_at().unwrap_or_default() - running.started_at()) as f64 / 1000.0);
+        println!("Listening on its own port {inner}: {}", std::net::TcpStream::connect(("127.0.0.1", inner)).is_ok());
         running.send("list").await.expect("send");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

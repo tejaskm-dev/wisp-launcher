@@ -29,10 +29,28 @@ impl DeviceInfo {
     }
 }
 
-/// This computer's memory in megabytes, if the OS says.
+/// A program to run for its output, without a console window flashing up on Windows (where
+/// Wisp's own window has no console, so each console program would otherwise open one).
+pub(crate) fn quiet_command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
+/// This computer's memory in megabytes, if the OS says. Asked once: it doesn't change.
 pub fn total_memory_mb() -> Option<u64> {
+    static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *TOTAL.get_or_init(ask_total_memory_mb)
+}
+
+fn ask_total_memory_mb() -> Option<u64> {
     let output = |program: &str, args: &[&str]| {
-        std::process::Command::new(program)
+        quiet_command(program)
             .args(args)
             .output()
             .ok()
@@ -90,7 +108,7 @@ pub fn free_space(path: &std::path::Path) -> Option<u64> {
 
 fn ask_free_space(path: &std::path::Path) -> Option<u64> {
     let run = |program: &str, args: &[&std::ffi::OsStr]| {
-        std::process::Command::new(program)
+        quiet_command(program)
             .args(args)
             .output()
             .ok()

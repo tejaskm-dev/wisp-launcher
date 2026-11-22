@@ -156,6 +156,8 @@ pub enum LaunchError {
         version: String,
         game: String,
     },
+    #[error("{software} has no build for Minecraft {game} yet.")]
+    NoServerBuild { software: &'static str, game: String },
     #[error("The mod loader's installer failed: {0}")]
     Installer(String),
     #[error("No Java for this version: {0}.")]
@@ -744,6 +746,8 @@ fn hook_command(line: &str, prepared: &Prepared) -> tokio::process::Command {
         .envs(prepared.hook_env.iter().map(|(key, value)| (*key, value)))
         .current_dir(&prepared.game_dir)
         .stdin(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: the hook's output is read, not shown
     command
 }
 

@@ -1,8 +1,9 @@
-import { Check, Compass, Copy, MoreHorizontal, Play, Plus, RefreshCw, Server, ServerCog, Square, Trash2, Users } from "lucide-react";
+import { Check, Compass, Copy, KeyRound, MoreHorizontal, Play, Plus, RefreshCw, Server, ServerCog, Square, Trash2, Users } from "lucide-react";
 import { m } from "motion/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Ghost } from "../components/brand/Ghost";
 import { HostedServerCard } from "../components/hosting/HostedServerCard";
+import { JoinCodeDialog } from "../components/hosting/JoinCodeDialog";
 import { useHostedServers } from "../components/hosting/useHosted";
 import { describeLaunch } from "../components/launch/describe";
 import { AddServerDialog } from "../components/servers/AddServerDialog";
@@ -11,14 +12,15 @@ import { JoinServerDialog, type JoinTarget } from "../components/servers/JoinSer
 import { RowButton, ServerRow } from "../components/servers/ServerRow";
 import { useServerStatuses } from "../components/servers/useServerStatuses";
 import { Button } from "../components/ui/Button";
+import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageTabs } from "../components/ui/PageTabs";
 import { MenuItem, Popover } from "../components/ui/Popover";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
-import { removeServer, startHostedServer, stopHostedServer } from "../data/api";
-import type { ServerSummary } from "../data/types";
+import { joinServerAddress, onJoinProgress, removeServer, startHostedServer, stopHostedServer } from "../data/api";
+import type { JoinProgress, ServerSummary } from "../data/types";
 import { timeAgo } from "../lib/format";
 import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
@@ -39,6 +41,7 @@ export function ServersPage() {
   const { statuses, loading, refresh } = useServerStatuses(servers?.map((server) => server.address) ?? []);
   const [adding, setAdding] = useState(false);
   const [joining, setJoining] = useState<JoinTarget | null>(null);
+  const [joiningCode, setJoiningCode] = useState(false);
   const discover = useOpenServerDiscovery();
 
   return (
@@ -55,6 +58,9 @@ export function ServersPage() {
             )}
             <Button variant="secondary" icon={Compass} onClick={discover}>
               Find servers
+            </Button>
+            <Button variant="secondary" icon={KeyRound} onClick={() => setJoiningCode(true)}>
+              Join with a code
             </Button>
             <Button variant="secondary" icon={Plus} onClick={() => setAdding(true)}>
               Add server
@@ -109,6 +115,7 @@ export function ServersPage() {
       )}
 
       <AddServerDialog open={adding} onClose={() => setAdding(false)} />
+      {joiningCode && <JoinCodeDialog open onClose={() => setJoiningCode(false)} />}
       <JoinServerDialog target={joining} status={joining ? statuses[joining.address] : undefined} onClose={() => setJoining(null)} />
     </Page>
   );
@@ -182,6 +189,32 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
   const mine = !!update && sameServer(launchServers[instanceId], server.address);
   const active = view.kind === "busy" || view.kind === "running";
   const blocked = active && !mine;
+  // A server hosted with Wisp: Play brings its mods and your skin along.
+  const wisp = status?.wisp === true;
+  const [joining, setJoining] = useState<JoinProgress | null>(null);
+  const [consent, setConsent] = useState<{ server: string; files: string[] } | null>(null);
+  useEffect(() => (wisp ? onJoinProgress((progress) => progress.code === server.address && setJoining(progress.step === "done" || progress.step === "failed" ? null : progress)) : undefined), [wisp, server.address]);
+  const joinWisp = async (allowHostFiles: boolean) => {
+    setConsent(null);
+    setJoining({ code: server.address, serverId: "", step: "asking", doneBytes: 0, totalBytes: 0, message: null });
+    try {
+      const result = await joinServerAddress(server.address, allowHostFiles);
+      if (result.kind === "plain") play(instanceId, null, server.address);
+      else if (result.kind === "needs-consent") setConsent(result);
+    } catch (failure: unknown) {
+      notify({ tone: "info", title: `Couldn't join ${server.name}`, body: failure instanceof Error ? failure.message : String(failure) });
+    } finally {
+      setJoining(null);
+    }
+  };
+  const joinLabel =
+    joining?.step === "mods" && joining.totalBytes > 0
+      ? `Getting mods ${Math.round((joining.doneBytes / joining.totalBytes) * 100)}%`
+      : joining?.step === "launching"
+        ? "Starting the game"
+        : joining
+          ? "Connecting"
+          : null;
 
   const remove = async () => {
     try {
@@ -194,6 +227,7 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
   };
 
   return (
+    <>
     <ServerRow
       className="w-full"
       name={server.name}
@@ -209,6 +243,11 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
           </span>
           {server.lastPlayed !== null && <span className="text-[11px] text-mute-2">Played {timeAgo(server.lastPlayed, now)}</span>}
           {status?.version && <span className="truncate text-[11px] text-mute-2">{status.version}</span>}
+          {wisp && (
+            <span className="rounded-full bg-ember/12 px-2.5 py-1 text-[11px] font-bold text-ember-soft" title="Play from Wisp brings its mods and your skin along.">
+              Hosted with Wisp
+            </span>
+          )}
         </>
       }
       actions={
@@ -222,9 +261,9 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
               </RowButton>
             </>
           ) : (
-            <RowButton primary disabled={blocked || !instanceId} onClick={() => play(instanceId, null, server.address)} label={`Play ${server.name}`}>
+            <RowButton primary disabled={(blocked && !wisp) || !instanceId || joining !== null} onClick={() => (wisp ? void joinWisp(false) : play(instanceId, null, server.address))} label={`Play ${server.name}`}>
               <Play size={11} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-              {blocked ? "Instance busy" : "Play"}
+              {joinLabel ?? (blocked && !wisp ? "Instance busy" : "Play")}
             </RowButton>
           )}
           <button
@@ -269,5 +308,28 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
         </>
       }
     />
+    <Dialog
+      open={consent !== null}
+      onClose={() => setConsent(null)}
+      title={`${consent?.server ?? server.name} wants more than Modrinth has`}
+      description="Joining also installs files only this server has, not from Modrinth. Mods run code on your computer, so allow this only if you trust whoever runs it."
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => setConsent(null)}>
+            Don't join
+          </Button>
+          <Button onClick={() => void joinWisp(true)}>Install and join</Button>
+        </>
+      }
+    >
+      <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto rounded-xl bg-ink-900/60 p-3 font-mono text-xs text-cream-300">
+        {consent?.files.map((file) => (
+          <li key={file} className="truncate">
+            {file}
+          </li>
+        ))}
+      </ul>
+    </Dialog>
+    </>
   );
 }

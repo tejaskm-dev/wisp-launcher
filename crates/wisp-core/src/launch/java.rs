@@ -287,12 +287,13 @@ pub async fn probe(java: &Path) -> Result<JavaProbe, String> {
     if !java.is_file() {
         return Err("There's no file at that path.".into());
     }
+    let mut command = tokio::process::Command::new(java);
+    command.arg("-version").stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        tokio::process::Command::new(java)
-            .arg("-version")
-            .stdin(std::process::Stdio::null())
-            .output(),
+        command.output(),
     )
     .await
     .map_err(|_| "It didn't answer within 10 seconds.".to_string())?

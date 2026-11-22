@@ -12,10 +12,11 @@ pub enum Error {
     Refused(String),
 }
 
-const USER_AGENT: &str = concat!("wisp-launcher/", env!("CARGO_PKG_VERSION"));
+/// Who's asking, with a way to reach Wisp's makers (Modrinth and PaperMC ask API clients for both).
+const USER_AGENT: &str = concat!("wisp-launcher/", env!("CARGO_PKG_VERSION"), " (wisplaunchercontact@gmail.com)");
 
-/// One shared client for the API calls: reused connections, gzip, and a plain User-Agent
-/// (Modrinth asks API clients to identify themselves).
+/// One shared client for the API calls: reused connections, gzip, and a User-Agent that says who's
+/// asking.
 pub fn http_client() -> Result<HttpClient, Error> {
     Ok(HttpClient::builder()
         .user_agent(USER_AGENT)

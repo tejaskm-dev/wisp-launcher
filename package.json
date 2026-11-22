@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:tester": "tauri dev --features playit"
   },
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

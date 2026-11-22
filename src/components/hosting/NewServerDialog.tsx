@@ -1,7 +1,7 @@
-import { ExternalLink, Globe2, Server, ShieldCheck } from "lucide-react";
+import { ExternalLink, FileArchive, Globe2, Server, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { canAddOfflineAccounts, createHostedServer, getVersions, openExternal, startHostedServer } from "../../data/api";
-import type { Loader } from "../../data/types";
+import { canAddOfflineAccounts, createHostedServer, createServerFromModpack, getServerSoftwareVersions, getVersions, inspectImportFiles, openExternal, pickImportFiles, startHostedServer } from "../../data/api";
+import type { InspectedFile, Loader, ServerSoftware } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { loaderName } from "../../lib/format";
 import { useResource } from "../../lib/useResource";
@@ -18,19 +18,38 @@ const EULA = "https://aka.ms/MinecraftEULA";
 const FORM_ID = "new-server";
 const NEW_WORLD = "";
 
-type Source = "instance" | "fresh";
+type Source = "instance" | "fresh" | "pack";
 const SOURCES: SegmentOption<Source>[] = [
   { value: "instance", label: "From an instance" },
   { value: "fresh", label: "From scratch" },
+  { value: "pack", label: "From a modpack" },
 ];
 
-const LOADERS: SegmentOption<Loader>[] = [
-  { value: "vanilla", label: "Vanilla" },
-  { value: "fabric", label: "Fabric" },
-  { value: "quilt", label: "Quilt" },
-  { value: "forge", label: "Forge" },
-  { value: "neoforge", label: "NeoForge" },
+/** What the server runs: plain Minecraft, a plugin server, or a mod loader. */
+type Kind = Loader | ServerSoftware;
+const SOFTWARE: ServerSoftware[] = ["paper", "purpur", "folia", "spigot"];
+const isSoftware = (kind: Kind): kind is ServerSoftware => (SOFTWARE as string[]).includes(kind);
+const KINDS: SelectOption<Kind>[] = [
+  { value: "vanilla", label: "Vanilla", note: "Plain Minecraft" },
+  { value: "paper", label: "Paper", note: "Plugins, and runs faster" },
+  { value: "purpur", label: "Purpur", note: "Paper, with more to set" },
+  { value: "folia", label: "Folia", note: "Paper for very busy servers" },
+  { value: "spigot", label: "Spigot", note: "Plugins; built on first start" },
+  { value: "fabric", label: "Fabric", note: "Mods" },
+  { value: "quilt", label: "Quilt", note: "Mods" },
+  { value: "forge", label: "Forge", note: "Mods" },
+  { value: "neoforge", label: "NeoForge", note: "Mods" },
 ];
+const KIND_NOTE: Partial<Record<Kind, string>> = {
+  paper: "Runs Bukkit, Spigot and Paper plugins, which you add on its Plugins tab. Players join with plain Minecraft.",
+  purpur: "Paper with extra settings, and the same plugins. Players join with plain Minecraft.",
+  folia: "Spreads a busy server over many processor cores. Only plugins made for Folia run on it.",
+  spigot: "Runs Bukkit and Spigot plugins. Wisp builds it from source the first time, which takes a few minutes (and Git, outside Windows). Paper runs the same plugins and starts at once.",
+  fabric: "Add its mods on its Mods tab. Friends who join through Wisp get the ones they need by themselves.",
+  quilt: "Add its mods on its Mods tab. Friends who join through Wisp get the ones they need by themselves.",
+  forge: "Add its mods on its Mods tab. Friends who join through Wisp get the ones they need by themselves.",
+  neoforge: "Add its mods on its Mods tab. Friends who join through Wisp get the ones they need by themselves.",
+};
 
 type Difficulty = "peaceful" | "easy" | "normal" | "hard";
 const DIFFICULTIES: ChipOption<Difficulty>[] = [
@@ -60,12 +79,45 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
   const [world, setWorld] = useState(startWorld ?? NEW_WORLD);
   const [versions] = useResource(getVersions);
   const [version, setVersion] = useState<string | null>(null);
-  const [loader, setLoader] = useState<Loader>("vanilla");
+  const [kind, setKind] = useState<Kind>("vanilla");
+  const loader: Loader = isSoftware(kind) ? "vanilla" : kind;
+  // Paper and its kin list the versions they have builds for.
+  const [softwareVersions, setSoftwareVersions] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!isSoftware(kind) || kind === "spigot") {
+      setSoftwareVersions(null);
+      return;
+    }
+    let active = true;
+    setSoftwareVersions(null);
+    getServerSoftwareVersions(kind).then(
+      (found) => active && setSoftwareVersions(found),
+      () => active && setSoftwareVersions([]),
+    );
+    return () => {
+      active = false;
+    };
+  }, [kind]);
   const [name, setName] = useState("");
   const [difficulty, setDifficulty] = useState<Difficulty>("normal");
   const [gameMode, setGameMode] = useState<GameMode>("survival");
   const [seed, setSeed] = useState("");
   const [eula, setEula] = useState(false);
+  // From a modpack file: the file, and what it makes.
+  const [pack, setPack] = useState<InspectedFile | null>(null);
+  const [packError, setPackError] = useState<string | null>(null);
+  const choosePack = async () => {
+    setPackError(null);
+    try {
+      const picked = (await pickImportFiles()).filter((path) => /\.(mrpack|zip)$/i.test(path));
+      if (picked.length === 0) return;
+      const [found] = await inspectImportFiles([picked[0]]);
+      if (found?.kind === "modpack" && found.pack) setPack(found);
+      else setPackError(found?.problem ?? `${found?.fileName ?? "That file"} isn't a modpack. Pick a .mrpack, or a CurseForge zip.`);
+    } catch (failure: unknown) {
+      setPackError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,16 +129,20 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
   }, [worlds, world]);
 
   const releases = versions.status === "ready" ? versions.data.versions.filter((entry) => entry.kind === "release") : [];
-  const latest = versions.status === "ready" ? versions.data.latestRelease : null;
-  const shownVersion = version ?? latest;
-  const versionOptions: SelectOption<string>[] = releases.map((entry) => ({ value: entry.id, label: entry.id, note: entry.id === latest ? "Newest" : undefined }));
+  const latestRelease = versions.status === "ready" ? versions.data.latestRelease : null;
+  const offered = softwareVersions ?? releases.map((entry) => entry.id);
+  const latest = softwareVersions ? (softwareVersions[0] ?? null) : latestRelease;
+  const shownVersion = version !== null && offered.includes(version) ? version : latest;
+  const versionOptions: SelectOption<string>[] = offered.map((id) => ({ value: id, label: id, note: id === latest ? "Newest" : undefined }));
+  const kindName = KINDS.find((option) => option.value === kind)?.label ?? loaderName(loader);
   const worldOptions: SelectOption<string>[] = [{ value: NEW_WORLD, label: "A new world" }, ...worlds.map((candidate) => ({ value: candidate.folder, label: candidate.name }))];
 
   const picked = source === "instance" ? instance : null;
   const pickedWorld = source === "instance" ? (worlds.find((candidate) => candidate.folder === world) ?? null) : null;
-  const suggestedName = pickedWorld?.name ?? picked?.name ?? (shownVersion ? `${loaderName(loader)} ${shownVersion} server` : "My server");
-  const ready = eula && !pending && (source === "instance" ? picked !== null : shownVersion !== null);
-  const newWorld = source === "fresh" || world === NEW_WORLD;
+  const packName = source === "pack" && pack ? (pack.pack?.name ?? pack.fileName.replace(/\.(mrpack|zip)$/i, "")) : null;
+  const suggestedName = packName ?? pickedWorld?.name ?? picked?.name ?? (shownVersion ? `${kindName} ${shownVersion} server` : "My server");
+  const ready = eula && !pending && (source === "instance" ? picked !== null : source === "pack" ? pack !== null : shownVersion !== null);
+  const newWorld = source !== "instance" || world === NEW_WORLD;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -99,6 +155,16 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
     ];
     if (newWorld && seed.trim()) properties.push(["level-seed", seed.trim()]);
     try {
+      if (source === "pack" && pack) {
+        const made = await createServerFromModpack({ path: pack.path, name: name.trim() || suggestedName, properties, eula });
+        onClose();
+        openHosted(made.id);
+        // Its first start sets the modpack up, then starts it.
+        await startHostedServer(made.id).catch((failure: unknown) =>
+          notify({ tone: "info", title: `Couldn't start ${made.name}`, body: failure instanceof Error ? failure.message : String(failure) }),
+        );
+        return;
+      }
       const server = await createHostedServer({
         name: name.trim() || suggestedName,
         gameVersion: picked?.gameVersion ?? shownVersion ?? "",
@@ -108,6 +174,7 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
         world: picked && !newWorld ? { instanceId: picked.id, folder: world } : null,
         properties,
         eula,
+        software: picked || !isSoftware(kind) ? null : kind,
       });
       onClose();
       openHosted(server.id);
@@ -139,9 +206,30 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
       }
     >
       <form id={FORM_ID} onSubmit={submit} className="flex flex-col gap-5">
-        {instances.length > 0 && <Segmented label="Start" value={source} options={SOURCES} onChange={setSource} />}
+        <Segmented label="Start" value={source} options={instances.length > 0 ? SOURCES : SOURCES.filter((option) => option.value !== "instance")} onChange={setSource} />
 
-        {source === "instance" ? (
+        {source === "pack" ? (
+          <div className="flex flex-col gap-3">
+            <button
+              type="button"
+              onClick={() => void choosePack()}
+              className="flex items-center gap-3 rounded-[18px] border border-dashed border-cream/20 bg-cream/4 p-4 text-left transition-colors hover:border-cream/40"
+            >
+              <FileArchive size={22} className="shrink-0 text-ember-soft" aria-hidden="true" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-bold">{pack ? (pack.pack?.name ?? pack.fileName) : "Choose a modpack file"}</span>
+                <span className="block truncate text-xs text-mute">
+                  {pack?.pack ? `${loaderName(pack.pack.loader)} ${pack.pack.gameVersion}${pack.pack.version ? ` · ${pack.pack.version}` : ""}` : "A .mrpack from Modrinth, or a CurseForge zip"}
+                </span>
+              </span>
+              <span className="shrink-0 text-xs font-bold text-cream-300">{pack ? "Change" : "Browse"}</span>
+            </button>
+            {packError && <p className="rounded-xl bg-coral/10 px-3.5 py-2.5 text-sm text-coral">{packError}</p>}
+            <p className="-mt-1 text-xs leading-relaxed text-mute">
+              It becomes an instance too, which is what players join with: friends get its mods by themselves. The server runs the ones that work on a server, with the pack's own server files.
+            </p>
+          </div>
+        ) : source === "instance" ? (
           <div className="flex flex-col gap-4">
             <InstancePicker instances={instances} value={instanceId} onChange={setInstanceId} label="Play it with" />
             <p className="-mt-2 text-xs leading-relaxed text-mute">
@@ -152,8 +240,19 @@ export function NewServerDialog({ open, onClose, instanceId: startInstance, worl
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <Segmented label="Loader" value={loader} options={LOADERS} onChange={setLoader} />
-            <Select label="Minecraft version" value={shownVersion ?? ""} options={versionOptions.length > 0 ? versionOptions : [{ value: "", label: versions.status === "error" ? "Couldn't load the versions" : "Loading versions…" }]} onChange={setVersion} searchable />
+            <Select label="Runs" value={kind} options={KINDS} onChange={setKind} />
+            {KIND_NOTE[kind] && <p className="-mt-2 text-xs leading-relaxed text-mute">{KIND_NOTE[kind]}</p>}
+            <Select
+              label="Minecraft version"
+              value={shownVersion ?? ""}
+              options={
+                versionOptions.length > 0
+                  ? versionOptions
+                  : [{ value: "", label: versions.status === "error" || softwareVersions?.length === 0 ? "Couldn't load the versions" : "Loading versions…" }]
+              }
+              onChange={setVersion}
+              searchable
+            />
           </div>
         )}
 

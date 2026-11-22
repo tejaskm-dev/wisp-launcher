@@ -24,3 +24,8 @@ tauri-plugin-updater = "2"
 tokio = { version = "1.54.1", features = ["sync", "macros", "time"] }
 trash = "5"
 wisp-core = { path = "../crates/wisp-core" }
+
+[features]
+# playit.gg's agent inside Wisp, for a public address per server (tester builds; see
+# wisp-core's Cargo.toml). Public builds leave it out.
+playit = ["wisp-core/playit"]

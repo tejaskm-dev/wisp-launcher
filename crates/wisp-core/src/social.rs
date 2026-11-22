@@ -97,6 +97,10 @@ pub struct ServerCard {
     /// How many mods its instance has (friends who join get them).
     #[serde(default)]
     pub mods: u32,
+    /// A plugin server's software ("paper", "purpur", "folia", "spigot"); players join with
+    /// plain Minecraft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub software: Option<String>,
 }
 
 impl ServerCard {
@@ -108,6 +112,7 @@ impl ServerCard {
         self.id = self.id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(64).collect();
         self.game_version = self.game_version.chars().filter(|c| !c.is_control()).take(32).collect();
         self.loader = self.loader.chars().filter(char::is_ascii_lowercase).take(16).collect();
+        self.software = self.software.map(|software| software.chars().filter(char::is_ascii_lowercase).take(16).collect::<String>()).filter(|software| !software.is_empty());
         self.loader_version = self.loader_version.map(|version| version.chars().filter(|c| !c.is_control()).take(48).collect());
         self
     }
@@ -858,6 +863,7 @@ mod tests {
             players: 1,
             max_players: 10,
             mods: 40,
+            software: None,
         }
     }
 
@@ -871,7 +877,7 @@ mod tests {
         assert_eq!(b.apply("i2", alice, bob, Message::ServerInvite { server: card("build") }, 6), Applied::ServerInvited { from: alice.into(), server: "Build night".into() });
         assert_eq!(b.server_invites.len(), 1, "a second invite to the same server replaces the first");
         assert_eq!(b.apply("i3", eve, bob, Message::ServerInvite { server: card("x") }, 6), Applied::Nothing);
-        let offer = crate::tunnel::Offer { candidates: vec!["192.168.1.2:5000".into()], fingerprint: "ab".repeat(32) };
+        let offer = crate::tunnel::Offer { candidates: vec!["192.168.1.2:5000".into()], fingerprint: "ab".repeat(32), doors: Vec::new() };
         let asked = b.apply("j1", alice, bob, Message::JoinRequest { server_id: "build".into(), session: "s1".into(), offer: offer.clone(), player: None }, 7);
         assert!(matches!(asked, Applied::JoinRequested { ref server_id, .. } if server_id == "build"));
         assert_eq!(b.apply("j2", eve, bob, Message::JoinRequest { server_id: "build".into(), session: "s2".into(), offer, player: None }, 7), Applied::Nothing);

@@ -12,7 +12,8 @@ interface PageHeaderProps {
 export function PageHeader({ title, subtitle, actions }: PageHeaderProps) {
   return (
     <m.header variants={fadeUp} className="flex flex-wrap items-end gap-x-6 gap-y-4">
-      <div className="min-w-0 flex-1">
+      {/* Wide enough to read: with many actions they wrap below rather than squeezing this. */}
+      <div className="min-w-[min(100%,26rem)] flex-1">
         <h1 className="flex items-start gap-2 font-display text-[40px] font-extrabold leading-none tracking-[-0.035em]">
           {title}
           <Sparkle twinkle className="mt-0.5 size-4 text-ember" />

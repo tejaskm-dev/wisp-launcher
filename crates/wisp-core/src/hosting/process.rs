@@ -44,7 +44,8 @@ pub struct ConsoleLine {
     /// Unix milliseconds.
     pub at: i64,
     pub text: String,
-    /// "info", "warn" or "error" as the server logged it, or "input" for a command typed in.
+    /// "info", "warn" or "error" as the server logged it, "input" for a command typed in, or
+    /// "wisp" for what Wisp itself did.
     pub level: &'static str,
 }
 
@@ -106,9 +107,10 @@ pub fn read_line(line: &str) -> Option<Said> {
 fn level_of(line: &str) -> &'static str {
     let end = line.find("]: ").map_or(line.len(), |index| index + 1).min(160);
     let head = line.get(..end).unwrap_or(line);
-    if head.contains("/ERROR]") || head.contains("/FATAL]") || head.contains("[ERROR]") {
+    // Vanilla, Fabric and Forge write "[Server thread/WARN]"; Paper and its forks "[12:00:01 WARN]".
+    if head.contains("/ERROR]") || head.contains("/FATAL]") || head.contains("[ERROR]") || head.contains(" ERROR]") || head.contains(" FATAL]") {
         "error"
-    } else if head.contains("/WARN]") || head.contains("[WARN]") {
+    } else if head.contains("/WARN]") || head.contains("[WARN]") || head.contains(" WARN]") {
         "warn"
     } else {
         "info"
@@ -234,13 +236,35 @@ async fn read_output(stream: impl AsyncRead + Unpin, process: Arc<ServerProcess>
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
-        let text = String::from_utf8_lossy(&buffer).trim_end().to_string();
+        let text = plain(&String::from_utf8_lossy(&buffer)).trim_end().to_string();
         if text.is_empty() {
             continue;
         }
         process.heard(&text);
         process.log(ConsoleLine { at: (process.now)(), level: level_of(&text), text });
     }
+}
+
+/// The text without terminal colour codes (NeoForge colours its console, which shows as `[m[32m`
+/// anywhere but a terminal).
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ … final byte in @–~.
+        if chars.next_if_eq(&'[').is_some() {
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 impl ServerProcess {
@@ -307,6 +331,11 @@ impl ServerProcess {
 
     pub fn players(&self) -> Vec<String> {
         lock(&self.players).clone()
+    }
+
+    /// Writes a line of Wisp's own into the console (what it did about the server).
+    pub fn note(&self, text: &str) {
+        self.log(ConsoleLine { at: (self.now)(), text: format!("[Wisp] {text}"), level: "wisp" });
     }
 
     pub fn console(&self) -> Vec<ConsoleLine> {
@@ -377,6 +406,20 @@ impl ServerProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_papers_levels_too() {
+        assert_eq!(level_of("[16:15:19 WARN]: Failed to load eula.txt"), "warn");
+        assert_eq!(level_of("[16:15:19 ERROR]: Could not load plugin"), "error");
+        assert_eq!(level_of("[16:15:19 INFO]: Done (3.1s)! For help, type \"help\""), "info");
+        assert_eq!(read_line("[16:15:19 INFO]: Done (3.1s)! For help, type \"help\""), Some(Said::Ready));
+    }
+
+    #[test]
+    fn takes_colour_codes_out_of_console_lines() {
+        assert_eq!(plain("\u{1b}[m\u{1b}[32m[15:52:31.192] [main/INFO] [LaunchServiceHandler/MODLAUNCHER]: Launching\u{1b}[0m"), "[15:52:31.192] [main/INFO] [LaunchServiceHandler/MODLAUNCHER]: Launching");
+        assert_eq!(plain("no codes [here]"), "no codes [here]");
+    }
 
     #[test]
     fn reads_what_servers_say() {
