@@ -416,9 +416,10 @@ function Face({ face, name, status }: { face: string | null; name: string; statu
   );
 }
 
-/** "Fabric 26.3 · 40 mods". */
+/** "Fabric 26.3 · 40 mods", "Paper 26.3". */
 function serverLine(server: ServerCard): string {
-  return [`${loaderName(server.loader)} ${server.gameVersion}`, server.mods > 0 ? `${server.mods} mods` : null].filter(Boolean).join(" · ");
+  const runs = server.software ? server.software.charAt(0).toUpperCase() + server.software.slice(1) : loaderName(server.loader);
+  return [`${runs} ${server.gameVersion}`, server.mods > 0 ? `${server.mods} mods` : null].filter(Boolean).join(" · ");
 }
 
 const JOIN_STEPS: Record<JoinProgress["step"], string> = {

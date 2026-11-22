@@ -1,6 +1,7 @@
 //! Wisp's launcher logic. It has no UI code, so the Tauri app (and later a CLI) can share it.
 
 pub mod accounts;
+pub mod codes;
 pub mod content;
 pub mod curseforge;
 pub mod device;
@@ -20,6 +21,8 @@ pub mod modpack;
 pub mod modrinth;
 pub mod nbt;
 pub mod performance;
+#[cfg(feature = "playit")]
+pub mod playit;
 pub mod screenshots;
 pub mod servers;
 pub mod settings;

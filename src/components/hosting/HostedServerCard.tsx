@@ -1,11 +1,10 @@
 import { LoaderCircle, Play, Square, Users } from "lucide-react";
 import type { HostedView } from "../../data/types";
 import { cn } from "../../lib/cn";
-import { loaderName } from "../../lib/format";
 import { InstanceAvatar } from "../instances/InstanceAvatar";
 import { RowButton } from "../servers/ServerRow";
 import { ProgressBar } from "../ui/ProgressBar";
-import { hostedStatus, TONE_DOT, TONE_TEXT } from "./describe";
+import { contentCount, hostedStatus, softwareName, TONE_DOT, TONE_TEXT } from "./describe";
 
 /** A server hosted on this computer, as a card: what it runs, whether it's up, who's on. */
 export function HostedServerCard({
@@ -37,8 +36,8 @@ export function HostedServerCard({
           <div className="min-w-0 flex-1">
             <h3 className="truncate font-display text-[17px] font-bold leading-tight">{server.name}</h3>
             <p className="truncate text-xs text-mute-2">
-              {loaderName(server.loader)} {server.gameVersion}
-              {server.modCount > 0 && ` · ${server.modCount} mods`}
+              {softwareName(server)} {server.gameVersion}
+              {contentCount(server) && ` · ${contentCount(server)}`}
               {server.instanceName && ` · played with ${server.instanceName}`}
             </p>
           </div>

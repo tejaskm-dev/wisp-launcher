@@ -41,6 +41,7 @@ import type {
   SavedServer,
   Screenshot,
   SearchQuery,
+  SearchSort,
   SearchResults,
   ServerStatus,
   Settings,
@@ -73,6 +74,14 @@ import type {
   ConsoleLine,
   Conversation,
   HostedView,
+  AddressCheck,
+  AddressJoin,
+  CodeLookup,
+  PlayitEvent,
+  PlayitView,
+  ServerContentUpdate,
+  ServerContentView,
+  ServerSoftware,
   HostingChange,
   JoinProgress,
   NewHostedServer,
@@ -308,6 +317,53 @@ export const restoreServerBackup = (id: string, backup: string) => call<void>("r
 /** Starts the game straight into one of your servers. Resolves with the instance playing it. */
 export const playHostedServer = (id: string) => call<string>("play_hosted_server", { id }, hostingNeedsDesktop);
 export const inviteToServer = (id: string, code: string) => call<HostedView>("invite_to_server", { id, code }, hostingNeedsDesktop);
+/** Finds the server a join code belongs to. */
+export const lookUpServerCode = (code: string) =>
+  call<CodeLookup>("look_up_server_code", { code }, () =>
+    Promise.resolve({
+      code: "WISP-7K2M-9QXA-4F2P",
+      server: { name: "Preview island", gameVersion: "26.3", loader: "fabric", software: null, addresses: ["salmon-crop.gl.joinmc.link"], online: true, players: 2, maxPlayers: 10, mods: 40, at: Date.now() },
+    }),
+  );
+/** Joins a server by its join code, mods and skin along. */
+export const joinServerCode = (code: string, allowHostFiles = false) => call<AddressJoin>("join_server_code", { code, allowHostFiles }, hostingNeedsDesktop);
+/** Joins a server hosted with Wisp by its address, its mods and your skin along. */
+export const joinServerAddress = (address: string, allowHostFiles = false) => call<AddressJoin>("join_server_address", { address, allowHostFiles }, () => Promise.resolve({ kind: "plain" } as const));
+/** Adds plugin or mod files (and data packs) to a server: the ones given, or picked now. */
+export const addServerFiles = (id: string, files: string[] | null = null) => call<string[]>("add_server_files", { id, files }, hostingNeedsDesktop);
+/** Makes a server from a modpack file (it becomes the server's instance on its first start). */
+export const createServerFromModpack = (request: { path: string; name: string; properties: [string, string][]; eula: boolean }) =>
+  call<HostedView>("create_server_from_modpack", { request }, hostingNeedsDesktop);
+export const putBackServerMod = (id: string, file: string) => call<HostedView>("put_back_server_mod", { id, file }, hostingNeedsDesktop);
+/** Picks a picture for the server's icon in the game's list; resolves false when cancelled. */
+export const pickServerIcon = (id: string) => call<boolean>("pick_server_icon", { id }, hostingNeedsDesktop);
+export const getServerSoftwareVersions = (software: ServerSoftware) => call<string[]>("get_server_software_versions", { software }, () => Promise.resolve(["26.3", "1.21.11", "1.21.4"]));
+export const getServerContent = (id: string) => call<ServerContentView>("get_server_content", { id }, (p) => p.serverContent());
+export const searchServerContent = (id: string, query: string, offset = 0, sort: SearchSort = "relevance", categories: string[] = []) =>
+  call<SearchResults>("search_server_content", { id, query, offset, sort, categories }, (p) =>
+    p.search({ source: "modrinth", query, projectType: "mod", sort, loaders: [], categories, gameVersion: null, environment: null, offset, limit: 24 }),
+  );
+export const getServerContentUpdates = (id: string) => call<ServerContentUpdate[]>("get_server_content_updates", { id }, () => Promise.resolve([]));
+/** Installs newer builds: of these files, or of everything. */
+export const updateServerContent = (id: string, files: string[] | null = null) => call<ServerContentView>("update_server_content", { id, files }, hostingNeedsDesktop);
+export const installServerContent = (id: string, projectId: string) => call<ServerContentView>("install_server_content", { id, projectId }, hostingNeedsDesktop);
+export const setServerContentEnabled = (id: string, file: string, enabled: boolean) => call<ServerContentView>("set_server_content_enabled", { id, file, enabled }, hostingNeedsDesktop);
+export const removeServerContent = (id: string, file: string) => call<ServerContentView>("remove_server_content", { id, file }, hostingNeedsDesktop);
+/** A playit tunnel and address for the server (builds that run playit's agent). */
+export const setUpServerAddress = (id: string) => call<HostedView>("set_up_server_address", { id }, (p) => p.setUpServerAddress(id));
+export const checkServerAddress = (id: string) => call<AddressCheck>("check_server_address", { id }, (p) => p.checkServerAddress());
+
+// ── playit.gg (src-tauri/src/playit.rs) ──
+
+export const getPlayit = () => call<PlayitView>("get_playit", undefined, (p) => p.playit());
+/** Opens playit's page to link this computer; resolves with the page's address. */
+export const linkPlayit = () => call<string>("link_playit", undefined, (p) => p.linkPlayit());
+export const unlinkPlayit = () => call<void>("unlink_playit", undefined, () => Promise.resolve());
+export function onPlayit(handler: (event: PlayitEvent) => void): () => void {
+  if (!isDesktop) return () => {};
+  const stop = listen<PlayitEvent>("playit", (event) => handler(event.payload));
+  return () => void stop.then((unlisten) => unlisten());
+}
 
 /** Calls `handler` whenever a hosted server changes, with what changed. */
 export function onHostingChange(handler: (change: HostingChange) => void): () => void {

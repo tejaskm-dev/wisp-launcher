@@ -9,11 +9,14 @@
 //! network, through a direct link between the two Wisps (see `tunnel`), or at an address the
 //! player's router opens.
 
+pub mod content;
 pub mod install;
+pub mod mods;
 pub mod pack;
 pub mod players;
 pub mod process;
 pub mod properties;
+pub mod software;
 pub mod world;
 
 use std::path::{Path, PathBuf};
@@ -56,6 +59,32 @@ pub struct HostedServer {
     /// Ask the router to open the server's port (UPnP), so anyone with the address can join.
     #[serde(default)]
     pub open_port: bool,
+    /// The address people join from anywhere, when it has one: a playit tunnel's, or this
+    /// computer's own when its router forwards the port. Wisp joins can come in through it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    /// A plugin server (Paper, Purpur, Folia, Spigot) instead of the loader's own; the loader is
+    /// then Vanilla, which is what players join with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub software: Option<software::Software>,
+    /// Start it whenever Wisp opens.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub start_with_wisp: bool,
+    /// Restart it every so many hours while it runs (players are warned first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_every_hours: Option<u32>,
+    /// Aikar's garbage-collection flags, the usual tuning for busy servers.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub aikar_flags: bool,
+    /// Java arguments of the player's own, after Wisp's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jvm_args: Option<String>,
+    /// Which Java to run it with (8, 17, 21, 25); none picks what its Minecraft version wants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_major: Option<u32>,
+    /// A modpack file in its folder, still to become the instance it runs (on its first start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_file: Option<String>,
     /// Keep a restore point of the world whenever the server stops.
     #[serde(default = "yes")]
     pub backups: bool,
@@ -66,6 +95,71 @@ pub struct HostedServer {
 
 fn yes() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// Aikar's flags (mcflags.emc.gs), without AlwaysPreTouch: on a computer someone also plays on,
+/// claiming every byte of the server's memory up front isn't worth it.
+pub const AIKAR_FLAGS: &[&str] = &[
+    "-XX:+UseG1GC",
+    "-XX:+ParallelRefProcEnabled",
+    "-XX:MaxGCPauseMillis=200",
+    "-XX:+UnlockExperimentalVMOptions",
+    "-XX:+DisableExplicitGC",
+    "-XX:G1NewSizePercent=30",
+    "-XX:G1MaxNewSizePercent=40",
+    "-XX:G1HeapRegionSize=8M",
+    "-XX:G1ReservePercent=20",
+    "-XX:G1HeapWastePercent=5",
+    "-XX:G1MixedGCCountTarget=4",
+    "-XX:InitiatingHeapOccupancyPercent=15",
+    "-XX:G1MixedGCLiveThresholdPercent=90",
+    "-XX:G1RSetUpdatingPauseTimePercent=5",
+    "-XX:SurvivorRatio=32",
+    "-XX:+PerfDisableSharedMem",
+    "-XX:MaxTenuringThreshold=1",
+    "-Dusing.aikars.flags=https://mcflags.emc.gs",
+    "-Daikars.new.flags=true",
+];
+
+/// The picture beside the server in the game's server list: any PNG or JPEG, cut square and made
+/// 64 by 64, as the game wants it.
+pub fn set_icon(dir: &Path, picture: &Path) -> Result<(), String> {
+    let image = image::open(picture).map_err(|_| "That picture couldn't be read. Pick a PNG or JPEG.".to_string())?;
+    let icon = image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3);
+    icon.save_with_format(dir.join("server-icon.png"), image::ImageFormat::Png).map_err(|error| error.to_string())
+}
+
+/// Splits Java arguments typed by the player into words, keeping quoted parts together.
+pub fn split_args(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(open), _) if c == open => quote = None,
+            (Some(_), _) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                started = false;
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if started || !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 /// What the "New server" dialog sends.
@@ -83,6 +177,9 @@ pub struct NewServer {
     /// server.properties settings to start with (difficulty, gamemode, level-seed…).
     #[serde(default)]
     pub properties: Vec<(String, String)>,
+    /// A plugin server instead of plain Vanilla.
+    #[serde(default)]
+    pub software: Option<software::Software>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -158,6 +255,14 @@ impl ServerStore {
             friends_join: true,
             invited: Vec::new(),
             open_port: false,
+            address: None,
+            software: request.software.filter(|_| request.loader == Loader::Vanilla),
+            start_with_wisp: false,
+            restart_every_hours: None,
+            aikar_flags: false,
+            jvm_args: None,
+            java_major: None,
+            pack_file: None,
             backups: true,
             icon: request.icon,
         };
@@ -282,10 +387,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let store = ServerStore::new(&root);
         assert!(matches!(
-            store.create(NewServer { name: "  ".into(), game_version: "26.3".into(), loader: Loader::Vanilla, loader_version: None, instance_id: None, icon: None, properties: vec![] }, 1),
+            store.create(NewServer { software: None, name: "  ".into(), game_version: "26.3".into(), loader: Loader::Vanilla, loader_version: None, instance_id: None, icon: None, properties: vec![] }, 1),
             Err(HostingError::EmptyName)
         ));
         let request = |name: &str| NewServer {
+            software: None,
             name: name.into(),
             game_version: "26.3".into(),
             loader: Loader::Fabric,
@@ -312,6 +418,12 @@ mod tests {
         let vanilla = store.create(NewServer { loader: Loader::Vanilla, ..request("Plain") }, 3).unwrap();
         assert_eq!(vanilla.loader_version, None);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn splits_java_arguments_like_a_shell() {
+        assert_eq!(split_args("-Xss4M  -Dname=\"a b\" -Dempty='' x"), ["-Xss4M", "-Dname=a b", "-Dempty=", "x"]);
+        assert!(split_args("   ").is_empty());
     }
 
     #[test]

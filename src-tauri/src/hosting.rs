@@ -12,7 +12,7 @@
 //! the link closes too.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
@@ -24,6 +24,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 use wisp_core::hosting::install::{self, PrepareOptions};
+use wisp_core::hosting::content;
+use wisp_core::hosting::mods::{self, SetAside};
 use wisp_core::hosting::pack::{self, Pack};
 use wisp_core::hosting::players::{self, List};
 use wisp_core::hosting::process::{self, ConsoleLine, Exit, RunState, ServerEvent, ServerProcess};
@@ -33,7 +35,8 @@ use wisp_core::instances::{GAME_DIR, Loader, NewInstance};
 use wisp_core::launch::{self, Download, LaunchUpdate, Progress};
 use wisp_core::snapshots::{NewSnapshot, SnapshotReason, Snapshots, Summary};
 use wisp_core::social::{Message, Player, ServerCard};
-use wisp_core::tunnel::{self, Endpoint, Link, Offer, OpenOptions, Reach, Service, Upload};
+use wisp_core::tunnel::door::Door;
+use wisp_core::tunnel::{self, Endpoint, Keys, Link, Offer, OpenOptions, Reach, Service, Upload};
 
 use crate::library::blocking;
 use crate::{Launches, Network, OFFLINE_ACCOUNTS, Paths, SettingsState, now_ms, social};
@@ -43,6 +46,7 @@ pub const HOSTING_EVENT: &str = "hosting";
 /// Sent while joining a friend's server.
 pub const JOIN_EVENT: &str = "join";
 const GONE: &str = "That server no longer exists.";
+const PORT_TAKEN: &str = "Something else on this computer is using the server's port. Change the port in its settings, or close the other program.";
 const STOP_FIRST: &str = "Stop the server first.";
 /// How long a friend's Wisp waits for the host to answer.
 const ANSWER_WITHIN: Duration = Duration::from_secs(40);
@@ -55,6 +59,11 @@ struct Live {
     preparing: Option<LaunchUpdate>,
     /// The link friends come in through, opened when the first one asks.
     link: Option<Arc<Endpoint>>,
+    /// Who the server is on links, and whom it lets in (the link and the door share them).
+    keys: Keys,
+    /// The server's port, where Wisp takes players and passes them on to the server (see
+    /// wisp_core::tunnel::door); friends' Wisps come in there too when the link can't form.
+    door: Option<Door>,
     service: Arc<Service>,
     /// Friends let in this run (friend codes).
     friends: Vec<String>,
@@ -64,8 +73,8 @@ struct Live {
 }
 
 impl Live {
-    fn preparing() -> Self {
-        Self { process: None, preparing: Some(LaunchUpdate::Checking), link: None, service: Arc::new(Service::default()), friends: Vec::new(), port_mapping: None, tasks: Vec::new() }
+    fn preparing(keys: Keys) -> Self {
+        Self { process: None, preparing: Some(LaunchUpdate::Checking), link: None, keys, door: None, service: Arc::new(Service::default()), friends: Vec::new(), port_mapping: None, tasks: Vec::new() }
     }
 }
 
@@ -73,7 +82,8 @@ impl Live {
 /// to the host's skin server.
 struct Joined {
     link: Link,
-    endpoint: Arc<Endpoint>,
+    /// The direct link's socket (none when joined through a server's address).
+    endpoint: Option<Arc<Endpoint>>,
     forwarding: tokio::task::JoinHandle<()>,
     skins: Option<tokio::task::JoinHandle<()>>,
 }
@@ -97,6 +107,10 @@ pub struct Hosting {
     opening: tokio::sync::Mutex<()>,
     /// Quitting: servers are stopping, then Wisp exits.
     quitting: AtomicBool,
+    /// Starts again in a row after Wisp fixed a server that crashed as it loaded, by server.
+    fixes: SyncMutex<HashMap<String, u32>>,
+    /// What Wisp did, for the console of the server's next start.
+    notes: SyncMutex<HashMap<String, Vec<String>>>,
 }
 
 fn lock<T>(mutex: &SyncMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -133,6 +147,8 @@ enum Change {
     Lines { lines: Vec<ConsoleLine> },
     Players { players: Vec<String> },
     Failed { message: String },
+    /// Wisp fixed something about the server by itself (and says what).
+    Fixed { message: String },
 }
 
 fn emit(app: &AppHandle, id: &str, change: Change) {
@@ -164,6 +180,8 @@ pub struct HostedView {
     /// The memory it gets (its own setting, or what Wisp picked), and whether Wisp picked it.
     effective_memory_mb: u32,
     automatic_memory: bool,
+    /// What Wisp would pick (shown beside your own amount).
+    picked_memory_mb: u32,
     mod_count: usize,
     motd: String,
     online_mode: bool,
@@ -177,6 +195,10 @@ pub struct HostedView {
     friends_in: Vec<String>,
     /// How friends reach it, once a friend has asked.
     reach: Option<Reach>,
+    /// Mods Wisp keeps out of it (they only run in the game).
+    set_aside: Vec<SetAside>,
+    /// Its join code: anyone with Wisp joins with it.
+    code: Option<String>,
 }
 
 fn state_name(live: Option<&Live>, exit: Option<&Exit>) -> &'static str {
@@ -204,7 +226,10 @@ fn view(app: &AppHandle, server: HostedServer) -> HostedView {
     let properties = Properties::read(&dir);
     let port = store.port_of(&server.id).unwrap_or(core_hosting::DEFAULT_PORT);
     let mod_count = core_hosting::mod_count(&dir);
-    let effective_memory_mb = server.memory_mb.unwrap_or_else(|| core_hosting::automatic_memory_mb(mod_count, wisp_core::device::total_memory_mb()));
+    // Plugin servers count their plugins (their memory still follows their mods: none).
+    let shown_count = if server.software.is_some() { content::list(&server, &dir).iter().filter(|item| item.enabled).count() } else { mod_count };
+    let picked_memory_mb = core_hosting::automatic_memory_mb(mod_count, wisp_core::device::total_memory_mb());
+    let effective_memory_mb = server.memory_mb.unwrap_or(picked_memory_mb);
     let (exit, failure) = lock(&hosting.last_exit).get(&server.id).cloned().map_or((None, None), |(exit, failure)| (Some(exit), failure));
     let live = lock(&hosting.live);
     let current = live.get(&server.id);
@@ -224,7 +249,8 @@ fn view(app: &AppHandle, server: HostedServer) -> HostedView {
         failure: if current.is_some() { None } else { failure },
         effective_memory_mb,
         automatic_memory: server.memory_mb.is_none(),
-        mod_count,
+        picked_memory_mb,
+        mod_count: shown_count,
         motd: properties.get("motd").unwrap_or_default().to_string(),
         online_mode: properties.get("online-mode").is_none_or(|value| value.trim() == "true"),
         whitelist: properties.get("white-list").is_some_and(|value| value.trim() == "true"),
@@ -237,8 +263,155 @@ fn view(app: &AppHandle, server: HostedServer) -> HostedView {
         instance_name: server.instance_id.as_deref().and_then(|id| paths.instances().get(id)).map(|instance| instance.name),
         friends_in: current.map(|live| live.friends.clone()).unwrap_or_default(),
         reach: current.and_then(|live| live.link.as_ref().map(|link| link.reach())),
+        set_aside: mods::set_aside_list(&dir),
+        code: code_of(&dir),
         server,
     }
+}
+
+// ── Plugins and mods ──
+
+/// A server's plugins or mods.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerContentView {
+    /// "plugins", "mods", or nothing for plain Vanilla.
+    kind: Option<&'static str>,
+    items: Vec<content::ServerItem>,
+    /// The instance its mods come from, when it has one (they're changed there).
+    instance_name: Option<String>,
+    instance_id: Option<String>,
+}
+
+fn content_view(app: &AppHandle, server: &HostedServer) -> ServerContentView {
+    let dir = store(&app.state::<Paths>()).root().join(&server.id);
+    let instance = server.instance_id.as_deref().and_then(|id| app.state::<Paths>().instances().get(id));
+    ServerContentView {
+        kind: content::folder_of(server),
+        items: content::list(server, &dir),
+        instance_name: instance.as_ref().map(|instance| instance.name.clone()),
+        instance_id: instance.map(|instance| instance.id),
+    }
+}
+
+#[tauri::command]
+pub async fn get_server_content(id: String, app: AppHandle) -> Result<ServerContentView, String> {
+    let server = store(&app.state::<Paths>()).get(&id).ok_or(GONE)?;
+    Ok(content_view(&app, &server))
+}
+
+/// Plugins (or mods) on Modrinth that run on this server: its software and Minecraft version.
+#[tauri::command]
+pub async fn search_server_content(
+    id: String,
+    query: String,
+    offset: u32,
+    sort: Option<wisp_core::modrinth::SearchSort>,
+    categories: Option<Vec<String>>,
+    app: AppHandle,
+) -> Result<wisp_core::modrinth::SearchResults, String> {
+    let server = store(&app.state::<Paths>()).get(&id).ok_or(GONE)?;
+    let (project_type, loaders) = content::kind_of(&server).ok_or("This server takes neither plugins nor mods.")?;
+    let search = wisp_core::modrinth::SearchQuery {
+        source: Default::default(),
+        query,
+        project_type,
+        sort: sort.unwrap_or_default(),
+        loaders: loaders.iter().map(|loader| loader.to_string()).collect(),
+        categories: categories.unwrap_or_default().into_iter().take(8).collect(),
+        game_version: Some(server.game_version.clone()),
+        // A modded server only wants mods that do something there.
+        environment: (project_type == wisp_core::modrinth::ProjectType::Mod).then(|| "server".to_string()),
+        offset,
+        limit: 24,
+    };
+    wisp_core::modrinth::search(&app.state::<Network>().client, &search).await.map_err(|error| error.to_string())
+}
+
+/// What in the server has a newer build for it on Modrinth.
+#[tauri::command]
+pub async fn get_server_content_updates(id: String, app: AppHandle) -> Result<Vec<content::Update>, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    content::updates(&app.state::<Network>().client, &server, &dir).await
+}
+
+/// Installs newer builds: the ones named, or every one there is.
+#[tauri::command]
+pub async fn update_server_content(id: String, files: Option<Vec<String>>, app: AppHandle) -> Result<ServerContentView, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    let network = app.state::<Network>();
+    let updates = content::updates(&network.client, &server, &dir).await?;
+    let mut failed = Vec::new();
+    for update in updates.iter().filter(|update| files.as_ref().is_none_or(|files| files.contains(&update.file))) {
+        if let Err(error) = content::apply_update(&network.downloads, &server, &dir, update).await {
+            failed.push(format!("{}: {error}", update.file));
+        }
+    }
+    emit(&app, &id, Change::Changed);
+    if !failed.is_empty() {
+        return Err(failed.join(" "));
+    }
+    Ok(content_view(&app, &server))
+}
+
+#[tauri::command]
+pub async fn install_server_content(id: String, project_id: String, app: AppHandle) -> Result<ServerContentView, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    content::install(&app.state::<Network>().downloads, &server, &dir, &project_id).await?;
+    emit(&app, &id, Change::Changed);
+    Ok(content_view(&app, &server))
+}
+
+#[tauri::command]
+pub async fn set_server_content_enabled(id: String, file: String, enabled: bool, app: AppHandle) -> Result<ServerContentView, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    content::set_enabled(&server, &dir, &file, enabled).map_err(|error| error.to_string())?;
+    emit(&app, &id, Change::Changed);
+    Ok(content_view(&app, &server))
+}
+
+#[tauri::command]
+pub async fn remove_server_content(id: String, file: String, app: AppHandle) -> Result<ServerContentView, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    let path = content::path_of(&server, &dir, &file).ok_or("That's not there anymore.")?;
+    blocking(move || crate::library::move_to_trash(&path)).await?;
+    content::forget(&dir, &file);
+    emit(&app, &id, Change::Changed);
+    Ok(content_view(&app, &server))
+}
+
+/// Picks a picture for the server's icon in the game's server list.
+#[tauri::command]
+pub async fn pick_server_icon(id: String, app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dir = store(&app.state::<Paths>()).dir_of(&id).ok_or(GONE)?;
+    let picked = app.dialog().file().set_title("Server icon").add_filter("Picture", &["png", "jpg", "jpeg"]).blocking_pick_file();
+    let Some(path) = picked.and_then(|file| file.into_path().ok()) else {
+        return Ok(false);
+    };
+    blocking(move || core_hosting::set_icon(&dir, &path)).await?;
+    emit(&app, &id, Change::Changed);
+    Ok(true)
+}
+
+/// Puts a mod Wisp set aside back in the server (it starts with it from then on).
+#[tauri::command]
+pub async fn put_back_server_mod(id: String, file: String, app: AppHandle) -> Result<HostedView, String> {
+    let store = store(&app.state::<Paths>());
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    blocking(move || mods::put_back(&dir, &file).map_err(|error| error.to_string())).await?;
+    emit(&app, &id, Change::Changed);
+    Ok(view(&app, store.get(&id).ok_or(GONE)?))
 }
 
 #[tauri::command]
@@ -277,6 +450,15 @@ pub struct CreateServer {
     properties: Vec<(String, String)>,
     /// The player ticked "I agree to the Minecraft EULA".
     eula: bool,
+    /// A plugin server (Paper, Purpur, Folia, Spigot) instead of plain Vanilla.
+    #[serde(default)]
+    software: Option<wisp_core::hosting::software::Software>,
+}
+
+/// The Minecraft versions a plugin server has builds for, newest first (empty: any release).
+#[tauri::command]
+pub async fn get_server_software_versions(software: wisp_core::hosting::software::Software, app: AppHandle) -> Result<Vec<String>, String> {
+    software.versions(&app.state::<Network>().client).await.map_err(|error| error.to_string())
 }
 
 /// Builds where only offline accounts play (developer and tester builds, until Microsoft sign-in)
@@ -327,7 +509,18 @@ pub async fn create_hosted_server(request: CreateServer, app: AppHandle) -> Resu
         None => None,
     };
     let store = store(&paths);
-    let new = NewServer { name: request.name, game_version, loader, loader_version, instance_id: request.instance_id.clone(), icon: instance.as_ref().and_then(|instance| instance.icon.clone()).filter(|icon| icon.starts_with("wisp:")), properties };
+    // A plugin server (Paper and the rest) runs plain Minecraft for players, with no instance's mods.
+    let software = request.software.filter(|_| instance.is_none() && loader == Loader::Vanilla);
+    let new = NewServer {
+        name: request.name,
+        game_version,
+        loader,
+        loader_version,
+        instance_id: request.instance_id.clone(),
+        icon: instance.as_ref().and_then(|instance| instance.icon.clone()).filter(|icon| icon.starts_with("wisp:")),
+        properties,
+        software,
+    };
     let server = store.create(new, now_ms()).map_err(|error| error.to_string())?;
     let server = store.update(&server.id, |server| server.eula = true).map_err(|error| error.to_string())?;
     let dir = store.dir_of(&server.id).ok_or(GONE)?;
@@ -345,6 +538,107 @@ pub async fn create_hosted_server(request: CreateServer, app: AppHandle) -> Resu
     Ok(view(&app, server))
 }
 
+/// A server made from a modpack file you have.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerFromPack {
+    /// A `.mrpack`, or a CurseForge zip.
+    path: String,
+    name: String,
+    #[serde(default)]
+    properties: Vec<(String, String)>,
+    eula: bool,
+}
+
+/// Makes a server from a modpack file: its version and loader now, and on its first start the pack
+/// becomes an instance (so players get what it has) and the server runs its server-side mods, with
+/// the pack's own server files.
+#[tauri::command]
+pub async fn create_server_from_modpack(request: ServerFromPack, app: AppHandle) -> Result<HostedView, String> {
+    if !request.eula {
+        return Err("Agree to the Minecraft EULA to host a server.".into());
+    }
+    let source = PathBuf::from(&request.path);
+    let inspected = {
+        let source = source.clone();
+        blocking(move || Ok(wisp_core::imports::inspect(&source))).await?
+    };
+    let summary = inspected.pack.ok_or_else(|| inspected.problem.unwrap_or_else(|| format!("{} isn't a modpack Wisp can read (a .mrpack, or a CurseForge zip).", inspected.file_name)))?;
+    let mut properties = vec![("online-mode".to_string(), "true".to_string())];
+    if signs_in_through_wisp() {
+        properties.push(("enforce-secure-profile".to_string(), "false".to_string()));
+    }
+    properties.extend(request.properties.into_iter().filter(|(key, _)| key != "server-port"));
+    let store = store(&app.state::<Paths>());
+    let name = if request.name.trim().is_empty() { summary.name.clone().unwrap_or_else(|| inspected.file_name.clone()) } else { request.name };
+    let new = NewServer { name, game_version: summary.game_version.clone(), loader: summary.loader, loader_version: None, instance_id: None, icon: None, properties, software: None };
+    let server = store.create(new, now_ms()).map_err(|error| error.to_string())?;
+    let dir = store.dir_of(&server.id).ok_or(GONE)?;
+    let extension = if inspected.file_name.to_ascii_lowercase().ends_with(".mrpack") { "mrpack" } else { "zip" };
+    let kept = format!(".wisp-modpack.{extension}");
+    {
+        let target = dir.join(&kept);
+        blocking(move || std::fs::copy(&source, target).map(|_| ()).map_err(|error| format!("Couldn't keep the modpack: {error}"))).await?;
+    }
+    let server = store
+        .update(&server.id, |server| {
+            server.eula = true;
+            server.pack_file = Some(kept.clone());
+        })
+        .map_err(|error| error.to_string())?;
+    emit(&app, &server.id, Change::Changed);
+    Ok(view(&app, server))
+}
+
+/// Adds plugin or mod files (and data packs) to a server, picked now or dropped on its page. A
+/// server made from an instance takes its mods through the instance.
+#[tauri::command]
+pub async fn add_server_files(id: String, files: Option<Vec<String>>, app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let dir = store.dir_of(&id).ok_or(GONE)?;
+    let files: Vec<PathBuf> = match files {
+        Some(files) => files.into_iter().map(PathBuf::from).collect(),
+        None => app
+            .dialog()
+            .file()
+            .set_title("Add files")
+            .add_filter("Plugins, mods and data packs", &["jar", "zip"])
+            .blocking_pick_files()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|file| file.into_path().ok())
+            .collect(),
+    };
+    let paths = app.state::<Paths>();
+    let instance = server.instance_id.as_deref().and_then(|instance| Some((paths.instances().get(instance)?, paths.instances().dir_of(instance)?)));
+    let network = app.state::<Network>();
+    let mut added = Vec::new();
+    let mut failed = Vec::new();
+    for file in files {
+        let name = file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let is_jar = name.to_ascii_lowercase().ends_with(".jar");
+        let outcome = match &instance {
+            // Mods go into the instance, where players get them too (the server follows it).
+            Some((instance, instance_dir)) if is_jar => wisp_core::imports::add_to_instance(&network.client, instance, instance_dir, &file).await.map(|done| vec![done.content.title]).map_err(|error| error.to_string()),
+            _ => {
+                let (server, dir) = (server.clone(), dir.clone());
+                blocking(move || content::add_file(&server, &dir, &file)).await
+            }
+        };
+        match outcome {
+            Ok(names) => added.extend(names),
+            Err(error) => failed.push(error),
+        }
+    }
+    emit(&app, &id, Change::Changed);
+    if added.is_empty() && !failed.is_empty() {
+        return Err(failed.join(" "));
+    }
+    Ok(added)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerChanges {
@@ -356,12 +650,52 @@ pub struct ServerChanges {
     memory_mb: Option<u32>,
     #[serde(default)]
     automatic_memory: bool,
+    /// The address people join from anywhere (empty takes it away).
+    address: Option<String>,
+    start_with_wisp: Option<bool>,
+    /// 0 turns scheduled restarts off.
+    restart_every_hours: Option<u32>,
+    aikar_flags: Option<bool>,
+    /// Empty takes them away.
+    jvm_args: Option<String>,
+    /// 0 lets Wisp pick.
+    java_major: Option<u32>,
 }
 
 #[tauri::command]
 pub async fn update_hosted_server(id: String, changes: ServerChanges, app: AppHandle) -> Result<HostedView, String> {
+    let address = match changes.address.as_deref().map(str::trim) {
+        Some("") => Some(None),
+        Some(text) => {
+            let parsed = wisp_core::servers::ServerAddress::parse(text).map_err(|_| format!("\"{text}\" isn't an address players can join. It looks like play.example.com or 147.185.221.20:25565."))?;
+            Some(Some(match parsed.port {
+                Some(port) => format!("{}:{port}", parsed.host),
+                None => parsed.host,
+            }))
+        }
+        None => None,
+    };
     let server = store(&app.state::<Paths>())
         .update(&id, |server| {
+            if let Some(address) = address {
+                server.address = address;
+            }
+            if let Some(start) = changes.start_with_wisp {
+                server.start_with_wisp = start;
+            }
+            if let Some(hours) = changes.restart_every_hours {
+                server.restart_every_hours = (hours > 0).then_some(hours.min(168));
+            }
+            if let Some(aikar) = changes.aikar_flags {
+                server.aikar_flags = aikar;
+            }
+            if let Some(args) = &changes.jvm_args {
+                let args = args.trim();
+                server.jvm_args = (!args.is_empty()).then(|| args.chars().take(2000).collect());
+            }
+            if let Some(major) = changes.java_major {
+                server.java_major = (major > 0).then_some(major);
+            }
             if let Some(name) = changes.name {
                 server.name = name;
             }
@@ -381,8 +715,11 @@ pub async fn update_hosted_server(id: String, changes: ServerChanges, app: AppHa
             }
         })
         .map_err(|error| error.to_string())?;
-    // Friends see what they can join.
+    // Friends see what they can join, and the code says where it is now.
     social::announce_soon(&app);
+    if is_live(&app, &id) {
+        announce_code(&app, &id, true);
+    }
     emit(&app, &id, Change::Changed);
     Ok(view(&app, server))
 }
@@ -397,7 +734,7 @@ pub async fn delete_hosted_server(id: String, app: AppHandle) -> Result<(), Stri
         return Err(STOP_FIRST.into());
     }
     let dir = store(&app.state::<Paths>()).dir_of(&id).ok_or(GONE)?;
-    blocking(move || trash::delete(&dir).map_err(|error| format!("Couldn't move it to the Trash: {error}"))).await?;
+    blocking(move || crate::library::move_to_trash(&dir)).await?;
     lock(&app.state::<Hosting>().last_exit).remove(&id);
     emit(&app, &id, Change::Changed);
     Ok(())
@@ -413,23 +750,32 @@ pub async fn open_server_folder(id: String, app: AppHandle) -> Result<(), String
 
 #[tauri::command]
 pub async fn start_hosted_server(id: String, app: AppHandle) -> Result<HostedView, String> {
+    lock(&app.state::<Hosting>().fixes).remove(&id);
+    begin(&app, &id)?;
+    let server = store(&app.state::<Paths>()).get(&id).ok_or(GONE)?;
+    Ok(view(&app, server))
+}
+
+/// Sets the server up and starts it, in the background.
+fn begin(app: &AppHandle, id: &str) -> Result<(), String> {
     let paths = app.state::<Paths>();
-    let server = store(&paths).get(&id).ok_or(GONE)?;
+    let server = store(&paths).get(id).ok_or(GONE)?;
     if !server.eula {
         return Err("Agree to the Minecraft EULA for this server first.".into());
     }
+    let keys = Keys::new().map_err(|error| error.to_string())?;
     {
         let hosting = app.state::<Hosting>();
         let mut live = lock(&hosting.live);
-        if live.contains_key(&id) {
+        if live.contains_key(id) {
             return Err(format!("{} is already running.", server.name));
         }
-        live.insert(id.clone(), Live::preparing());
-        lock(&hosting.last_exit).remove(&id);
+        live.insert(id.to_string(), Live::preparing(keys));
+        lock(&hosting.last_exit).remove(id);
     }
     let task = {
         let app = app.clone();
-        let id = id.clone();
+        let id = id.to_string();
         tauri::async_runtime::spawn(async move {
             if let Err(message) = start(&app, &id).await {
                 let hosting = app.state::<Hosting>();
@@ -440,11 +786,51 @@ pub async fn start_hosted_server(id: String, app: AppHandle) -> Result<HostedVie
             }
         })
     };
-    if let Some(live) = lock(&app.state::<Hosting>().live).get_mut(&id) {
+    if let Some(live) = lock(&app.state::<Hosting>().live).get_mut(id) {
         live.tasks.push(task);
     }
-    emit(&app, &id, Change::Changed);
-    Ok(view(&app, server))
+    emit(app, id, Change::Changed);
+    Ok(())
+}
+
+/// Installs a server's modpack as an instance (players join with it), points the server at it, and
+/// lays out the pack's own server files.
+async fn install_pack(app: &AppHandle, id: &str, dir: &std::path::Path, pack_file: &str, report: &(dyn Fn(LaunchUpdate) + Send + Sync)) -> Result<HostedServer, String> {
+    use wisp_core::modpack::{self, InstallUpdate};
+    let paths = app.state::<Paths>();
+    let network = app.state::<Network>();
+    let settings = crate::current_settings(&app.state::<SettingsState>());
+    let pack = dir.join(pack_file);
+    let progress = |update: InstallUpdate| match update {
+        InstallUpdate::Downloading { done_bytes, total_bytes, done_files, total_files } => report(LaunchUpdate::Downloading { done_bytes, total_bytes, done_files, total_files }),
+        InstallUpdate::Unpacking => report(LaunchUpdate::Installing { loader: "the modpack".into() }),
+        _ => {}
+    };
+    report(LaunchUpdate::Installing { loader: "the modpack".into() });
+    let key = wisp_core::curseforge::api_key(&settings.curseforge_api_key);
+    let request = modpack::FileRequest { path: &pack, concurrency: settings.concurrent_downloads as usize, now_ms: now_ms(), curseforge_key: key.as_deref() };
+    let installed = modpack::install_file(&network.downloads, &paths.instances(), request, &progress).await.map_err(|error| format!("Couldn't set up the modpack: {error}"))?;
+    let instance = installed.instance;
+    let store = store(&paths);
+    let server = store
+        .update(id, |server| {
+            server.instance_id = Some(instance.id.clone());
+            server.game_version = instance.game_version.clone();
+            server.loader = instance.loader;
+            server.loader_version = instance.loader_version.clone();
+            server.pack_file = None;
+        })
+        .map_err(|error| error.to_string())?;
+    let (instance_dir, target, pack_path) = (paths.instances().dir_of(&instance.id).ok_or(GONE)?, dir.to_path_buf(), pack.clone());
+    blocking(move || {
+        pack::copy_configs(&instance_dir.join(GAME_DIR), &target).map_err(|error| error.to_string())?;
+        pack::apply_server_overrides(&pack_path, &target).map_err(|error| error.to_string())?;
+        let _ = std::fs::remove_file(&pack_path);
+        Ok(())
+    })
+    .await?;
+    social::announce_soon(app);
+    Ok(server)
 }
 
 /// The SHA-1s of files Modrinth says never run on a server.
@@ -473,11 +859,22 @@ async fn start(app: &AppHandle, id: &str) -> Result<(), String> {
             emit(&app, &id, Change::Progress { update });
         }
     };
+    // Made from a modpack: on its first start, the pack becomes the instance it runs.
+    let server = match (&server.pack_file, &server.instance_id) {
+        (Some(pack_file), None) => install_pack(app, id, &dir, pack_file, &report).await?,
+        _ => server,
+    };
     // The server runs what its instance has (minus what only runs in the game).
     if let Some(instance_dir) = server.instance_id.as_deref().and_then(|instance| paths.instances().dir_of(instance)) {
         let scan = crate::instance_page::scanned(&network, &instance_dir).await?;
         let shareable = scan.shareable();
-        let client_only = client_only(&network, &shareable).await;
+        // Left out: what Modrinth says never runs on a server and what crashed this one, but not
+        // what this server turned out to need.
+        let mut client_only = client_only(&network, &shareable).await;
+        client_only.extend(mods::set_aside_hashes(&dir));
+        for needed in mods::needed_hashes(&dir) {
+            client_only.remove(&needed);
+        }
         let game_dir = instance_dir.join(GAME_DIR);
         let target = dir.clone();
         blocking(move || pack::sync_server_mods(&game_dir, &target, &shareable, &client_only).map(|_| ()).map_err(|error| format!("Couldn't copy the instance's mods: {error}"))).await?;
@@ -488,17 +885,44 @@ async fn start(app: &AppHandle, id: &str) -> Result<(), String> {
     let concurrency = settings.concurrent_downloads as usize;
     // Players sign in through the skin server in builds with offline accounts: the server asks it
     // who's joining (through authlib-injector, as the game does), and hands everyone their skins.
-    let jvm_args = if signs_in_through_wisp() {
+    let mut jvm_args = if signs_in_through_wisp() {
         let skins = crate::skin_server(app).await.ok_or("Couldn't start Wisp's skin service, which players on this server sign in through.")?;
         let injector = launch::authlib_injector(&network.downloads, &paths.game_files(), concurrency, &report).await.map_err(|error| error.to_string())?;
         skins.jvm_args(&injector)
     } else {
         Vec::new()
     };
-    let options = PrepareOptions { memory_mb, java_paths: &java_paths, jvm_args, concurrency };
-    let plan = install::prepare(&network.downloads, &paths.game_files(), &server, &dir, &options, &report).await.map_err(|error| error.to_string())?;
+    if server.aikar_flags {
+        jvm_args.push(format!("-Xms{memory_mb}M"));
+        jvm_args.extend(core_hosting::AIKAR_FLAGS.iter().map(|flag| flag.to_string()));
+    }
+    // The player's own come last, so theirs win.
+    jvm_args.extend(server.jvm_args.as_deref().map(core_hosting::split_args).unwrap_or_default());
+    let options = PrepareOptions { memory_mb, java_major: server.java_major, java_paths: &java_paths, jvm_args, concurrency };
+    let mut plan = install::prepare(&network.downloads, &paths.game_files(), &server, &dir, &options, &report).await.map_err(|error| error.to_string())?;
     // The player agreed to the EULA in Wisp (start refuses otherwise).
     core_hosting::accept_eula(&dir).map_err(|error| error.to_string())?;
+
+    // The server listens on a port of its own on this computer, and Wisp takes players at the
+    // server's port and passes them on: so friends' Wisps come in the same way, mods and skins and
+    // all, through whatever reaches the port (a playit tunnel, the router, the same network).
+    let (keys, service) = {
+        let hosting = app.state::<Hosting>();
+        let live = lock(&hosting.live);
+        let entry = live.get(id).ok_or("The server stopped.")?;
+        (entry.keys.clone(), entry.service.clone())
+    };
+    let port = store.port_of(id).unwrap_or(core_hosting::DEFAULT_PORT);
+    let bind = Properties::read(&dir)
+        .get("server-ip")
+        .and_then(|ip| ip.trim().parse::<IpAddr>().ok())
+        .filter(|ip| !ip.is_unspecified())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let inner_port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| listener.local_addr()).map(|address| address.port()).map_err(|error| format!("Couldn't find a free port for the server: {error}"))?;
+    let inner = SocketAddr::new(bind, inner_port);
+    *service.target.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(inner);
+    let door = Door::open(port, inner, &keys, service).await.map_err(|_| PORT_TAKEN.to_string())?;
+    plan.listen_on(inner_port);
 
     let events = {
         let app = app.clone();
@@ -523,6 +947,10 @@ async fn start(app: &AppHandle, id: &str) -> Result<(), String> {
         };
         entry.process = Some(running.clone());
         entry.preparing = None;
+        entry.door = Some(door);
+    }
+    for note in lock(&app.state::<Hosting>().notes).remove(id).unwrap_or_default() {
+        running.note(&note);
     }
     let _ = store.update(id, |server| server.last_started = Some(now_ms()));
     let watcher = {
@@ -535,6 +963,10 @@ async fn start(app: &AppHandle, id: &str) -> Result<(), String> {
     }
     if server.open_port {
         open_port(app, id).await;
+    }
+    // playit's agent carries players from the server's tunnel (builds that run it, once linked).
+    if let Err(message) = crate::playit::server_starting(app).await {
+        emit(app, id, Change::Failed { message: format!("The server's playit address isn't working: {message}") });
     }
     emit(app, id, Change::Changed);
     Ok(())
@@ -591,9 +1023,21 @@ async fn watch(app: AppHandle, id: String, running: Arc<ServerProcess>) {
         social::announce_soon(&app);
         if running.state() == RunState::Running
             && let Some(server) = store(&app.state::<Paths>()).get(&id)
-            && (server.friends_join || !server.invited.is_empty())
         {
-            let _ = link_for(&app, &server).await;
+            if let Some(hours) = server.restart_every_hours.filter(|hours| *hours > 0) {
+                let task = tauri::async_runtime::spawn(restart_later(app.clone(), id.clone(), running.clone(), hours));
+                if let Some(live) = lock(&app.state::<Hosting>().live).get_mut(&id) {
+                    live.tasks.push(task);
+                }
+            }
+            let _ = ready_for_joins(&app, &server).await;
+            let announcing = tauri::async_runtime::spawn(keep_announcing(app.clone(), id.clone()));
+            if let Some(live) = lock(&app.state::<Hosting>().live).get_mut(&id) {
+                live.tasks.push(announcing);
+            }
+            if server.friends_join || !server.invited.is_empty() {
+                let _ = link_for(&app, &server).await;
+            }
         }
     }
     let exit = running.wait().await;
@@ -627,15 +1071,199 @@ async fn watch(app: AppHandle, id: String, running: Arc<ServerProcess>) {
         })
         .await;
     }
+    // Crashed as it loaded: Wisp reads why, fixes what it can and starts it again (a few times in a
+    // row at most), saying what it did. What it can't fix it explains.
+    let mut explained = None;
+    let quitting = app.state::<Hosting>().quitting.load(Ordering::SeqCst);
+    if exit.crashed && exit.reason.is_none() && running.ready_at().is_none() && !quitting {
+        match fix_after_crash(&app, &id, &running).await {
+            AfterCrash::Fixed(notes) => {
+                let attempts = {
+                    let hosting = app.state::<Hosting>();
+                    let mut fixes = lock(&hosting.fixes);
+                    let count = fixes.entry(id.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if attempts <= 3 {
+                    emit(&app, &id, Change::Fixed { message: notes.join(" ") });
+                    lock(&app.state::<Hosting>().notes).insert(id.clone(), notes);
+                    if begin(&app, &id).is_ok() {
+                        return;
+                    }
+                }
+            }
+            AfterCrash::Explained(text) => explained = Some(text),
+            AfterCrash::Unknown => {}
+        }
+    }
     let failure = match exit.reason {
         Some("eula") => Some("The server stopped at Minecraft's EULA. Agree to it for this server and start it again.".to_string()),
-        Some("port") => Some("Something else on this computer is using the server's port. Change the port in its settings, or close the other program.".to_string()),
-        _ if exit.crashed => Some("The server stopped unexpectedly. Its console shows the last thing it said.".to_string()),
+        Some("port") => Some(PORT_TAKEN.to_string()),
+        _ if exit.crashed => Some(match explained {
+            Some(text) => format!("{text} Its console shows more."),
+            None => "The server stopped unexpectedly. Its console shows the last thing it said.".to_string(),
+        }),
         _ => None,
     };
     lock(&app.state::<Hosting>().last_exit).insert(id.clone(), (exit, failure));
+    announce_code(&app, &id, false);
+    if lock(&app.state::<Hosting>().live).is_empty() {
+        crate::playit::servers_stopped(&app).await;
+    }
     emit(&app, &id, Change::Changed);
     social::announce_soon(&app);
+}
+
+/// Gives the server a playit address of its own (builds that run playit's agent): a tunnel to its
+/// port, made on the player's linked playit account.
+#[tauri::command]
+pub async fn set_up_server_address(id: String, app: AppHandle) -> Result<HostedView, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let port = store.port_of(&id).unwrap_or(core_hosting::DEFAULT_PORT);
+    let address = crate::playit::tunnel_for(&app, &server.name, port).await?;
+    let server = store.update(&id, |server| server.address = Some(address.clone())).map_err(|error| error.to_string())?;
+    if is_live(&app, &id) {
+        crate::playit::server_starting(&app).await?;
+        announce_code(&app, &id, true);
+    }
+    emit(&app, &id, Change::Changed);
+    Ok(view(&app, server))
+}
+
+/// Whether the server's address reaches it from the internet, asked the way a game would.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressCheck {
+    reachable: bool,
+    /// When it isn't, why that may be.
+    hint: Option<String>,
+}
+
+#[tauri::command]
+pub async fn check_server_address(id: String, app: AppHandle) -> Result<AddressCheck, String> {
+    let store = store(&app.state::<Paths>());
+    let server = store.get(&id).ok_or(GONE)?;
+    let address = server.address.clone().ok_or("Give the server an address first.")?;
+    if !process_of(&app, &id).is_some_and(|process| process.state() == RunState::Running) {
+        return Ok(AddressCheck { reachable: false, hint: Some("Start the server, then check again: the address only answers while it runs.".into()) });
+    }
+    let status = wisp_core::servers::status(&address).await;
+    Ok(if status.online {
+        AddressCheck { reachable: true, hint: None }
+    } else {
+        AddressCheck {
+            reachable: false,
+            hint: Some(format!(
+                "Nothing answered at {address}. If it's a playit address, check playit is running and its tunnel points at 127.0.0.1, port {}.",
+                store.port_of(&id).unwrap_or(core_hosting::DEFAULT_PORT)
+            )),
+        }
+    })
+}
+
+/// Restarts a server after so many hours, warning the players on it first.
+async fn restart_later(app: AppHandle, id: String, running: Arc<ServerProcess>, hours: u32) {
+    let warnings = [(Duration::from_secs(5 * 60), "in 5 minutes"), (Duration::from_secs(60), "in a minute"), (Duration::from_secs(10), "in 10 seconds")];
+    let mut left = Duration::from_secs(u64::from(hours) * 3600);
+    for (before, when) in warnings {
+        let wait = left.saturating_sub(before);
+        tokio::time::sleep(wait).await;
+        left -= wait;
+        if !running.players().is_empty() {
+            let _ = running.send(&format!("say The server restarts {when} (it does every {hours} h). Back in a moment.")).await;
+        }
+    }
+    tokio::time::sleep(left).await;
+    running.note("Restarting, as scheduled.");
+    // On a task of its own: stopping ends the tasks that belong to this run, this one included.
+    tauri::async_runtime::spawn(async move {
+        let _ = restart_hosted_server(id, app).await;
+    });
+}
+
+/// Starts the servers set to start whenever Wisp opens.
+pub fn start_with_wisp(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // After the window is up, so opening Wisp stays quick.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let servers = store(&app.state::<Paths>()).list();
+        for server in servers.into_iter().filter(|server| server.start_with_wisp && server.eula) {
+            let _ = begin(&app, &server.id);
+        }
+    });
+}
+
+enum AfterCrash {
+    /// Fixed: what Wisp did, one sentence each.
+    Fixed(Vec<String>),
+    /// What's wrong, when Wisp couldn't fix it.
+    Explained(String),
+    Unknown,
+}
+
+/// Reads why a server crashed as it loaded, and fixes what it can: a mod that only runs in the game
+/// is set aside; a mod the server needs that its instance has (left out by a wrong label) comes
+/// in; too little memory gets more.
+async fn fix_after_crash(app: &AppHandle, id: &str, running: &ServerProcess) -> AfterCrash {
+    use wisp_core::doctor::{self, Problem};
+    let paths = app.state::<Paths>();
+    let store = store(&paths);
+    let (Some(server), Some(dir)) = (store.get(id), store.dir_of(id)) else {
+        return AfterCrash::Unknown;
+    };
+    let console: Vec<String> = running.console().into_iter().map(|line| line.text).collect();
+    let (since, loader, read_dir) = (running.started_at(), server.loader, dir.clone());
+    let Ok(problems) = blocking(move || Ok(doctor::diagnose_server(&read_dir, loader, &console, since))).await else {
+        return AfterCrash::Unknown;
+    };
+    if problems.is_empty() {
+        return AfterCrash::Unknown;
+    }
+    let mut notes = Vec::new();
+    for problem in &problems {
+        match problem {
+            Problem::ClientOnly { file, name } => {
+                if mods::set_aside(&dir, file, name, now_ms()).is_ok() {
+                    notes.push(format!("{name} only runs in the game, so Wisp set it aside on this server (players still get it)."));
+                }
+            }
+            Problem::Missing { id: wanted, .. } => {
+                let instance_dir = server.instance_id.as_deref().and_then(|instance| paths.instances().dir_of(instance));
+                let Some(instance_dir) = instance_dir else { continue };
+                let wanted = wanted.clone();
+                let found = blocking(move || {
+                    let mods = doctor::scan(&instance_dir);
+                    Ok(mods.into_iter().find(|info| info.answers_to(&wanted)).and_then(|info| pack::hash_file(&instance_dir.join(GAME_DIR).join("mods").join(&info.file)).map(|(sha1, _)| (sha1, info))))
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some((sha1, info)) = found
+                    && mods::mark_needed(&dir, &sha1).is_ok()
+                {
+                    let name = if info.name.is_empty() { info.file.clone() } else { info.name.clone() };
+                    notes.push(format!("The server needs {name}, so Wisp added it from the instance."));
+                }
+            }
+            Problem::OutOfMemory => {
+                let current = server.memory_mb.unwrap_or_else(|| core_hosting::automatic_memory_mb(core_hosting::mod_count(&dir), wisp_core::device::total_memory_mb()));
+                let ceiling = wisp_core::device::total_memory_mb().map_or(8192, |total| (total * 6 / 10) as u32) / 512 * 512;
+                let target = (current + 2048).min(ceiling) / 512 * 512;
+                if target > current && store.update(id, |stored| stored.memory_mb = Some(target)).is_ok() {
+                    notes.push(format!("The server ran out of memory, so Wisp gave it {:.1} GB.", f64::from(target) / 1024.0));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !notes.is_empty() {
+        notes.push("Starting it again.".into());
+        return AfterCrash::Fixed(notes);
+    }
+    AfterCrash::Explained(problems.iter().map(|problem| problem.describe(loader)).collect::<Vec<_>>().join(" "))
 }
 
 fn process_of(app: &AppHandle, id: &str) -> Option<Arc<ServerProcess>> {
@@ -998,6 +1626,7 @@ fn card(app: &AppHandle, server: &HostedServer) -> ServerCard {
         players: process.as_ref().map_or(0, |process| process.players().len() as u32),
         max_players: properties.get("max-players").and_then(|value| value.trim().parse().ok()).unwrap_or(20),
         mods: core_hosting::mod_count(&dir) as u32,
+        software: server.software.map(|software| software.as_str().to_string()),
     }
 }
 
@@ -1086,26 +1715,39 @@ async fn let_in(app: &AppHandle, from: &str, server_id: &str, offer: &Offer, pla
         });
     }
     emit(app, server_id, Change::Changed);
-    Ok((endpoint.offer(), card(app, &server)))
+    let mut answer = endpoint.offer();
+    answer.doors = doors_of(app, &server);
+    Ok((answer, card(app, &server)))
 }
 
-/// The server's link, opened the first time a friend asks: the socket, the routers asked, and
-/// the instance's mod list ready to hand out.
-async fn link_for(app: &AppHandle, server: &HostedServer) -> Result<(Arc<Endpoint>, Arc<Service>), String> {
-    let hosting = app.state::<Hosting>();
-    let _opening = hosting.opening.lock().await;
-    let (existing, service) = {
-        let live = lock(&hosting.live);
-        let entry = live.get(&server.id).ok_or("The server stopped.")?;
-        (entry.link.clone(), entry.service.clone())
-    };
-    if let Some(endpoint) = existing {
-        return Ok((endpoint, service));
+/// Where friends' Wisps can come in through the server's door, nearest first: the same network,
+/// the router's opening, the address people join from anywhere.
+fn doors_of(app: &AppHandle, server: &HostedServer) -> Vec<String> {
+    let port = store(&app.state::<Paths>()).port_of(&server.id).unwrap_or(core_hosting::DEFAULT_PORT);
+    let mut doors = Vec::new();
+    if let Some(lan) = tunnel::lan_address() {
+        doors.push(format!("{lan}:{port}"));
     }
-    let paths = app.state::<Paths>();
-    let store = store(&paths);
-    let port = store.port_of(&server.id).unwrap_or(core_hosting::DEFAULT_PORT);
-    // Friends' games sign in and fetch skins through the link, from this computer's skin server.
+    if let Some(mapping) = lock(&app.state::<Hosting>().live).get(&server.id).and_then(|live| live.port_mapping.clone()) {
+        doors.push(mapping.external().to_string());
+    }
+    if let Some(address) = server.address.as_deref().map(str::trim).filter(|address| !address.is_empty()) {
+        doors.push(address.to_string());
+    }
+    let mut seen = HashSet::new();
+    doors.retain(|door| seen.insert(door.clone()));
+    doors
+}
+
+/// Gets a running server ready for Wisp joins, through its door and the link alike: the list of
+/// its mods and their files, the skin service players sign in through, and who may join by its
+/// address (whoever its whitelist lets in). Done once per run.
+async fn ready_for_joins(app: &AppHandle, server: &HostedServer) -> Result<(), String> {
+    let service = lock(&app.state::<Hosting>().live).get(&server.id).map(|entry| entry.service.clone()).ok_or("The server stopped.")?;
+    if !service.manifest.read().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty() {
+        return Ok(());
+    }
+    // Players' games sign in and fetch skins from this computer's skin server.
     let mut skin_port = None;
     if signs_in_through_wisp()
         && let Some(skins) = crate::skin_server(app).await
@@ -1128,11 +1770,54 @@ async fn link_for(app: &AppHandle, server: &HostedServer) -> Result<(Arc<Endpoin
             guests.write().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(upload.uuid, player);
         }));
     }
+    // Joining by address: whoever the server itself would let in.
+    {
+        let app = app.clone();
+        let id = server.id.clone();
+        *service.on_ask.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(move |ask: &tunnel::Ask| {
+            if !wisp_core::accounts::valid_username(&ask.name) || ask.uuid.len() != 32 {
+                return false;
+            }
+            let Some(dir) = store(&app.state::<Paths>()).dir_of(&id) else {
+                return false;
+            };
+            let whitelisted = || [List::Whitelist, List::Ops].into_iter().any(|list| players::read(&dir, list).iter().any(|entry| entry.name.eq_ignore_ascii_case(&ask.name)));
+            let whitelist_on = Properties::read(&dir).get("white-list").is_some_and(|value| value.trim() == "true");
+            let banned = players::read(&dir, List::Banned).iter().any(|entry| entry.name.eq_ignore_ascii_case(&ask.name));
+            let yes = !banned && (!whitelist_on || whitelisted());
+            if yes && signs_in_through_wisp() {
+                let guests = app.state::<crate::SkinServerState>().1.clone();
+                guests
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .entry(ask.uuid.clone())
+                    .and_modify(|guest| guest.name = ask.name.clone())
+                    .or_insert_with(|| wisp_core::skin_server::Player { uuid: ask.uuid.clone(), name: ask.name.clone(), skin: None });
+            }
+            yes
+        }));
+    }
     let (manifest, files) = pack_for(app, server, skin_port).await?;
-    *service.target.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
-    *service.manifest.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = manifest;
     *service.files.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = files;
-    let endpoint = Arc::new(Endpoint::open(OpenOptions::default()).await.map_err(|error| error.to_string())?);
+    *service.manifest.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = manifest;
+    Ok(())
+}
+
+/// The server's link, opened the first time a friend asks: the socket, the routers asked, and
+/// the instance's mod list ready to hand out.
+async fn link_for(app: &AppHandle, server: &HostedServer) -> Result<(Arc<Endpoint>, Arc<Service>), String> {
+    let hosting = app.state::<Hosting>();
+    let _opening = hosting.opening.lock().await;
+    let (existing, service, keys) = {
+        let live = lock(&hosting.live);
+        let entry = live.get(&server.id).ok_or("The server stopped.")?;
+        (entry.link.clone(), entry.service.clone(), entry.keys.clone())
+    };
+    if let Some(endpoint) = existing {
+        return Ok((endpoint, service));
+    }
+    ready_for_joins(app, server).await?;
+    let endpoint = Arc::new(Endpoint::open_with(OpenOptions::default(), keys).await.map_err(|error| error.to_string())?);
     let accepting = {
         let endpoint = endpoint.clone();
         let service = service.clone();
@@ -1186,6 +1871,14 @@ async fn pack_for(app: &AppHandle, server: &HostedServer, skin_port: Option<u16>
     if let Ok(found) = wisp_core::modrinth::versions_by_hashes(&network.client, &unknown).await {
         for file in pack.files.iter_mut().filter(|file| file.url.is_none()) {
             file.url = found.get(&file.sha1).and_then(|version| version.files.iter().find(|candidate| candidate.sha1.as_deref() == Some(file.sha1.as_str()))).map(|candidate| candidate.url.clone());
+        }
+        // A server's own mods: players don't get the ones Modrinth says never run in the game.
+        if server.instance_id.is_none() {
+            let ids: Vec<String> = found.values().map(|version| version.project_id.clone()).collect::<HashSet<_>>().into_iter().collect();
+            if let Ok(projects) = wisp_core::modrinth::projects(&network.client, &ids).await {
+                let server_only: HashSet<String> = projects.into_iter().filter(|project| project.client_side == "unsupported").map(|project| project.id).collect();
+                pack.files.retain(|file| found.get(&file.sha1).is_none_or(|version| !server_only.contains(&version.project_id)));
+            }
         }
     }
     let mut pack = pack.cleaned();
@@ -1290,28 +1983,24 @@ async fn join(app: &AppHandle, code: &str, server_id: &str, progress: &(dyn Fn(&
     let host = answer.offer.ok_or("They answered without a way to reach them.")?;
     progress("connecting", 0, 0, None);
     endpoint.allow(&host.fingerprint);
-    let link = match endpoint.meet(&host).await {
+    let link = match endpoint.link_to(&host).await {
         Ok(link) => link,
         Err(error) => {
             endpoint.close().await;
             return Err(match error {
-                tunnel::TunnelError::Unreachable => "Couldn't connect to their computer: both routers are strict. One of you can turn on UPnP in the router, or play on the same network.".to_string(),
+                tunnel::TunnelError::Unreachable if host.doors.iter().any(|door| !door.starts_with("192.168.") && !door.starts_with("10.")) => {
+                    "Couldn't reach their computer, directly or through their server's address. Their tunnel or router may be down: ask them to check the address on their server's page.".to_string()
+                }
+                tunnel::TunnelError::Unreachable => "Couldn't connect to their computer: both routers are strict. They can give the server an address anyone can reach (a playit tunnel) on its page, or you can play on the same network.".to_string(),
                 other => format!("Couldn't connect to their computer: {other}"),
             });
         }
     };
-    let result = set_up_and_play(app, code, &answer.server, &link, progress).await;
+    let host = JoinedHost { key: code.to_string(), name: social_name(app, code) };
+    let result = set_up_and_play(app, &host, &answer.server, &link, progress).await;
     match result {
         Ok((instance_id, forwarding, skins)) => {
-            let previous = lock(&app.state::<Hosting>().joined).insert(instance_id.clone(), Joined { link, endpoint, forwarding, skins });
-            if let Some(previous) = previous {
-                previous.forwarding.abort();
-                if let Some(skins) = previous.skins {
-                    skins.abort();
-                }
-                previous.link.close();
-                previous.endpoint.close().await;
-            }
+            remember_join(app, instance_id.clone(), Joined { link, endpoint: Some(endpoint), forwarding, skins }).await;
             watch_joined_game(app.clone(), instance_id.clone());
             Ok(instance_id)
         }
@@ -1323,12 +2012,211 @@ async fn join(app: &AppHandle, code: &str, server_id: &str, progress: &(dyn Fn(&
     }
 }
 
+/// Whose server is being joined: a friend (by friend code and name) or an address.
+struct JoinedHost {
+    /// What joins to the same server share (with its id): which instance plays it.
+    key: String,
+    /// For the instance's name: the friend's name, or the address.
+    name: String,
+}
+
+/// How joining by address went.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum AddressJoin {
+    /// Not a Wisp server (or it didn't answer as one): play it as any server.
+    Plain,
+    /// On the way: the game starts into it.
+    Joined { instance_id: String },
+    /// It wants files only it has (not on Modrinth): asked first, since running them means
+    /// trusting whoever runs the server.
+    NeedsConsent { server: String, files: Vec<String> },
+}
+
+/// Joins a server hosted with Wisp by its address (one listed with Wisp's mark): matches its
+/// mods and brings this player's skin, as joining a friend's does. Files only the server has wait
+/// for `allow_host_files`.
+#[tauri::command]
+pub async fn join_server_address(address: String, allow_host_files: bool, app: AppHandle) -> Result<AddressJoin, String> {
+    let progress = |step: &'static str, done_bytes: u64, total_bytes: u64, message: Option<String>| {
+        let _ = app.emit(JOIN_EVENT, JoinProgress { code: address.clone(), server_id: String::new(), step, done_bytes, total_bytes, message });
+    };
+    let outcome = join_address(&app, &address, allow_host_files, &progress).await;
+    match &outcome {
+        Ok(AddressJoin::Joined { .. }) => progress("done", 0, 0, None),
+        Ok(_) => progress("done", 0, 0, None),
+        Err(error) => progress("failed", 0, 0, Some(error.clone())),
+    }
+    outcome
+}
+
+async fn join_address(app: &AppHandle, address: &str, allow_host_files: bool, progress: &(dyn Fn(&'static str, u64, u64, Option<String>) + Send + Sync)) -> Result<AddressJoin, String> {
+    let host = JoinedHost { key: address.to_ascii_lowercase(), name: address.to_string() };
+    join_through_doors(app, &host, &[address.to_string()], allow_host_files, progress).await
+}
+
+/// Joins a Wisp server through the first of its addresses whose door answers (mods, skin and
+/// all). Plain when none does.
+async fn join_through_doors(
+    app: &AppHandle,
+    host: &JoinedHost,
+    addresses: &[String],
+    allow_host_files: bool,
+    progress: &(dyn Fn(&'static str, u64, u64, Option<String>) + Send + Sync),
+) -> Result<AddressJoin, String> {
+    let paths = app.state::<Paths>();
+    let account = paths.accounts().active().ok_or("Add an account to play.")?;
+    progress("asking", 0, 0, None);
+    let keys = Keys::new().map_err(|error| error.to_string())?;
+    let ask = tunnel::Ask { name: account.name.clone(), uuid: account.uuid.replace('-', "").to_ascii_lowercase() };
+    let mut reached = None;
+    for address in addresses.iter().take(6) {
+        match tunnel::ask_door(address, &keys, &ask).await {
+            Ok((link, _)) => {
+                reached = Some(link);
+                break;
+            }
+            Err(tunnel::TunnelError::Refused) => return Err(format!("{} didn't let you in: it only takes players on its whitelist. Ask whoever runs it to add {}.", host.name, account.name)),
+            Err(_) => {}
+        }
+    }
+    let Some(link) = reached else {
+        return Ok(AddressJoin::Plain);
+    };
+    if !allow_host_files {
+        let manifest = link.manifest().await.map_err(|error| error.to_string())?;
+        let pack: Pack = serde_json::from_slice::<Pack>(&manifest).map_err(|_| "The server sent a list this Wisp can't read. Update Wisp.".to_string())?.cleaned();
+        let host_only: Vec<String> = pack.files.iter().filter(|file| file.url.is_none()).map(|file| file.path.trim_start_matches("mods/").to_string()).collect();
+        if !host_only.is_empty() {
+            link.close();
+            return Ok(AddressJoin::NeedsConsent { server: pack.name, files: host_only });
+        }
+    }
+    progress("connecting", 0, 0, None);
+    match set_up_and_play(app, host, &None, &link, progress).await {
+        Ok((instance_id, forwarding, skins)) => {
+            remember_join(app, instance_id.clone(), Joined { link, endpoint: None, forwarding, skins }).await;
+            watch_joined_game(app.clone(), instance_id.clone());
+            Ok(AddressJoin::Joined { instance_id })
+        }
+        Err(error) => {
+            link.close();
+            Err(error)
+        }
+    }
+}
+
+// ── Join codes ──
+
+fn relays() -> Vec<String> {
+    wisp_core::social::DEFAULT_RELAYS.iter().map(|relay| relay.to_string()).collect()
+}
+
+/// Where a server keeps the key its code comes from.
+const CODE_FILE: &str = ".wisp-code";
+
+/// A server's join code (its key is made the first time it's asked for).
+fn code_of(dir: &std::path::Path) -> Option<String> {
+    wisp_core::codes::ServerCode::load_or_make(&dir.join(CODE_FILE)).ok().map(|code| code.code())
+}
+
+/// What a server's code says about it right now.
+fn code_card(app: &AppHandle, server: &HostedServer, online: bool) -> wisp_core::codes::CodeCard {
+    let dir = store(&app.state::<Paths>()).root().join(&server.id);
+    let properties = Properties::read(&dir);
+    let process = process_of(app, &server.id);
+    wisp_core::codes::CodeCard {
+        name: server.name.clone(),
+        game_version: server.game_version.clone(),
+        loader: server.loader.as_str().to_string(),
+        software: server.software.map(|software| software.as_str().to_string()),
+        addresses: doors_of(app, server),
+        online,
+        players: process.as_ref().map_or(0, |process| process.players().len() as u32),
+        max_players: properties.get("max-players").and_then(|value| value.trim().parse().ok()).unwrap_or(20),
+        mods: core_hosting::mod_count(&dir) as u32,
+        at: now_ms(),
+    }
+}
+
+/// Says where the server is now, for whoever has its code (in the background).
+fn announce_code(app: &AppHandle, id: &str, online: bool) {
+    let app = app.clone();
+    let id = id.to_string();
+    tauri::async_runtime::spawn(async move {
+        let store = store(&app.state::<Paths>());
+        let (Some(server), Some(dir)) = (store.get(&id), store.dir_of(&id)) else {
+            return;
+        };
+        let Ok(code) = wisp_core::codes::ServerCode::load_or_make(&dir.join(CODE_FILE)) else {
+            return;
+        };
+        let card = code_card(&app, &server, online);
+        let _ = code.publish(&card, &relays()).await;
+    });
+}
+
+/// Keeps a running server's word fresh on the relays (its players, and in case one forgot).
+async fn keep_announcing(app: AppHandle, id: String) {
+    loop {
+        announce_code(&app, &id, true);
+        tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+    }
+}
+
+/// What a code leads to.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeLookup {
+    /// The code, tidied up.
+    code: String,
+    /// The server, as it last said; none when no relay has heard of it.
+    server: Option<wisp_core::codes::CodeCard>,
+}
+
+/// Finds the server a join code belongs to.
+#[tauri::command]
+pub async fn look_up_server_code(code: String) -> Result<CodeLookup, String> {
+    let code = wisp_core::codes::normalize(&code).ok_or("That isn't a Wisp code. They look like WISP-7K2M-9QXA-4F2P.")?;
+    let server = wisp_core::codes::resolve(&code, &relays()).await.map_err(|error| format!("Couldn't look it up: {error}"))?;
+    Ok(CodeLookup { code, server })
+}
+
+/// Joins a server by its code: wherever it can be reached now, mods and skin and all.
+#[tauri::command]
+pub async fn join_server_code(code: String, allow_host_files: bool, app: AppHandle) -> Result<AddressJoin, String> {
+    let code = wisp_core::codes::normalize(&code).ok_or("That isn't a Wisp code. They look like WISP-7K2M-9QXA-4F2P.")?;
+    let progress = |step: &'static str, done_bytes: u64, total_bytes: u64, message: Option<String>| {
+        let _ = app.emit(JOIN_EVENT, JoinProgress { code: code.clone(), server_id: String::new(), step, done_bytes, total_bytes, message });
+    };
+    progress("asking", 0, 0, None);
+    let found = wisp_core::codes::resolve(&code, &relays()).await.map_err(|error| format!("Couldn't look the code up: {error}"));
+    let outcome = match found {
+        Err(error) => Err(error),
+        Ok(None) => Err(format!("No server has {code}. Check it, or ask whoever runs it to start the server.")),
+        Ok(Some(server)) if !server.online => Err(format!("{} isn't running right now.", server.name)),
+        Ok(Some(server)) => {
+            // Joins by code share an instance per code, wherever the server moves.
+            let host = JoinedHost { key: code.clone(), name: server.name.clone() };
+            match join_through_doors(&app, &host, &server.addresses, allow_host_files, &progress).await {
+                Ok(AddressJoin::Plain) => Err(format!("Couldn't reach {}: its address may have changed, or its tunnel is down. Ask whoever runs it to check the server's page.", server.name)),
+                other => other,
+            }
+        }
+    };
+    match &outcome {
+        Ok(_) => progress("done", 0, 0, None),
+        Err(error) => progress("failed", 0, 0, Some(error.clone())),
+    }
+    outcome
+}
+
 /// Makes or updates the instance that matches the host's, fetches what it's missing, and starts
 /// the game straight into the server through the link.
 #[allow(clippy::type_complexity)]
 async fn set_up_and_play(
     app: &AppHandle,
-    code: &str,
+    host: &JoinedHost,
     card: &Option<ServerCard>,
     link: &Link,
     progress: &(dyn Fn(&'static str, u64, u64, Option<String>) + Send + Sync),
@@ -1339,8 +2227,8 @@ async fn set_up_and_play(
     let manifest = link.manifest().await.map_err(|error| error.to_string())?;
     let pack: Pack = serde_json::from_slice::<Pack>(&manifest).map_err(|_| "Their Wisp sent a list this one can't read. Update both to the newest Wisp.".to_string())?.cleaned();
     let loader: Loader = serde_json::from_value(serde_json::Value::String(pack.loader.clone())).map_err(|_| format!("Their server runs {}, which this Wisp doesn't know.", pack.loader))?;
-    let host_name = social_name(app, code);
-    let key = format!("{code}/{}", pack.server_id);
+    let host_name = host.name.clone();
+    let key = format!("{}/{}", host.key, pack.server_id);
     let instances = paths.instances();
     let mut records = read_joined(&paths);
     let record = records.remove(&key).unwrap_or_default();
@@ -1490,7 +2378,25 @@ fn watch_joined_game(app: AppHandle, instance_id: String) {
                 skins.abort();
             }
             ended.link.close();
-            ended.endpoint.close().await;
+            if let Some(endpoint) = ended.endpoint {
+                endpoint.close().await;
+            }
         }
     });
+}
+
+/// Keeps what playing a joined server needs until its game closes (replacing an earlier join of
+/// the same instance).
+async fn remember_join(app: &AppHandle, instance_id: String, joined: Joined) {
+    let previous = lock(&app.state::<Hosting>().joined).insert(instance_id, joined);
+    if let Some(previous) = previous {
+        previous.forwarding.abort();
+        if let Some(skins) = previous.skins {
+            skins.abort();
+        }
+        previous.link.close();
+        if let Some(endpoint) = previous.endpoint {
+            endpoint.close().await;
+        }
+    }
 }

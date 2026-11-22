@@ -393,6 +393,8 @@ export interface ServerCard {
   maxPlayers: number;
   /** How many mods joining brings along. */
   mods: number;
+  /** A plugin server's software; players join with plain Minecraft. */
+  software?: string;
 }
 
 export interface ServerInvite {
@@ -420,6 +422,32 @@ export interface ChatSummary {
 }
 
 /** What joining a friend's server is doing (src-tauri/src/hosting.rs). */
+/** What a server's join code says about it (wisp_core::codes). */
+export interface CodeCard {
+  name: string;
+  gameVersion: string;
+  loader: string;
+  software?: string | null;
+  addresses: string[];
+  online: boolean;
+  players: number;
+  maxPlayers: number;
+  mods: number;
+  at: number;
+}
+
+export interface CodeLookup {
+  /** The code, tidied up. */
+  code: string;
+  server: CodeCard | null;
+}
+
+/** How joining a server by its address went (src-tauri/src/hosting.rs). */
+export type AddressJoin =
+  | { kind: "plain" }
+  | { kind: "joined"; instanceId: string }
+  | { kind: "needs-consent"; server: string; files: string[] };
+
 export interface JoinProgress {
   code: string;
   serverId: string;
@@ -468,6 +496,53 @@ export interface HostedServer {
   openPort: boolean;
   backups: boolean;
   icon?: string;
+  /** The address people join from anywhere: a playit tunnel's, or your own. */
+  address?: string;
+  /** A plugin server (Paper and its kin) instead of the loader's own. */
+  software?: ServerSoftware;
+  startWithWisp?: boolean;
+  /** Restarts every so many hours while it runs. */
+  restartEveryHours?: number;
+  aikarFlags?: boolean;
+  jvmArgs?: string;
+  /** Its own Java (8, 17, 21, 25); absent lets Wisp pick. */
+  javaMajor?: number;
+}
+
+export type ServerSoftware = "paper" | "purpur" | "folia" | "spigot";
+
+/** A plugin or mod in a server's own folder. */
+export interface ServerItem {
+  file: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  projectId: string | null;
+}
+
+/** A newer build of something in a server. */
+export interface ServerContentUpdate {
+  file: string;
+  projectId: string;
+  versionId: string;
+  version: string;
+}
+
+export interface ServerContentView {
+  /** What the server takes; null for plain Vanilla. */
+  kind: "plugins" | "mods" | null;
+  items: ServerItem[];
+  /** The instance its mods come from, when it has one. */
+  instanceName: string | null;
+  instanceId: string | null;
+}
+
+/** A mod Wisp keeps out of a server: it only runs in the game (it crashed the server as it loaded). */
+export interface SetAsideMod {
+  file: string;
+  name: string;
+  sha1: string;
+  at: number;
 }
 
 export interface HostedView extends HostedServer {
@@ -485,6 +560,8 @@ export interface HostedView extends HostedServer {
   failure: string | null;
   effectiveMemoryMb: number;
   automaticMemory: boolean;
+  /** What Wisp would pick. */
+  pickedMemoryMb: number;
   modCount: number;
   motd: string;
   onlineMode: boolean;
@@ -499,6 +576,28 @@ export interface HostedView extends HostedServer {
   /** Friends let in this run. */
   friendsIn: string[];
   reach: LinkReach | null;
+  setAside: SetAsideMod[];
+  /** Its join code: anyone with Wisp joins with it. */
+  code: string | null;
+}
+
+/** playit.gg on this computer (src-tauri/src/playit.rs). */
+export interface PlayitView {
+  /** This build runs playit's agent itself (tester builds). */
+  builtIn: boolean;
+  linked: boolean;
+  /** The claim page, while Wisp waits for you to approve it. */
+  linking: string | null;
+  running: boolean;
+  /** playit's licence, shown in About by builds that carry its agent. */
+  notice: string | null;
+}
+
+export type PlayitEvent = { kind: "linked" } | { kind: "failed"; message: string };
+
+export interface AddressCheck {
+  reachable: boolean;
+  hint: string | null;
 }
 
 export interface NewHostedServer {
@@ -511,6 +610,7 @@ export interface NewHostedServer {
   properties: [string, string][];
   /** Ticked "I agree to the Minecraft EULA". */
   eula: boolean;
+  software: ServerSoftware | null;
 }
 
 export interface ServerChanges {
@@ -520,12 +620,22 @@ export interface ServerChanges {
   backups?: boolean;
   memoryMb?: number;
   automaticMemory?: boolean;
+  /** The address people join from anywhere ("" takes it away). */
+  address?: string;
+  startWithWisp?: boolean;
+  /** 0 turns scheduled restarts off. */
+  restartEveryHours?: number;
+  aikarFlags?: boolean;
+  /** "" takes them away. */
+  jvmArgs?: string;
+  /** 0 lets Wisp pick. */
+  javaMajor?: number;
 }
 
 export interface ConsoleLine {
   at: number;
   text: string;
-  level: "info" | "warn" | "error" | "input";
+  level: "info" | "warn" | "error" | "input" | "wisp";
 }
 
 export type HostingChange =
@@ -533,7 +643,8 @@ export type HostingChange =
   | { serverId: string; kind: "progress"; update: LaunchUpdate }
   | { serverId: string; kind: "lines"; lines: ConsoleLine[] }
   | { serverId: string; kind: "players"; players: string[] }
-  | { serverId: string; kind: "failed"; message: string };
+  | { serverId: string; kind: "failed"; message: string }
+  | { serverId: string; kind: "fixed"; message: string };
 
 export type PlayerList = "whitelist" | "ops" | "banned";
 
@@ -716,6 +827,8 @@ export interface ServerStatus {
   icon: string | null;
   pingMs: number | null;
   error: string | null;
+  /** Hosted with Wisp: joining from Wisp brings its mods and your skin along. */
+  wisp?: boolean;
 }
 
 /** A public server on Discover; its status comes live from the server. */

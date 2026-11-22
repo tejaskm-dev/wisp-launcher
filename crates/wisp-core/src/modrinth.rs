@@ -31,6 +31,16 @@ pub const LOADERS: &[&str] = &[
     "nilloader",
     "ornithe",
     "rift",
+    // Plugin servers.
+    "bukkit",
+    "spigot",
+    "paper",
+    "purpur",
+    "folia",
+    "velocity",
+    "waterfall",
+    "bungeecord",
+    "sponge",
 ];
 const MAX_LIMIT: u32 = 50;
 

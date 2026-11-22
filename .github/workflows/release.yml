@@ -162,7 +162,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: pnpm tauri
-          args: ${{ matrix.args }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && ' --config src-tauri/tauri.updates.conf.json' || '' }}
+          # Tester builds carry playit's agent (a public address per server with nothing to
+          # install); public builds don't until playit agrees in writing (their terms 3.4).
+          args: ${{ matrix.args }}${{ inputs.tester && ' --features playit' || '' }}${{ vars.WISP_UPDATER_PUBKEY != '' && vars.WISP_UPDATES_URL != '' && ' --config src-tauri/tauri.updates.conf.json' || '' }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: ${{ github.ref_type == 'tag' && format('Wisp {0}', github.ref_name) || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}

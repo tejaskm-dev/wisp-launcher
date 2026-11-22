@@ -71,6 +71,10 @@ pub struct ModInfo {
     /// It says it only runs in the game, never on a server (Fabric's and Quilt's "environment":
     /// "client", Forge's `clientSideOnly`).
     pub client_only: bool,
+    /// It says it only runs on a server (Fabric's "environment": "server", Quilt's
+    /// "dedicated_server"), so players don't need it.
+    #[serde(default)]
+    pub server_only: bool,
 }
 
 /// A mod a jar can't run without, as one loader's metadata in it says.
@@ -115,7 +119,7 @@ impl ModInfo {
         }
     }
 
-    pub(crate) fn answers_to(&self, id: &str) -> bool {
+    pub fn answers_to(&self, id: &str) -> bool {
         self.id == id || self.provides.iter().any(|provided| provided == id)
     }
 }
@@ -282,8 +286,10 @@ fn read_fabric(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<St
         return;
     }
     info.loaders.push(Platform::Fabric);
-    if text_at(&value, "environment") == "client" {
-        info.client_only = true;
+    match text_at(&value, "environment") {
+        "client" => info.client_only = true,
+        "server" => info.server_only = true,
+        _ => {}
     }
     if info.id.is_empty() {
         info.id = id;
@@ -313,8 +319,10 @@ fn read_quilt(text: &str, info: &mut ModInfo, depth: usize, nested: &mut Vec<Str
     let Some(loader) = value.get("quilt_loader") else {
         return;
     };
-    if depth == 0 && value.get("minecraft").map(|minecraft| text_at(minecraft, "environment")) == Some("client") {
-        info.client_only = true;
+    match value.get("minecraft").map(|minecraft| text_at(minecraft, "environment")) {
+        Some("client") if depth == 0 => info.client_only = true,
+        Some("dedicated_server") if depth == 0 => info.server_only = true,
+        _ => {}
     }
     let id = text_at(loader, "id").to_string();
     if !id.is_empty() {
@@ -426,7 +434,7 @@ fn read_forge(text: &str, platform: Platform, info: &mut ModInfo, depth: usize) 
 // ── Scanning mods/ ──
 
 /// Goes up whenever what's read from a jar changes, so caches from before are read afresh.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 #[derive(Default, Serialize, Deserialize)]
 struct Cache {
@@ -538,6 +546,8 @@ pub enum Problem {
     NeedsJava { major: u32 },
     /// The crash report points at this mod.
     Culprit { file: String, name: String },
+    /// A mod that only runs in the game crashed a server as it loaded.
+    ClientOnly { file: String, name: String },
 }
 
 impl Problem {
@@ -556,6 +566,7 @@ impl Problem {
             Self::TooMuchMemory => "Java couldn't get the memory it was given.".into(),
             Self::NeedsJava { major } => format!("A mod needs Java {major}."),
             Self::Culprit { name, .. } => format!("The crash points at {name}."),
+            Self::ClientOnly { name, .. } => format!("{name} only runs in the game, not on a server."),
         }
     }
 }
@@ -816,11 +827,113 @@ pub fn diagnose(instance: &Instance, instance_dir: &Path, output: &[String], sin
     diagnose_lines(instance, &lines, &mods)
 }
 
+/// What a server's console (and crash report) says went wrong: what a game's would, and first, a
+/// mod that only runs in the game, which crashes a server as it loads (the commonest way a modded
+/// server fails to start).
+pub fn diagnose_server(server_dir: &Path, loader: Loader, console: &[String], since_ms: i64) -> Vec<Problem> {
+    let report = crash_report(server_dir, since_ms).unwrap_or_default();
+    let lines: Vec<String> = console.iter().map(String::as_str).chain(report.lines()).map(clean).collect();
+    let mods_dir = server_dir.join("mods");
+    let mods: Vec<ModInfo> = std::fs::read_dir(&mods_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "jar") && path.is_file())
+        .map(|path| read_jar(&path))
+        .collect();
+    let mut problems = Vec::new();
+    if let Some(culprit) = client_only_culprit(&lines, &mods, &mods_dir) {
+        problems.push(culprit);
+    }
+    for problem in read_problems(loader, &lines, &mods) {
+        let same_mod = matches!((&problem, problems.first()), (Problem::Culprit { file, .. }, Some(Problem::ClientOnly { file: known, .. })) if file == known);
+        if !same_mod && !problems.contains(&problem) {
+            problems.push(problem);
+        }
+    }
+    problems
+}
+
+/// The mod behind a crash from something only the game has (`net/minecraft/client/...`) being
+/// loaded on a server: the mod Forge's stack frames name, a mixin's mod, the jar holding the first
+/// class in the trace that isn't Minecraft's or a loader's, or the crash report's suspect.
+fn client_only_culprit(lines: &[String], mods: &[ModInfo], mods_dir: &Path) -> Option<Problem> {
+    static FRAME: OnceLock<Regex> = OnceLock::new();
+    static MODULE: OnceLock<Regex> = OnceLock::new();
+    let game_only = lines.iter().position(|line| {
+        line.contains("invalid dist DEDICATED_SERVER")
+            || line.contains("in environment type SERVER")
+            || ((line.contains("NoClassDefFoundError") || line.contains("ClassNotFoundException")) && (line.contains("net/minecraft/client") || line.contains("net.minecraft.client")))
+    })?;
+    let after = &lines[game_only..];
+    let culprit = |id: &str| -> Option<Problem> {
+        let info = mods.iter().find(|info| info.id == id).or_else(|| mods.iter().find(|info| info.answers_to(id)))?;
+        Some(Problem::ClientOnly { file: info.file.clone(), name: info.display() })
+    };
+    let ignored = ["minecraft", "forge", "neoforge", "fml", "fabricloader", "mixinextras", "java", "quilt_loader"];
+    // Forge and NeoForge name the mod in each frame: "at TRANSFORMER/mymod@1.2/com.example...".
+    let module = MODULE.get_or_init(|| Regex::new(r"at (?:TRANSFORMER|LAYER SERVICE|MC-BOOTSTRAP|SECURE-BOOTSTRAP)?/?(?P<id>[a-z][a-z0-9_\-]*)@").expect("valid pattern"));
+    for line in after.iter().take(80) {
+        if let Some(found) = module.captures(line)
+            && !ignored.contains(&&found["id"])
+            && let Some(problem) = culprit(&found["id"])
+        {
+            return Some(problem);
+        }
+    }
+    let patterns = patterns();
+    for line in after.iter().take(80).chain(lines.iter()) {
+        if let Some(found) = patterns.mixin_mod.captures(line)
+            && !ignored.contains(&&found["id"])
+            && let Some(problem) = culprit(&found["id"])
+        {
+            return Some(problem);
+        }
+    }
+    let frame = FRAME.get_or_init(|| Regex::new(r"at (?:[^ (]+/)?(?P<class>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\.[\w$<>]+\(").expect("valid pattern"));
+    let framework = [
+        "java.", "javax.", "jdk.", "sun.", "com.sun.", "net.minecraft.", "com.mojang.", "net.minecraftforge.", "net.neoforged.", "cpw.mods.", "net.fabricmc.", "org.quiltmc.", "org.spongepowered.", "com.llamalad7.", "org.objectweb.", "io.netty.",
+        "it.unimi.", "com.google.", "org.apache.", "org.slf4j.", "kotlin.", "kotlinx.", "scala.", "org.openjdk.",
+    ];
+    for line in after.iter().take(80) {
+        let Some(found) = frame.captures(line) else { continue };
+        let class = &found["class"];
+        if framework.iter().any(|prefix| class.starts_with(prefix)) {
+            continue;
+        }
+        let entry = format!("{}.class", class.split('$').next().unwrap_or(class).replace('.', "/"));
+        let holder = mods.iter().find(|info| {
+            std::fs::File::open(mods_dir.join(&info.file)).ok().and_then(|file| zip::ZipArchive::new(std::io::BufReader::new(file)).ok()).is_some_and(|mut archive| archive.by_name(&entry).is_ok())
+        });
+        if let Some(info) = holder {
+            return Some(Problem::ClientOnly { file: info.file.clone(), name: info.display() });
+        }
+        break;
+    }
+    for line in lines {
+        if let Some(found) = patterns.suspected.captures(line) {
+            for suspect in patterns.suspect.captures_iter(&found["list"]) {
+                if !ignored.contains(&&suspect["id"])
+                    && let Some(problem) = culprit(&suspect["id"])
+                {
+                    return Some(problem);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn file_for(mods: &[ModInfo], id: &str) -> Option<String> {
     mods.iter().find(|info| info.id == id).or_else(|| mods.iter().find(|info| info.answers_to(id))).map(|info| info.file.clone())
 }
 
 fn diagnose_lines(instance: &Instance, lines: &[String], mods: &[ModInfo]) -> Vec<Problem> {
+    read_problems(instance.loader, lines, mods)
+}
+
+fn read_problems(loader: Loader, lines: &[String], mods: &[ModInfo]) -> Vec<Problem> {
     let patterns = patterns();
     let mut problems: Vec<Problem> = Vec::new();
     fn push(problems: &mut Vec<Problem>, problem: Problem) {
@@ -831,7 +944,7 @@ fn diagnose_lines(instance: &Instance, lines: &[String], mods: &[ModInfo]) -> Ve
     // One problem per missing id, naming every mod that needs it. A loader's own id is never a
     // mod to add.
     let missing = |problems: &mut Vec<Problem>, id: &str, needed_by: String| {
-        if is_builtin(id, instance.loader) || names_a_loader(id) {
+        if is_builtin(id, loader) || names_a_loader(id) {
             return;
         }
         match problems.iter_mut().find_map(|problem| match problem {
@@ -1133,6 +1246,11 @@ impl Fixer<'_> {
             Problem::Incompatible { file, name, .. } => report.offers.push(Offer {
                 label: format!("Turn off {name}"),
                 detail: "The mod loader says it can't run alongside another mod here. Worlds that use its blocks or items lose them while it's off.".into(),
+                action: Action::Disable { file, name },
+            }),
+            Problem::ClientOnly { file, name } => report.offers.push(Offer {
+                label: format!("Turn off {name}"),
+                detail: format!("{name} only runs in the game. Turning it off here changes nothing in play."),
                 action: Action::Disable { file, name },
             }),
             Problem::Culprit { file, name } => report.offers.push(Offer {
@@ -1558,6 +1676,53 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn server_jar(path: &Path, entries: &[(&str, &str)]) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, text) in entries {
+            writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(text.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn finds_the_game_only_mod_that_crashed_a_server() {
+        let dir = std::env::temp_dir().join(format!("wisp-server-doctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("mods")).unwrap();
+        server_jar(&dir.join("mods/minimap-1.0.jar"), &[("META-INF/mods.toml", "modLoader=\"javafml\"\n[[mods]]\nmodId=\"minimap\"\ndisplayName=\"Minimap\"\n"), ("com/example/minimap/MinimapClient.class", "")]);
+        server_jar(&dir.join("mods/zoom.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"zoom","name":"Zoom","version":"2"}"#), ("dev/zoom/ZoomClient.class", "")]);
+        server_jar(&dir.join("mods/fine.jar"), &[("fabric.mod.json", r#"{"schemaVersion":1,"id":"fine","version":"1"}"#)]);
+
+        // Forge names the mod in the trace.
+        let forge: Vec<String> = [
+            "[12:00:01] [main/ERROR] [ne.mi.fm.ja.FMLModContainer/LOADING]: Failed to create mod instance. ModID: minimap",
+            "java.lang.RuntimeException: Attempted to load class net/minecraft/client/gui/screens/Screen for invalid dist DEDICATED_SERVER",
+            "\tat TRANSFORMER/minecraft@1.21.4/net.minecraft.SomeClass.load(SomeClass.java:3)",
+            "\tat TRANSFORMER/minimap@1.0/com.example.minimap.MinimapClient.<init>(MinimapClient.java:12)",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let problems = diagnose_server(&dir, Loader::Forge, &forge, i64::MAX);
+        assert_eq!(problems.first(), Some(&Problem::ClientOnly { file: "minimap-1.0.jar".into(), name: "Minimap".into() }));
+
+        // Fabric doesn't: the jar holding the first class that isn't Minecraft's or Fabric's.
+        let fabric: Vec<String> = [
+            "java.lang.RuntimeException: Cannot load class net.minecraft.class_310 in environment type SERVER",
+            "\tat net.fabricmc.loader.impl.launch.knot.KnotClassDelegate.tryLoadClass(KnotClassDelegate.java:323)",
+            "\tat dev.zoom.ZoomClient$1.onInitialize(ZoomClient.java:9)",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let problems = diagnose_server(&dir, Loader::Fabric, &fabric, i64::MAX);
+        assert_eq!(problems, vec![Problem::ClientOnly { file: "zoom.jar".into(), name: "Zoom".into() }]);
+
+        // A crash that has nothing to do with game-only code isn't blamed on one.
+        let other: Vec<String> = ["java.lang.IllegalStateException: something else".to_string()].to_vec();
+        assert!(!diagnose_server(&dir, Loader::Fabric, &other, i64::MAX).iter().any(|problem| matches!(problem, Problem::ClientOnly { .. })));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn jar(path: &Path, entries: &[(&str, Vec<u8>)]) {
         let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
         for (name, bytes) in entries {
@@ -1648,6 +1813,7 @@ mod tests {
             loaders: loaders.to_vec(),
             requires: requires.iter().map(|(id, range)| Requirement { id: id.to_string(), versions: range.to_string(), platform: loaders.first().copied().unwrap_or(Platform::Fabric) }).collect(),
             client_only: false,
+            server_only: false,
         }
     }
 

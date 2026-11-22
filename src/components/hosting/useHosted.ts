@@ -36,12 +36,14 @@ export function useHostedServers(onFailed?: (serverId: string, message: string) 
   return { servers, reload };
 }
 
-/** One hosted server, with its console as it comes. */
-export function useHostedServer(id: string, onFailed?: (message: string) => void) {
+/** One hosted server, with its console as it comes. `onFixed` hears what Wisp fixed by itself. */
+export function useHostedServer(id: string, onFailed?: (message: string) => void, onFixed?: (message: string) => void) {
   const [server, setServer] = useState<HostedView | null | undefined>(undefined);
   const [console, setConsole] = useState<ConsoleLine[]>([]);
   const failed = useRef(onFailed);
   failed.current = onFailed;
+  const fixed = useRef(onFixed);
+  fixed.current = onFixed;
   const reload = useCallback(() => {
     getHostedServer(id).then(setServer, () => setServer(null));
   }, [id]);
@@ -65,6 +67,10 @@ export function useHostedServer(id: string, onFailed?: (message: string) => void
           return;
         case "failed":
           failed.current?.(change.message);
+          reload();
+          return;
+        case "fixed":
+          fixed.current?.(change.message);
           reload();
           return;
         default:

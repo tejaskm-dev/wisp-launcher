@@ -9,9 +9,11 @@ interface DialogProps {
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
+  /** Wider, for reading (a project's description). */
+  wide?: boolean;
 }
 
-export function Dialog({ open, onClose, title, description, children, footer }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, footer, wide = false }: DialogProps) {
   const titleId = useId();
 
   useEffect(() => {
@@ -36,7 +38,7 @@ export function Dialog({ open, onClose, title, description, children, footer }: 
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.98 }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}
-            className="tail relative flex max-h-[calc(100dvh-3rem)] w-full max-w-[580px] flex-col rounded-[26px] bg-ink-800 shadow-[inset_0_1px_0_rgba(244,238,228,0.06)] [--tail:46px] [filter:drop-shadow(0_40px_70px_rgba(0,0,0,0.75))]"
+            className={`tail relative flex max-h-[calc(100dvh-3rem)] w-full ${wide ? "max-w-[780px]" : "max-w-[580px]"} flex-col rounded-[26px] bg-ink-800 shadow-[inset_0_1px_0_rgba(244,238,228,0.06)] [--tail:46px] [filter:drop-shadow(0_40px_70px_rgba(0,0,0,0.75))]`}
           >
             <header className="flex items-start gap-4 px-6 pt-6">
               <div className="min-w-0 flex-1">

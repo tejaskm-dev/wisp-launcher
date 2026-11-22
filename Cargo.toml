@@ -6,10 +6,11 @@ members = ["src-tauri", "crates/*"]
 version = "0.2.0"
 edition = "2024"
 
-# Small, fast release binaries: whole-program optimisation, no unwinding tables, no symbols.
+# Small, fast release binaries: whole-program optimisation and no symbols. Panics unwind rather
+# than abort, so a mistake in one background job ends that job, not Wisp (with a game, a server
+# and a sync running beside it).
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
 strip = true

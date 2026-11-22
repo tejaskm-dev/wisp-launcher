@@ -1,6 +1,6 @@
 import { ArrowUpCircle, Check, Copy, Download, Eraser, FolderOpen, HardDrive, Info, KeyRound, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck } from "lucide-react";
 import { useId, useState } from "react";
-import { clearCache, getDataFolder, getStorageUsage, getTesterCode, isDesktop, joinTesterBuilds, looksLikeTesterCode, openDataFolder, openExternal, testerBuild, testerBuildNumber, versionLabel } from "../../data/api";
+import { clearCache, getDataFolder, getPlayit, getStorageUsage, getTesterCode, isDesktop, joinTesterBuilds, looksLikeTesterCode, openDataFolder, openExternal, testerBuild, testerBuildNumber, versionLabel } from "../../data/api";
 import { DEFAULT_SETTINGS } from "../../data/defaults";
 import type { StorageUsage } from "../../data/types";
 import { formatBytes } from "../../lib/format";
@@ -156,6 +156,19 @@ export function PrivacySection({ settings, update }: SectionProps) {
   );
 }
 
+/** Licences of what this build carries that asks to be named (playit's agent, in tester builds). */
+function ThirdPartyNotices() {
+  const [playit] = useResource(getPlayit);
+  const notice = playit.status === "ready" ? playit.data.notice : null;
+  if (!notice) return null;
+  return (
+    <details className="mt-2 text-mute-2">
+      <summary className="cursor-pointer font-semibold text-cream-300 hover:text-cream">Third-party notices</summary>
+      <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-xl bg-ink-900/60 p-3 font-mono text-[11px] leading-relaxed">{notice}</pre>
+    </details>
+  );
+}
+
 export function AboutSection({ settings, update }: SectionProps) {
   const { notify } = useApp();
   const [confirming, setConfirming] = useState(false);
@@ -192,6 +205,7 @@ export function AboutSection({ settings, update }: SectionProps) {
                 wisplaunchercontact@gmail.com
               </button>
             </p>
+            <ThirdPartyNotices />
           </div>
         </div>
         <UpdateRow />

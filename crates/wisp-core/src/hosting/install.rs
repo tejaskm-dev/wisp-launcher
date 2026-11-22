@@ -31,8 +31,20 @@ pub struct StartPlan {
     pub dir: PathBuf,
 }
 
+impl StartPlan {
+    /// Has the server listen on `port` instead of the one in server.properties, which stays as the
+    /// player set it (Wisp takes players there and passes them on). Every loader passes the game's
+    /// own `--port` through.
+    pub fn listen_on(&mut self, port: u16) {
+        let at = self.args.iter().rposition(|arg| arg == "nogui").unwrap_or(self.args.len());
+        self.args.splice(at..at, ["--port".to_string(), port.to_string()]);
+    }
+}
+
 pub struct PrepareOptions<'a> {
     pub memory_mb: u32,
+    /// Which Java to use; none picks what the Minecraft version wants.
+    pub java_major: Option<u32>,
     /// Java executables picked in Settings, by major version.
     pub java_paths: &'a HashMap<u32, PathBuf>,
     /// Extra JVM arguments, already split into words.
@@ -49,13 +61,23 @@ pub async fn prepare(
     options: &PrepareOptions<'_>,
     report: &(dyn Fn(LaunchUpdate) + Send + Sync),
 ) -> Result<StartPlan, LaunchError> {
-    let runtime = launch::server_runtime(client, files, &server.game_version, server.loader, None, options.java_paths, options.concurrency, report).await?;
+    let runtime = launch::server_runtime(client, files, &server.game_version, server.loader, options.java_major, options.java_paths, options.concurrency, report).await?;
     std::fs::create_dir_all(dir)?;
-    let start = match server.loader {
-        Loader::Vanilla => vec!["-jar".to_string(), runtime.server_jar.to_string_lossy().into_owned()],
-        Loader::Fabric => fabric(client, dir, server, &runtime, options.concurrency, report).await?,
-        Loader::Quilt => quilt(client, files, dir, server, &runtime, options.concurrency, report).await?,
-        Loader::Forge | Loader::NeoForge => forge(client, files, dir, server, &runtime, options.concurrency, report).await?,
+    let start = match (server.software, server.loader) {
+        (Some(software), _) => {
+            let jar = software.jar(client, files, &server.game_version, &runtime.java, report).await?;
+            // Paper and its forks patch Mojang's jar, which they'd download again: Wisp's checked
+            // copy goes where they look first.
+            if software != super::software::Software::Spigot {
+                let _ = std::fs::create_dir_all(dir.join("cache"));
+                let _ = place_server_jar(&runtime, dir, &format!("cache/mojang_{}.jar", server.game_version));
+            }
+            vec!["-jar".to_string(), jar.to_string_lossy().into_owned()]
+        }
+        (None, Loader::Vanilla) => vec!["-jar".to_string(), runtime.server_jar.to_string_lossy().into_owned()],
+        (None, Loader::Fabric) => fabric(client, dir, server, &runtime, options.concurrency, report).await?,
+        (None, Loader::Quilt) => quilt(client, files, dir, server, &runtime, options.concurrency, report).await?,
+        (None, Loader::Forge | Loader::NeoForge) => forge(client, files, dir, server, &runtime, options.concurrency, report).await?,
     };
     let mut args = vec![format!("-Xmx{}M", options.memory_mb), "-Dlog4j2.formatMsgNoLookups=true".to_string()];
     args.extend(GC_FLAGS.iter().map(|flag| flag.to_string()));

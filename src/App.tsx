@@ -717,12 +717,13 @@ export default function App() {
     [],
   );
   // Files dropped anywhere go to the import dialog, except on pages that take their own drops
-  // (worlds on Worlds, skins on Skins).
+  // (worlds on Worlds, skins on Skins, plugins and mods on a hosted server's page).
   const [droppingFiles, setDroppingFiles] = useState(false);
   useEffect(
     () =>
       onFileDrop((drop) => {
-        const own = pageNow.current === "worlds" || pageNow.current === "skins";
+        // A hosted server's page takes its own: they go into that server.
+        const own = pageNow.current === "worlds" || pageNow.current === "skins" || pageNow.current === "hosted";
         if (drop.type === "leave" || own) {
           setDroppingFiles(false);
           return;

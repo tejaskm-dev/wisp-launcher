@@ -1,16 +1,16 @@
 import {
   ArrowLeft,
-  Check,
-  Copy,
   Cpu,
   FolderOpen,
   Gamepad2,
   Globe2,
   HardDrive,
+  ImagePlus,
   LoaderCircle,
+  Package,
+  PackageMinus,
   Play,
   RotateCcw,
-  Router,
   Send,
   Server,
   Settings2,
@@ -18,23 +18,28 @@ import {
   Square,
   Terminal,
   Trash2,
+  Undo2,
   UserPlus,
   Users,
 } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { hostedStatus, TONE_DOT, TONE_TEXT } from "../components/hosting/describe";
+import { AddressPanel } from "../components/hosting/AddressPanel";
+import { ServerContentTab } from "../components/hosting/ServerContentTab";
+import { hostedStatus, softwareName, TONE_DOT, TONE_TEXT } from "../components/hosting/describe";
 import { useHostedServer } from "../components/hosting/useHosted";
 import { InstanceAvatar } from "../components/instances/InstanceAvatar";
 import { Button } from "../components/ui/Button";
 import { Dialog } from "../components/ui/Dialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Page, Panel } from "../components/ui/Page";
+import { Popover } from "../components/ui/Popover";
 import { ProgressBar } from "../components/ui/ProgressBar";
 import { Select, type SelectOption } from "../components/ui/Select";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
 import { Toggle } from "../components/ui/Toggle";
 import {
+  addServerFiles,
   agreeServerEula,
   backUpServer,
   deleteHostedServer,
@@ -46,7 +51,10 @@ import {
   inviteToServer,
   openExternal,
   openServerFolder,
+  pickServerIcon,
+  onFileDrop,
   playHostedServer,
+  putBackServerMod,
   restartHostedServer,
   restoreServerBackup,
   sendServerCommand,
@@ -64,22 +72,55 @@ import { fadeUp } from "../lib/motion";
 import { useApp } from "../state/AppContext";
 
 const BACK_LABELS: Partial<Record<PageId, string>> = { servers: "Servers", friends: "Friends", worlds: "Worlds", home: "Home" };
-type Tab = "overview" | "console" | "players" | "settings" | "backups";
+type Tab = "overview" | "console" | "content" | "players" | "settings" | "backups";
 const TABS: { id: Tab; label: string; icon: typeof Server }[] = [
   { id: "overview", label: "Overview", icon: Server },
   { id: "console", label: "Console", icon: Terminal },
+  { id: "content", label: "Mods", icon: Package },
   { id: "players", label: "Players", icon: Users },
   { id: "settings", label: "Settings", icon: Settings2 },
   { id: "backups", label: "Backups", icon: RotateCcw },
 ];
+/** The tabs a server has: plugin servers have Plugins, modded ones Mods, Vanilla neither. */
+const tabsFor = (server: HostedView) =>
+  TABS.flatMap((tab) => {
+    if (tab.id !== "content") return [tab];
+    if (server.software) return [{ ...tab, label: "Plugins" }];
+    return server.loader === "vanilla" ? [] : [tab];
+  });
 const message = (failure: unknown) => (failure instanceof Error ? failure.message : String(failure));
 
 /** One server hosted on this computer: start and stop it, who can join and how, its console, players, settings and backups. */
 export function HostedServerPage({ serverId, backTo, onBack }: { serverId: string; backTo: PageId; onBack: () => void }) {
   const { notify, now } = useApp();
-  const { server, setServer, console, reload } = useHostedServer(serverId, (failure) => notify({ tone: "info", title: "The server couldn't start", body: failure }));
+  const { server, setServer, console, reload } = useHostedServer(
+    serverId,
+    (failure) => notify({ tone: "info", title: "The server couldn't start", body: failure }),
+    (fixed) => notify({ tone: "success", title: "Wisp fixed the server", body: fixed }),
+  );
   const [tab, setTab] = useState<Tab>("overview");
   const [busy, setBusy] = useState<string | null>(null);
+  // Files dropped anywhere on the page go into this server: plugins, mods, data packs.
+  const [dropping, setDropping] = useState(false);
+  const [added, setAdded] = useState(0);
+  useEffect(
+    () =>
+      onFileDrop((drop) => {
+        if (drop.type === "over") return setDropping(drop.paths.length > 0);
+        setDropping(false);
+        if (drop.type !== "drop" || drop.paths.length === 0) return;
+        void addServerFiles(serverId, drop.paths).then(
+          (names) => {
+            if (names.length === 0) return;
+            notify({ tone: "success", title: names.length === 1 ? `Added ${names[0]}` : `Added ${names.length} files`, body: "They load when the server next starts." });
+            setAdded((count) => count + 1);
+            setTab("content");
+          },
+          (failure: unknown) => notify({ tone: "info", title: "Couldn't add that", body: message(failure) }),
+        );
+      }),
+    [serverId, notify],
+  );
 
   const run = async (label: string, work: () => Promise<unknown>, failTitle: string) => {
     setBusy(label);
@@ -133,7 +174,7 @@ export function HostedServerPage({ serverId, backTo, onBack }: { serverId: strin
           </span>
           <div className="flex min-w-[240px] flex-1 flex-col gap-3">
             <p className="text-sm font-semibold text-cream-300">
-              Hosted on this computer · {loaderName(server.loader)} {server.gameVersion}
+              Hosted on this computer · {softwareName(server)} {server.gameVersion}
               {server.instanceName && ` · played with ${server.instanceName}`}
             </p>
             <h1 className="font-display text-[clamp(34px,4vw,52px)] font-extrabold leading-none tracking-[-0.035em]">{server.name}</h1>
@@ -198,14 +239,14 @@ export function HostedServerPage({ serverId, backTo, onBack }: { serverId: strin
 
       <m.dl variants={fadeUp} className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat icon={<Users size={13} aria-hidden="true" />} label="Players" value={live ? `${server.players.length} of ${server.maxPlayers}` : `Up to ${server.maxPlayers}`} />
-        <Stat icon={<Cpu size={13} aria-hidden="true" />} label="Memory" value={`${(server.effectiveMemoryMb / 1024).toFixed(server.effectiveMemoryMb % 1024 === 0 ? 0 : 1)} GB${server.automaticMemory ? " (auto)" : ""}`} />
-        <Stat icon={<HardDrive size={13} aria-hidden="true" />} label="Mods" value={server.modCount > 0 ? server.modCount.toLocaleString() : "None"} />
+        <MemoryStat server={server} onChange={setServer} />
+        <Stat icon={<HardDrive size={13} aria-hidden="true" />} label={server.software ? "Plugins" : "Mods"} value={server.modCount > 0 ? server.modCount.toLocaleString() : "None"} />
         <Stat icon={<Globe2 size={13} aria-hidden="true" />} label="World" value={server.worldExists ? "Ready" : "Made on first start"} />
       </m.dl>
 
       <m.div variants={fadeUp} className="flex flex-col gap-5">
         <div role="tablist" aria-label={server.name} className="flex w-fit max-w-full gap-1 overflow-x-auto rounded-full border border-cream/8 bg-ink-850 p-1">
-          {TABS.map((option) => {
+          {tabsFor(server).map((option) => {
             const selected = option.id === tab;
             const Icon = option.icon;
             return (
@@ -231,12 +272,21 @@ export function HostedServerPage({ serverId, backTo, onBack }: { serverId: strin
           <m.div key={tab} role="tabpanel" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.18 }}>
             {tab === "overview" && <OverviewTab server={server} onChange={setServer} />}
             {tab === "console" && <ConsoleTab server={server} lines={console} />}
+            {tab === "content" && <ServerContentTab key={added} server={server} />}
             {tab === "players" && <PlayersTab server={server} />}
             {tab === "settings" && <SettingsTab server={server} onChange={setServer} onDeleted={onBack} />}
             {tab === "backups" && <BackupsTab server={server} />}
           </m.div>
         </AnimatePresence>
       </m.div>
+      {dropping && (
+        <div className="pointer-events-none fixed inset-4 z-50 grid place-items-center rounded-[28px] border-2 border-dashed border-cream/40 bg-ink-900/80 text-center backdrop-blur-sm">
+          <div>
+            <p className="font-display text-2xl font-bold">Drop to add to {server.name}</p>
+            <p className="mt-1 text-sm text-mute">{server.software ? "Plugins (.jar), zips of them, and data packs." : "Mods (.jar), zips of them, and data packs."}</p>
+          </div>
+        </div>
+      )}
     </Page>
   );
 }
@@ -264,6 +314,43 @@ function Action({ icon, label, onClick, disabled = false }: { icon: ReactNode; l
   );
 }
 
+/** The memory figure up top, which opens the memory control. */
+function MemoryStat({ server, onChange }: { server: HostedView; onChange: (server: HostedView) => void }) {
+  const { notify } = useApp();
+  const [open, setOpen] = useState(false);
+  const [systemMb, setSystemMb] = useState<number | null>(null);
+  const anchor = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (open && systemMb === null) getSystemMemory().then(setSystemMb, () => setSystemMb(16384));
+  }, [open, systemMb]);
+  const update = (changes: Parameters<typeof updateHostedServer>[1]) =>
+    void updateHostedServer(server.id, changes).then(onChange, (failure: unknown) => notify({ tone: "info", title: "Couldn't change the memory", body: message(failure) }));
+  const max = Math.max(4096, Math.floor(((systemMb ?? 16384) * 0.75) / 512) * 512);
+  return (
+    <>
+      <button
+        ref={anchor}
+        type="button"
+        onClick={() => setOpen((shown) => !shown)}
+        aria-expanded={open}
+        className="rounded-2xl border border-cream/7 bg-ink-800 px-4 py-3.5 text-left transition-colors hover:border-cream/20"
+      >
+        <span className="flex items-center gap-1.5 text-xs font-semibold text-mute">
+          <Cpu size={13} aria-hidden="true" />
+          Memory
+        </span>
+        <span className="mt-1 block truncate font-display text-lg font-bold">
+          {gigabytes(server.effectiveMemoryMb)}
+          <span className="ml-1.5 text-xs font-semibold text-mute">{server.automaticMemory ? "auto" : "change"}</span>
+        </span>
+      </button>
+      <Popover open={open} anchorRef={anchor} placement="bottom-start" onClose={() => setOpen(false)} label="Memory for the server" className="w-80 p-4">
+        <MemoryControl server={server} max={max} update={update} />
+      </Popover>
+    </>
+  );
+}
+
 function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-cream/7 bg-ink-800 px-4 py-3.5">
@@ -272,32 +359,6 @@ function Stat({ icon, label, value }: { icon: ReactNode; label: string; value: s
         {label}
       </dt>
       <dd className="mt-1 truncate font-display text-lg font-bold">{value}</dd>
-    </div>
-  );
-}
-
-function CopyLine({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="flex items-center gap-3 rounded-xl bg-ink-900/60 py-2 pl-3.5 pr-2">
-      <div className="min-w-0 flex-1">
-        <p className="text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">{label}</p>
-        <code className="block truncate font-mono text-sm text-cream-200">{value}</code>
-        {hint && <p className="mt-0.5 text-xs text-mute">{hint}</p>}
-      </div>
-      <button
-        type="button"
-        onClick={() =>
-          void navigator.clipboard.writeText(value).then(() => {
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1500);
-          })
-        }
-        className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-cream px-3 text-xs font-bold text-ink-900"
-      >
-        {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
-        {copied ? "Copied" : "Copy"}
-      </button>
     </div>
   );
 }
@@ -377,6 +438,7 @@ function OverviewTab({ server, onChange }: { server: HostedView; onChange: (serv
             </ul>
           )}
         </Panel>
+        {server.setAside.length > 0 && <SetAsidePanel server={server} onChange={onChange} />}
         {server.players.length > 0 && (
           <Panel title="On now" icon={<Users size={19} aria-hidden="true" />}>
             <ul className="mt-1 flex flex-wrap gap-2">
@@ -391,28 +453,60 @@ function OverviewTab({ server, onChange }: { server: HostedView; onChange: (serv
         )}
       </div>
       <aside className="flex flex-col gap-5">
-        <section className="wisp-surface flex flex-col gap-3 rounded-[24px] p-5">
-          <h2 className="flex items-center gap-2 font-display text-lg font-bold">
-            <Router size={18} className="text-ember-soft" aria-hidden="true" />
-            Ways in
-          </h2>
-          <p className="text-sm leading-relaxed text-mute">Friends with Wisp just press Join. Wisp links your two computers directly and gives them the server's mods.</p>
-          {server.lanAddress && <CopyLine label="Same network" value={server.lanAddress} hint="For people on your Wi-Fi, from the game's Multiplayer screen." />}
-          {server.publicAddress && <CopyLine label="Anyone with the address" value={server.publicAddress} hint="Your router opened the port. Only whitelisted players get in." />}
-          {server.reach?.strictRouter && !server.reach.routerOpened && (
-            <p className="rounded-xl bg-amber/8 p-3 text-xs leading-relaxed text-amber-soft">
-              Your router is strict about incoming connections, so a friend whose router is strict too may not get through. Turning on UPnP in your router fixes it for everyone.
-            </p>
-          )}
-        </section>
+        <AddressPanel server={server} onChange={onChange} />
+        {server.reach?.strictRouter && !server.reach.routerOpened && !server.address && (
+          <p className="rounded-2xl bg-amber/8 p-4 text-xs leading-relaxed text-amber-soft">
+            Your router is strict about incoming connections, so a friend whose router is strict too may not get through directly. An address from playit fixes that for everyone.
+          </p>
+        )}
       </aside>
     </div>
   );
 }
 
+/** Mods Wisp took out of the server because they only run in the game. */
+function SetAsidePanel({ server, onChange }: { server: HostedView; onChange: (server: HostedView) => void }) {
+  const { notify } = useApp();
+  const [busy, setBusy] = useState<string | null>(null);
+  const putBack = async (file: string, name: string) => {
+    setBusy(file);
+    try {
+      onChange(await putBackServerMod(server.id, file));
+      notify({ tone: "success", title: `${name} is back in the server`, body: "It starts with it from now on." });
+    } catch (failure: unknown) {
+      notify({ tone: "info", title: `Couldn't put ${name} back`, body: message(failure) });
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Panel title="Set aside by Wisp" icon={<PackageMinus size={19} aria-hidden="true" />} description="These only run in the game, so they stopped the server as it loaded. Players still get them when they join.">
+      <ul className="mt-1 flex flex-col divide-y divide-cream/7">
+        {server.setAside.map((mod) => (
+          <li key={mod.file} className="flex items-center gap-3 py-2.5">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-bold">{mod.name || mod.file}</p>
+              <p className="truncate text-xs text-mute">{mod.file}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void putBack(mod.file, mod.name || mod.file)}
+              disabled={busy !== null}
+              className="flex h-8 items-center gap-1.5 rounded-full border border-cream/15 px-3 text-xs font-bold text-cream-300 transition-colors hover:border-cream/35 hover:text-cream disabled:opacity-50"
+            >
+              {busy === mod.file ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" /> : <Undo2 size={12} aria-hidden="true" />}
+              Put back
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 // ── Console ──
 
-const LEVEL_TONE = { info: "text-cream-300", warn: "text-amber-soft", error: "text-coral", input: "text-sky" } as const;
+const LEVEL_TONE = { info: "text-cream-300", warn: "text-amber-soft", error: "text-coral", input: "text-sky", wisp: "font-semibold text-ember-soft" } as const;
 
 function ConsoleTab({ server, lines }: { server: HostedView; lines: { at: number; text: string; level: keyof typeof LEVEL_TONE }[] }) {
   const { notify } = useApp();
@@ -728,15 +822,10 @@ function SettingsTab({ server, onChange, onDeleted }: { server: HostedView; onCh
             <Toggle label="Back up the world when it stops" description="A restore point each time, stored once per changed file." checked={server.backups} onChange={(backups) => update({ backups })} />
           </div>
         </section>
+        <RunningSection server={server} update={update} />
         <section className="wisp-surface rounded-[24px] p-5">
           <h2 className="font-display text-lg font-bold">Memory</h2>
-          <Toggle label="Let Wisp pick" description="More for more mods, leaving room for you to play on this computer too." checked={server.automaticMemory} onChange={(automatic) => update(automatic ? { automaticMemory: true } : { memoryMb: server.effectiveMemoryMb })} />
-          {!server.automaticMemory && (
-            <div className="pt-1">
-              <p className="mb-2 text-sm font-semibold">Memory for the server</p>
-              <MemoryCommit server={server} max={maxMb} onCommit={(memoryMb) => update({ memoryMb })} />
-            </div>
-          )}
+          <MemoryControl server={server} max={maxMb} update={update} />
         </section>
         <section className="wisp-surface flex flex-col gap-3 rounded-[24px] p-5">
           <h2 className="font-display text-lg font-bold">World</h2>
@@ -787,26 +876,150 @@ function SettingsTab({ server, onChange, onDeleted }: { server: HostedView; onCh
   );
 }
 
-/** The memory slider for a server with its own memory: saved when let go. */
-function MemoryCommit({ server, max, onCommit }: { server: HostedView; max: number; onCommit: (memoryMb: number) => void }) {
-  const [value, setValue] = useState(server.effectiveMemoryMb);
-  useEffect(() => setValue(server.effectiveMemoryMb), [server.effectiveMemoryMb]);
+const RESTARTS: SelectOption<string>[] = [
+  { value: "0", label: "Never" },
+  { value: "6", label: "Every 6 hours" },
+  { value: "12", label: "Every 12 hours" },
+  { value: "24", label: "Once a day" },
+];
+const JAVAS: SelectOption<string>[] = [
+  { value: "0", label: "Automatic", note: "What its version wants" },
+  { value: "8", label: "Java 8" },
+  { value: "17", label: "Java 17" },
+  { value: "21", label: "Java 21" },
+  { value: "25", label: "Java 25" },
+];
+
+/** How it runs: starting with Wisp, scheduled restarts, Java and its flags, the icon. */
+function RunningSection({ server, update }: { server: HostedView; update: (changes: Parameters<typeof updateHostedServer>[1]) => void }) {
+  const { notify } = useApp();
+  const [args, setArgs] = useState(server.jvmArgs ?? "");
+  useEffect(() => setArgs(server.jvmArgs ?? ""), [server.jvmArgs]);
+  const pickIcon = () =>
+    void pickServerIcon(server.id).then(
+      (picked) => picked && notify({ tone: "success", title: "Icon set", body: "It shows beside the server in the game's server list." }),
+      (failure: unknown) => notify({ tone: "info", title: "Couldn't use that picture", body: message(failure) }),
+    );
   return (
-    <span className="flex items-center gap-2">
+    <section className="wisp-surface rounded-[24px] p-5">
+      <h2 className="font-display text-lg font-bold">Running it</h2>
+      <div className="mt-1 flex flex-col divide-y divide-cream/7">
+        <Toggle label="Start it when Wisp opens" description="It's up whenever Wisp is, without a click." checked={server.startWithWisp ?? false} onChange={(startWithWisp) => update({ startWithWisp })} />
+        <div className="flex items-center gap-3 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">Restart it</p>
+            <p className="text-xs text-mute">Keeps a long-running server fresh. Players get a warning first.</p>
+          </div>
+          <Select label="Restart it" value={String(server.restartEveryHours ?? 0)} options={RESTARTS} onChange={(hours) => update({ restartEveryHours: Number(hours) })} className="w-40" />
+        </div>
+        <div className="flex items-center gap-3 py-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">Java</p>
+            <p className="text-xs text-mute">Some mods need a newer one than the game asks for.</p>
+          </div>
+          <Select label="Java" value={String(server.javaMajor ?? 0)} options={JAVAS} onChange={(major) => update({ javaMajor: Number(major) })} className="w-40" />
+        </div>
+        <Toggle label="Aikar's flags" description="Java tuning most busy servers use: steadier ticks with lots of players or mods." checked={server.aikarFlags ?? false} onChange={(aikarFlags) => update({ aikarFlags })} />
+        <form
+          className="flex flex-col gap-1.5 py-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (args.trim() !== (server.jvmArgs ?? "")) update({ jvmArgs: args.trim() });
+          }}
+        >
+          <p className="text-sm font-semibold">Java arguments</p>
+          <input
+            value={args}
+            onChange={(event) => setArgs(event.target.value)}
+            onBlur={() => args.trim() !== (server.jvmArgs ?? "") && update({ jvmArgs: args.trim() })}
+            placeholder="-Dsome.setting=true"
+            spellCheck={false}
+            aria-label="Java arguments"
+            className="h-9 rounded-xl border border-cream/12 bg-ink-900/60 px-3 font-mono text-xs text-cream outline-none placeholder:text-mute-2 focus:border-cream/35"
+          />
+          <p className="text-xs text-mute">Added after Wisp's own, so yours win. Applies from the next start.</p>
+        </form>
+        <div className="flex items-center gap-3 pt-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-semibold">Icon</p>
+            <p className="text-xs text-mute">Beside it in the game's server list.</p>
+          </div>
+          <Button variant="secondary" icon={ImagePlus} className="h-9 px-4 text-xs" onClick={pickIcon}>
+            Choose
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** GB, the way people say it: "4 GB", "4.5 GB". */
+const gigabytes = (mb: number) => `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB`;
+
+/**
+ * The server's memory: always a slider. Moving it sets the server's own amount (saved a moment
+ * after you let go); Auto hands it back to Wisp, which gives more for more mods and leaves room
+ * for you to play on this computer too.
+ */
+function MemoryControl({ server, max, update }: { server: HostedView; max: number; update: (changes: Parameters<typeof updateHostedServer>[1]) => void }) {
+  const [value, setValue] = useState(server.effectiveMemoryMb);
+  const timer = useRef<number | null>(null);
+  useEffect(() => setValue(server.effectiveMemoryMb), [server.effectiveMemoryMb]);
+  useEffect(() => () => void (timer.current !== null && window.clearTimeout(timer.current)), []);
+  const pick = (mb: number) => {
+    setValue(mb);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      if (mb !== server.effectiveMemoryMb || server.automaticMemory) update({ memoryMb: mb });
+    }, 450);
+  };
+  const live = server.state !== "stopped" && server.state !== "crashed";
+  return (
+    <div className="mt-2 flex flex-col gap-3">
+      <div className="flex items-center gap-3">
+        <span className="font-display text-2xl font-bold tabular-nums">{gigabytes(value)}</span>
+        <div className="ml-auto flex rounded-full border border-cream/12 p-0.5" role="group" aria-label="Who picks the memory">
+          <button
+            type="button"
+            aria-pressed={server.automaticMemory}
+            onClick={() => !server.automaticMemory && update({ automaticMemory: true })}
+            className={cn("h-8 rounded-full px-3 text-xs font-bold transition-colors", server.automaticMemory ? "bg-cream text-ink-900" : "text-cream-300 hover:text-cream")}
+          >
+            Auto
+          </button>
+          <button
+            type="button"
+            aria-pressed={!server.automaticMemory}
+            onClick={() => server.automaticMemory && update({ memoryMb: server.effectiveMemoryMb })}
+            className={cn("h-8 rounded-full px-3 text-xs font-bold transition-colors", !server.automaticMemory ? "bg-cream text-ink-900" : "text-cream-300 hover:text-cream")}
+          >
+            Custom
+          </button>
+        </div>
+      </div>
       <input
         type="range"
         min={1024}
-        max={max}
+        max={Math.max(max, value)}
         step={512}
         value={value}
         aria-label="Memory for the server"
-        onChange={(event) => setValue(Number(event.target.value))}
-        onPointerUp={() => value !== server.effectiveMemoryMb && onCommit(value)}
-        onKeyUp={() => value !== server.effectiveMemoryMb && onCommit(value)}
+        aria-valuetext={gigabytes(value)}
+        onChange={(event) => pick(Number(event.target.value))}
         className="w-full accent-[#f4eee4]"
       />
-      <span className="w-14 shrink-0 text-right text-xs font-bold text-cream-300">{(value / 1024).toFixed(value % 1024 === 0 ? 0 : 1)} GB</span>
-    </span>
+      <div className="flex justify-between text-[11px] font-semibold text-mute-2">
+        <span>1 GB</span>
+        <span>{gigabytes(Math.max(max, value))}</span>
+      </div>
+      <p className="text-xs leading-relaxed text-mute">
+        {server.automaticMemory
+          ? "Wisp picks it: more for more mods, leaving room for you to play on this computer too. Drag to set your own."
+          : `Your own amount. Wisp would pick ${gigabytes(server.pickedMemoryMb)}.`}
+        {live ? " Applies when the server restarts." : ""}
+      </p>
+    </div>
   );
 }
 
