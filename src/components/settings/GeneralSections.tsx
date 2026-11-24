@@ -24,7 +24,7 @@ const WHILE_PLAYING: { value: WhilePlaying; label: string }[] = [
 const WHILE_PLAYING_NOTES: Record<WhilePlaying, string> = {
   "keep-open": "Wisp stays where it is, so you can watch a download or start another instance.",
   minimize: "Wisp tucks itself away while you play and comes back when the game closes.",
-  hide: "Wisp closes while you play, leaving the game the memory it used, and opens again where you were when you quit, backing up and syncing your worlds. Its tray icon brings it back sooner.",
+  hide: "Wisp closes while you play, leaving the game the memory it used, and opens again where you were when you quit, backing up and syncing your worlds. Its tray icon brings it back sooner. While you host a server, it stays open, so the server's console and settings are at hand.",
 };
 
 const INTRO_MODES: SegmentOption<IntroMode>[] = [

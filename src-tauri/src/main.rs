@@ -717,10 +717,10 @@ async fn play(
                         let _ = window.minimize();
                     }
                 }
-                // The window closes outright, so the game gets the memory its web view used; while
-                // a server Wisp hosts runs it's only hidden, so nothing can end Wisp (and the
-                // server) on the way.
-                WhilePlaying::Hide if hosting::any_running(&app) => away::hide_for_hosting(&app),
+                // The window closes outright, so the game gets the memory its web view used. While
+                // a server Wisp hosts runs, it stays open instead: the game opens in front, and
+                // the server's console and settings are a click away.
+                WhilePlaying::Hide if hosting::any_running(&app) => {}
                 WhilePlaying::Hide => away::close_for_game(&app),
             }
         }
