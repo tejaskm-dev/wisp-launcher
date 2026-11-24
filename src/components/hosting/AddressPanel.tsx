@@ -1,6 +1,6 @@
 import { Check, Copy, Download, Globe2, LoaderCircle, Pencil, Radar, Router, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { checkServerAddress, getPlayit, linkPlayit, onPlayit, openExternal, setUpServerAddress, updateHostedServer } from "../../data/api";
+import { checkServerAddress, getPlayit, linkPlayit, onPlayit, openExternal, setUpServerAddress, unlinkPlayit, updateHostedServer } from "../../data/api";
 import type { AddressCheck, HostedView, PlayitView } from "../../data/types";
 import { cn } from "../../lib/cn";
 import { useApp } from "../../state/AppContext";
@@ -45,14 +45,31 @@ export function AddressPanel({ server, onChange }: { server: HostedView; onChang
   const { notify } = useApp();
   const [playit, setPlayit] = useState<PlayitView | null>(null);
   const [step, setStep] = useState<"idle" | "approving" | "making">("idle");
+  // Where linking is on playit's side, and since when it's been waiting for approval.
+  const [claim, setClaim] = useState<{ step: "visit" | "approve" | "approved"; since: number } | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [editing, setEditing] = useState(false);
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<AddressCheck | null>(null);
   const making = useRef(false);
 
   useEffect(() => {
-    getPlayit().then(setPlayit, () => setPlayit(null));
+    getPlayit().then(
+      (found) => {
+        setPlayit(found);
+        // A link waiting for approval carries on in the background; show it after coming back.
+        if (found.linking) setStep((current) => (current === "idle" ? "approving" : current));
+      },
+      () => setPlayit(null),
+    );
   }, []);
+
+  // While approving, the hint about a full playit account shows after a while.
+  useEffect(() => {
+    if (step !== "approving") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, [step]);
 
   const runCheck = async () => {
     setChecking(true);
@@ -85,10 +102,15 @@ export function AddressPanel({ server, onChange }: { server: HostedView; onChang
   useEffect(
     () =>
       onPlayit((event) => {
-        if (event.kind === "linked") {
-          setPlayit((current) => (current ? { ...current, linked: true, linking: null } : current));
+        if (event.kind === "step") {
+          setStep((current) => (current === "idle" ? "approving" : current));
+          setClaim((current) => (current?.step === event.step ? current : { step: event.step, since: Date.now() }));
+        } else if (event.kind === "linked") {
+          setClaim(null);
+          setPlayit((current) => (current ? { ...current, linked: true, linking: null, problem: null } : current));
           void makeAddress();
         } else {
+          setClaim(null);
           setStep("idle");
           notify({ tone: "info", title: "playit wasn't linked", body: event.message });
         }
@@ -96,6 +118,19 @@ export function AddressPanel({ server, onChange }: { server: HostedView; onChang
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [server.id],
   );
+
+  /** playit.gg forgot this computer: start a fresh link. */
+  const linkAgain = async () => {
+    await unlinkPlayit().catch(() => undefined);
+    setPlayit((current) => (current ? { ...current, linked: false, problem: null } : current));
+    setStep("approving");
+    try {
+      await linkPlayit();
+    } catch (failure: unknown) {
+      setStep("idle");
+      notify({ tone: "info", title: "Couldn't open playit", body: message(failure) });
+    }
+  };
 
   const getAddress = async () => {
     if (!playit?.linked) {
@@ -155,13 +190,28 @@ export function AddressPanel({ server, onChange }: { server: HostedView; onChang
           <p className="text-sm leading-relaxed text-cream-300">
             Get a free address anyone can join from, through playit.gg. Wisp sets it all up{playit.linked ? "." : "; you approve it once in your browser."}
           </p>
+          {playit.problem && step === "idle" && (
+            <div className="flex flex-col gap-2 rounded-xl bg-amber/8 p-3 text-xs leading-relaxed text-amber-soft">
+              <p>{playit.problem}</p>
+              <button type="button" onClick={() => void linkAgain()} className="self-start font-bold text-cream underline-offset-2 hover:underline">
+                Link again
+              </button>
+            </div>
+          )}
           {step === "approving" ? (
             <div className="flex flex-col gap-2 rounded-xl bg-ember/8 p-3 text-xs leading-relaxed text-ember-soft">
               <p className="flex items-center gap-2 font-bold">
                 <LoaderCircle size={13} className="animate-spin" aria-hidden="true" />
-                Approve Wisp on playit.gg in your browser
+                {claim?.step === "approved"
+                  ? "Approved. Finishing the link…"
+                  : claim?.step === "visit"
+                    ? "Open playit.gg's page in your browser to approve Wisp"
+                    : "Approve Wisp on playit.gg in your browser"}
               </p>
-              <p className="text-cream-300">Sign in there, or carry on as a guest. Wisp finishes the rest by itself.</p>
+              <p className="text-cream-300">Sign in there (a playit account keeps the address for good; a guest link can end), or carry on as a guest. Wisp finishes the rest by itself.</p>
+              {claim?.step === "approve" && now - claim.since > 90_000 && (
+                <p className="text-cream-300">Still waiting? If playit.gg says your account has no room for another agent, remove an old one there (Agents), then open the page again.</p>
+              )}
               <button type="button" onClick={() => void linkPlayit()} className="self-start font-bold text-cream underline-offset-2 hover:underline">
                 Open the page again
               </button>

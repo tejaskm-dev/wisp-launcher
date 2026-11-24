@@ -90,7 +90,8 @@ async fn take(mut stream: TcpStream, server: SocketAddr, tls: Arc<rustls::Server
         let _ = to_server.set_nodelay(true);
         to_server.write_all(&start).await?;
         if next_state(&start) == Some(1) {
-            return mark_status(stream, to_server).await;
+            let skin_key = service.skin_key.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            return mark_status(stream, to_server, skin_key).await;
         }
         let _ = tokio::io::copy_bidirectional(&mut stream, &mut to_server).await;
         return Ok(());
@@ -144,7 +145,7 @@ async fn first_packet(stream: &mut TcpStream) -> std::io::Result<(Vec<u8>, bool)
 /// A server-list ping through the door: the server's answer gets a `"wisp"` field (games ignore
 /// fields they don't know), so a Wisp listing the server knows it's hosted with Wisp, and that
 /// Play can bring the server's mods and the player's skin along.
-async fn mark_status(client: TcpStream, server: TcpStream) -> Result<(), TunnelError> {
+async fn mark_status(client: TcpStream, server: TcpStream, skin_key: Option<String>) -> Result<(), TunnelError> {
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = server.into_split();
     // The game's status request (and later its ping) go on through as they come.
@@ -153,7 +154,7 @@ async fn mark_status(client: TcpStream, server: TcpStream) -> Result<(), TunnelE
         let _ = server_write.shutdown().await;
     });
     let answer = read_packet(&mut server_read).await?;
-    let marked = marked_status(&answer).unwrap_or(answer);
+    let marked = marked_status(&answer, skin_key.as_deref()).unwrap_or(answer);
     client_write.write_all(&marked).await?;
     let _ = tokio::io::copy(&mut server_read, &mut client_write).await;
     let _ = client_write.shutdown().await;
@@ -181,8 +182,9 @@ async fn read_packet(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> std::i
     Ok(packet)
 }
 
-/// The status answer with the mark added, or None if it isn't one.
-fn marked_status(packet: &[u8]) -> Option<Vec<u8>> {
+/// The status answer with the mark added (with the key its skin data is signed with, when it signs
+/// players in), or None if it isn't one.
+fn marked_status(packet: &[u8], skin_key: Option<&str>) -> Option<Vec<u8>> {
     let mut at = 0;
     read_varint(packet, &mut at)?;
     if read_varint(packet, &mut at)? != 0 {
@@ -191,7 +193,11 @@ fn marked_status(packet: &[u8]) -> Option<Vec<u8>> {
     let length = read_varint(packet, &mut at)? as usize;
     let text = std::str::from_utf8(packet.get(at..at.checked_add(length)?)?).ok()?;
     let mut status: serde_json::Value = serde_json::from_str(text).ok()?;
-    status.as_object_mut()?.insert("wisp".into(), serde_json::json!({ "door": 1 }));
+    let mut mark = serde_json::json!({ "door": 1 });
+    if let Some(key) = skin_key {
+        mark["skinKey"] = key.into();
+    }
+    status.as_object_mut()?.insert("wisp".into(), mark);
     let text = serde_json::to_string(&status).ok()?;
     let mut body = Vec::with_capacity(text.len() + 8);
     write_varint(0, &mut body);
@@ -362,13 +368,14 @@ mod tests {
         let mut answer = Vec::new();
         write_varint(body.len() as u32, &mut answer);
         answer.extend(body);
-        let marked = marked_status(&answer).unwrap();
+        let marked = marked_status(&answer, Some("KEY")).unwrap();
         let mut at = 0;
         read_varint(&marked, &mut at).unwrap();
         read_varint(&marked, &mut at).unwrap();
         let length = read_varint(&marked, &mut at).unwrap() as usize;
         let value: serde_json::Value = serde_json::from_slice(&marked[at..at + length]).unwrap();
         assert_eq!(value["wisp"]["door"], 1);
+        assert_eq!(value["wisp"]["skinKey"], "KEY");
         assert_eq!(value["description"], "Hi");
         let mut value = Vec::new();
         write_varint(300, &mut value);

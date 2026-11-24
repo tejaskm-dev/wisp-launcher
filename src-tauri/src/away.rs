@@ -11,7 +11,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewWindowBuilder};
 
-const MAIN: &str = "main";
+pub const MAIN: &str = "main";
 const TRAY: &str = "wisp-away";
 
 /// Where the window was when it closed for a game (nothing while it's open), whether the window

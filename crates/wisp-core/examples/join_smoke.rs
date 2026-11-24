@@ -99,8 +99,8 @@ async fn main() {
             }
         });
     }
-    let card = ServerCard { id: "smoke".into(), name: "Smoke".into(), game_version: "26.3".into(), loader: "fabric".into(), loader_version: None, online: true, players: 0, max_players: 10, mods: 0, software: None };
-    host_net.send(&friend_keys.public_key(), &Message::JoinAnswer { session, offer: Some(host.offer()), server: Some(card), error: None }).await.expect("host answers");
+    let card = ServerCard { id: "smoke".into(), name: "Smoke".into(), game_version: "26.3".into(), loader: "fabric".into(), loader_version: None, online: true, starting: false, players: 0, max_players: 10, mods: 0, software: None };
+    host_net.send(&friend_keys.public_key(), &Message::JoinAnswer { session, offer: Some(host.offer()), server: Some(card), error: None, starting: false }).await.expect("host answers");
 
     let answered = next_message(&friend_keys, &mut friend_events).await;
     let Message::JoinAnswer { offer: Some(host_offer), .. } = answered.message else {

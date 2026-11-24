@@ -44,6 +44,9 @@ pub struct CodeCard {
     /// Where it can be reached, best first: `host` or `host:port`.
     pub addresses: Vec<String>,
     pub online: bool,
+    /// On its way up: whoever joins waits for it rather than being turned away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starting: bool,
     #[serde(default)]
     pub players: u32,
     #[serde(default)]
@@ -115,8 +118,21 @@ pub fn card_event(keys: &Keys, card: &CodeCard) -> Result<Event, CodeError> {
     let expires = Timestamp::from_secs(Timestamp::now().as_secs() + LASTS.as_secs());
     EventBuilder::new(Kind::Custom(KIND), content)
         .tags([Tag::identifier(lookup(&code)), Tag::expiration(expires)])
+        .custom_created_at(signing_time(&keys.public_key()))
         .finalize(keys)
         .map_err(|error| CodeError::Nostr(error.to_string()))
+}
+
+/// When a server's next event is signed (Unix seconds): now, but always after its last one.
+/// Relays keep one event per server, the latest by the second it was signed, and between two in
+/// the same second keep either: a stop and a start in one second could leave "not running" up.
+fn signing_time(server: &PublicKey) -> Timestamp {
+    static LAST: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PublicKey, u64>>> = std::sync::LazyLock::new(Default::default);
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Timestamp::now().as_secs();
+    let at = last.get(server).map_or(now, |previous| now.max(previous + 1));
+    last.insert(*server, at);
+    Timestamp::from_secs(at)
 }
 
 /// What an event says, if it's the server's own word for this code.
@@ -213,11 +229,24 @@ mod tests {
             software: None,
             addresses: vec!["salmon-crop.gl.joinmc.link".into()],
             online: true,
+            starting: false,
             players: 1,
             max_players: 10,
             mods: 40,
             at: 5,
         }
+    }
+
+    #[test]
+    fn a_servers_word_said_twice_in_a_second_still_comes_in_order() {
+        let server = Keys::generate();
+        let stopped = card_event(&server, &CodeCard { online: false, ..card() }).unwrap();
+        let starting = card_event(&server, &CodeCard { online: false, starting: true, ..card() }).unwrap();
+        let up = card_event(&server, &card()).unwrap();
+        assert!(stopped.created_at < starting.created_at && starting.created_at < up.created_at);
+        // A card from before "starting" existed still reads.
+        let old = r#"{"name":"Island","gameVersion":"26.3","loader":"fabric","addresses":[],"online":false,"at":5}"#;
+        assert!(!serde_json::from_str::<CodeCard>(old).unwrap().starting);
     }
 
     #[test]

@@ -340,6 +340,34 @@ impl SkinStore {
     }
 }
 
+/// The face friends see: the head's front with the hat layer drawn over it, as an 8×8 PNG.
+pub fn face_png(png: &[u8]) -> Option<Vec<u8>> {
+    let skin = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.to_rgba8();
+    if skin.width() < 48 || skin.height() < 16 {
+        return None;
+    }
+    let mut face = image::RgbaImage::new(8, 8);
+    for y in 0..8 {
+        for x in 0..8 {
+            face.put_pixel(x, y, image::Rgba(over(skin.get_pixel(40 + x, 8 + y).0, skin.get_pixel(8 + x, 8 + y).0)));
+        }
+    }
+    let mut out = Vec::new();
+    face.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    Some(out)
+}
+
+/// `top` drawn over `bottom`, the way a canvas draws one picture on another.
+fn over(top: [u8; 4], bottom: [u8; 4]) -> [u8; 4] {
+    let (above, below) = (top[3] as f32 / 255.0, bottom[3] as f32 / 255.0);
+    let alpha = above + below * (1.0 - above);
+    if alpha <= 0.0 {
+        return [0; 4];
+    }
+    let mix = |t: u8, b: u8| ((t as f32 * above + b as f32 * below * (1.0 - above)) / alpha).round() as u8;
+    [mix(top[0], bottom[0]), mix(top[1], bottom[1]), mix(top[2], bottom[2]), (alpha * 255.0).round() as u8]
+}
+
 fn clean_name(name: &str) -> String {
     let name: String = name.trim().chars().filter(|c| !c.is_control()).take(NAME_LIMIT).collect();
     if name.is_empty() { "Untitled skin".to_string() } else { name }
@@ -520,6 +548,29 @@ mod tests {
         let mut out = Vec::new();
         picture.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
         out
+    }
+
+    #[test]
+    fn the_face_friends_see_has_the_hat_layer_over_it() {
+        let mut picture = image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
+        for y in 8..16 {
+            for x in 8..16 {
+                picture.put_pixel(x, y, image::Rgba([240, 200, 170, 255]));
+            }
+        }
+        // A fringe on the hat layer's top row, and one half-clear pixel.
+        for x in 40..48 {
+            picture.put_pixel(x, 8, image::Rgba([60, 40, 30, 255]));
+        }
+        picture.put_pixel(40, 12, image::Rgba([0, 0, 255, 128]));
+        let mut png = Vec::new();
+        picture.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let face = image::load_from_memory(&face_png(&png).unwrap()).unwrap().to_rgba8();
+        assert_eq!(face.dimensions(), (8, 8));
+        assert_eq!(face.get_pixel(3, 0).0, [60, 40, 30, 255], "the fringe covers the face");
+        assert_eq!(face.get_pixel(3, 5).0, [240, 200, 170, 255], "skin where the hat layer is clear");
+        assert_eq!(face.get_pixel(0, 4).0, [120, 100, 213, 255], "half-clear hat pixels blend");
+        assert!(face_png(b"not a picture").is_none());
     }
 
     #[test]

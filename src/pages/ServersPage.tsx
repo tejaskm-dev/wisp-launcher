@@ -199,8 +199,15 @@ function SavedServerRow({ server, status, onJoinWith }: { server: ServerSummary;
     setJoining({ code: server.address, serverId: "", step: "asking", doneBytes: 0, totalBytes: 0, message: null });
     try {
       const result = await joinServerAddress(server.address, allowHostFiles);
-      if (result.kind === "plain") play(instanceId, null, server.address);
-      else if (result.kind === "needs-consent") setConsent(result);
+      if (result.kind === "plain") {
+        // Its Wisp didn't answer through this address: still play, but say what's missing.
+        notify({
+          tone: "info",
+          title: `Joining ${server.name} without Wisp's link`,
+          body: "Wisp couldn't reach the host's Wisp through this address, so skins won't show and the server's mods won't come along. You'll join it like any other server.",
+        });
+        play(instanceId, null, server.address);
+      } else if (result.kind === "needs-consent") setConsent(result);
     } catch (failure: unknown) {
       notify({ tone: "info", title: `Couldn't join ${server.name}`, body: failure instanceof Error ? failure.message : String(failure) });
     } finally {

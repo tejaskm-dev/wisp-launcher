@@ -90,6 +90,9 @@ pub struct ServerCard {
     /// Up and taking players right now.
     #[serde(default)]
     pub online: bool,
+    /// Starting up: friends who ask to join are let in once it's up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starting: bool,
     #[serde(default)]
     pub players: u32,
     #[serde(default)]
@@ -151,6 +154,10 @@ pub enum Message {
         /// Servers they host that friends can join right now.
         #[serde(default)]
         hosting: Vec<ServerCard>,
+        /// Just come online: friends answer with their own presence at once, instead of at their
+        /// next heartbeat (minutes away).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hello: bool,
     },
     PartyInvite { party: Party },
     PartyJoin { party_id: String },
@@ -177,6 +184,9 @@ pub enum Message {
         server: Option<ServerCard>,
         #[serde(default)]
         error: Option<String>,
+        /// The server is still starting: ask again in a moment (the error says so for older Wisps).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        starting: bool,
     },
     /// A chat message to a friend, or to everyone in a party (sent to each of them).
     Chat {
@@ -271,7 +281,7 @@ pub enum Applied {
     BecameFriends { code: String, name: String, reply: bool },
     Accepted { code: String, name: String },
     Removed { code: String },
-    Presence { code: String, status: Status },
+    Presence { code: String, status: Status, hello: bool },
     Invited { from: String, party: String },
     /// We lead the party and its members changed: tell everyone.
     PartyChanged,
@@ -281,7 +291,7 @@ pub enum Applied {
     /// A friend wants to join a server we host (the app checks it and answers).
     JoinRequested { from: String, server_id: String, session: String, offer: crate::tunnel::Offer, player: Option<Player> },
     /// A host answered our ask to join.
-    JoinAnswered { from: String, session: String, offer: Option<crate::tunnel::Offer>, server: Option<ServerCard>, error: Option<String> },
+    JoinAnswered { from: String, session: String, offer: Option<crate::tunnel::Offer>, server: Option<ServerCard>, error: Option<String>, starting: bool },
     /// A chat message, already cleaned, for `conversation` ("party:<id>" or "friend:<code>").
     Chat { from: String, conversation: String, text: String },
 }
@@ -474,13 +484,19 @@ impl SocialData {
                 }
                 Applied::Removed { code: from.to_string() }
             }
-            Message::Presence { profile, status, .. } => {
+            Message::Presence { profile, status, hello, .. } => {
                 let Some(known) = self.friends.iter_mut().find(|known| known.code == from) else {
                     return Applied::Nothing;
                 };
+                // Relays hand back what they hold in any order (a wrap's time is made up), so an
+                // older presence can come after a newer one: it mustn't bring back an old face,
+                // status or server list. `now` is the presence's own time here.
+                if known.last_seen.is_some_and(|seen| seen >= now) {
+                    return Applied::Nothing;
+                }
                 known.profile = profile.cleaned();
                 known.last_seen = Some(now);
-                Applied::Presence { code: from.to_string(), status }
+                Applied::Presence { code: from.to_string(), status, hello }
             }
             Message::PartyInvite { party } => {
                 if !friend || party.leader != from {
@@ -556,12 +572,12 @@ impl SocialData {
                 }
                 Applied::JoinRequested { from: from.to_string(), server_id, session, offer, player }
             }
-            Message::JoinAnswer { session, offer, server, error } => {
+            Message::JoinAnswer { session, offer, server, error, starting } => {
                 if !friend {
                     return Applied::Nothing;
                 }
                 let error = error.map(|error| error.chars().filter(|c| !c.is_control()).take(NOTE_LIMIT).collect());
-                Applied::JoinAnswered { from: from.to_string(), session, offer, server: server.map(ServerCard::cleaned), error }
+                Applied::JoinAnswered { from: from.to_string(), session, offer, server: server.map(ServerCard::cleaned), error, starting }
             }
             Message::Chat { party_id, text } => {
                 let text = clean_chat(&text);
@@ -826,9 +842,9 @@ mod tests {
 
         // Presence only counts from friends.
         let playing = Status::Playing { label: Some("Fabric 26.3".into()), world: Some("Island".into()), since: 5 };
-        assert!(matches!(a.apply("m4", bob, alice, Message::Presence { profile: profile("Bob"), status: playing.clone(), hosting: vec![] }, 6), Applied::Presence { .. }));
+        assert!(matches!(a.apply("m4", bob, alice, Message::Presence { profile: profile("Bob"), status: playing.clone(), hosting: vec![], hello: false }, 6), Applied::Presence { .. }));
         assert_eq!(a.friends[0].last_seen, Some(6));
-        assert_eq!(a.apply("m5", "npub1stranger", alice, Message::Presence { profile: profile("S"), status: playing, hosting: vec![] }, 6), Applied::Nothing);
+        assert_eq!(a.apply("m5", "npub1stranger", alice, Message::Presence { profile: profile("S"), status: playing, hosting: vec![], hello: false }, 6), Applied::Nothing);
 
         // Alice starts a party and invites Bob; Bob joins; Alice adds him and tells everyone.
         let party = a.create_party("Build night", alice, 7);
@@ -860,6 +876,7 @@ mod tests {
             loader: "fabric".into(),
             loader_version: Some("0.20.1".into()),
             online: true,
+            starting: false,
             players: 1,
             max_players: 10,
             mods: 40,
@@ -881,8 +898,8 @@ mod tests {
         let asked = b.apply("j1", alice, bob, Message::JoinRequest { server_id: "build".into(), session: "s1".into(), offer: offer.clone(), player: None }, 7);
         assert!(matches!(asked, Applied::JoinRequested { ref server_id, .. } if server_id == "build"));
         assert_eq!(b.apply("j2", eve, bob, Message::JoinRequest { server_id: "build".into(), session: "s2".into(), offer, player: None }, 7), Applied::Nothing);
-        let answered = b.apply("j3", alice, bob, Message::JoinAnswer { session: "s1".into(), offer: None, server: None, error: Some("It isn't running\n".into()) }, 8);
-        assert_eq!(answered, Applied::JoinAnswered { from: alice.into(), session: "s1".into(), offer: None, server: None, error: Some("It isn't running".into()) });
+        let answered = b.apply("j3", alice, bob, Message::JoinAnswer { session: "s1".into(), offer: None, server: None, error: Some("It isn't running\n".into()), starting: false }, 8);
+        assert_eq!(answered, Applied::JoinAnswered { from: alice.into(), session: "s1".into(), offer: None, server: None, error: Some("It isn't running".into()), starting: false });
 
         // Chat: from friends directly, and from people in our party.
         assert_eq!(b.apply("c1", alice, bob, Message::Chat { party_id: None, text: "  hi\u{1b}[31m  ".into() }, 9), Applied::Chat { from: alice.into(), conversation: format!("friend:{alice}"), text: "hi[31m".into() });
@@ -897,7 +914,7 @@ mod tests {
 
         // A presence from an older Wisp (no servers in it) still reads.
         let old: Message = serde_json::from_str(r#"{"type":"presence","profile":{"name":"Old"},"status":{"state":"online"}}"#).unwrap();
-        assert_eq!(old, Message::Presence { profile: profile("Old"), status: Status::Online, hosting: vec![] });
+        assert_eq!(old, Message::Presence { profile: profile("Old"), status: Status::Online, hosting: vec![], hello: false });
     }
 
     #[test]
@@ -949,5 +966,19 @@ mod tests {
         store.save(&data).unwrap();
         assert_eq!(store.load().keys().public_key(), first.public_key());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_older_presence_arriving_late_changes_nothing() {
+        let alice = "npub1alice";
+        let mut data = SocialData { friends: vec![Friend { code: alice.into(), profile: profile("Alice"), since: 1, last_seen: None }], ..Default::default() };
+        let face = |which: &str| Profile { name: "Alice".into(), face: Some(format!("data:image/png;base64,{which}")) };
+        let up = Message::Presence { profile: face("NEW"), status: Status::Online, hosting: vec![], hello: false };
+        assert!(matches!(data.apply("p2", alice, "npub1me", up, 200), Applied::Presence { .. }));
+        // Sent before it, handed back by a relay after it.
+        let stale = Message::Presence { profile: face("OLD"), status: Status::Offline, hosting: vec![], hello: false };
+        assert_eq!(data.apply("p1", alice, "npub1me", stale, 100), Applied::Nothing);
+        assert_eq!(data.friends[0].profile, face("NEW"));
+        assert_eq!(data.friends[0].last_seen, Some(200));
     }
 }

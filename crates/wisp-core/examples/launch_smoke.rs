@@ -198,7 +198,7 @@ async fn skin_server(skin: &str, account: &Account, started: Instant) -> wisp_co
     let lookup: skin_server::Lookup = Arc::new(move |who| {
         let matches = match who {
             Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
-            Who::Name(asked) => asked.eq_ignore_ascii_case(&name),
+            Who::Name(asked) | Who::Joining(asked) => asked.eq_ignore_ascii_case(&name),
         };
         matches.then(|| player.clone())
     });

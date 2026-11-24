@@ -21,7 +21,7 @@ async fn main() {
     println!("UUID {uuid}");
     let lookup: Lookup = Arc::new(move |who| match who {
         Who::Uuid(asked) if asked.replace('-', "") == uuid => Some(player(&uuid, &png)),
-        Who::Name("Wisp") => Some(player(&uuid, &png)),
+        Who::Name("Wisp") | Who::Joining("Wisp") => Some(player(&uuid, &png)),
         _ => None,
     });
     let key = skin_server::load_or_make_key(&std::env::temp_dir().join("wisp-skin-smoke-key.der")).expect("key");

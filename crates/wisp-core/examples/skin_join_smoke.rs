@@ -30,7 +30,7 @@ async fn main() {
     let lookup: Lookup = Arc::new(move |who| {
         let mine = match who {
             Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&host.uuid),
-            Who::Name(asked) => asked.eq_ignore_ascii_case(&host.name),
+            Who::Name(asked) | Who::Joining(asked) => asked.eq_ignore_ascii_case(&host.name),
         };
         if mine {
             return Some(host.clone());
@@ -38,7 +38,7 @@ async fn main() {
         let guests = guests.read().unwrap();
         let found = match who {
             Who::Uuid(asked) => guests.get(&asked.replace('-', "").to_lowercase()).cloned(),
-            Who::Name(asked) => guests.values().find(|guest| guest.name.eq_ignore_ascii_case(asked)).cloned(),
+            Who::Name(asked) | Who::Joining(asked) => guests.values().find(|guest| guest.name.eq_ignore_ascii_case(asked)).cloned(),
         };
         found.or_else(|| match who {
             Who::Name(name) if valid_username(name) => Some(Player { uuid: offline_uuid(name), name: name.to_string(), skin: None }),

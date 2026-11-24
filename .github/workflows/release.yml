@@ -145,6 +145,10 @@ jobs:
             CODE=$(node scripts/tester-updates.mjs code)
             echo "::add-mask::$CODE"
             echo "WISP_TESTER_CODE=$CODE" >> "$GITHUB_ENV"
+            # The skin key every tester build signs with and trusts (masked too).
+            SEED=$(node scripts/tester-updates.mjs skin-seed)
+            echo "::add-mask::$SEED"
+            echo "WISP_SKIN_SEED=$SEED" >> "$GITHUB_ENV"
             echo "VITE_WISP_TESTER_BUILD=$RUN" >> "$GITHUB_ENV"
             printf '{"version":"%s","bundle":{"createUpdaterArtifacts":true},"plugins":{"updater":{"pubkey":"%s","endpoints":["%s"]}}}' "$VERSION" "$PUBKEY" "${URL%/*}/tester.json" > src-tauri/tauri.updates.conf.json
           else

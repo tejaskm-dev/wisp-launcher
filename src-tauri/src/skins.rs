@@ -52,13 +52,16 @@ pub async fn update_skin(
     name: Option<String>,
     model: Option<SkinModel>,
     png: Option<String>,
+    app: AppHandle,
     paths: State<'_, Paths>,
 ) -> Result<Skin, String> {
     let bytes = png.as_deref().map(decode).transpose()?;
-    paths
+    let skin = paths
         .skins()
         .update(&id, name.as_deref(), model, bytes.as_deref(), now_ms())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    crate::social::skin_changed(&app);
+    Ok(skin)
 }
 
 /// The editor's layers for a skin, if it was saved with them.
@@ -79,13 +82,17 @@ fn strip_data_url(png: &str) -> &str {
 }
 
 #[tauri::command]
-pub async fn delete_skin(id: String, paths: State<'_, Paths>) -> Result<(), String> {
-    paths.skins().remove(&id).map_err(|error| error.to_string())
+pub async fn delete_skin(id: String, app: AppHandle, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().remove(&id).map_err(|error| error.to_string())?;
+    crate::social::skin_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn set_active_skin(id: Option<String>, paths: State<'_, Paths>) -> Result<(), String> {
-    paths.skins().set_active(id.as_deref()).map_err(|error| error.to_string())
+pub async fn set_active_skin(id: Option<String>, app: AppHandle, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().set_active(id.as_deref()).map_err(|error| error.to_string())?;
+    crate::social::skin_changed(&app);
+    Ok(())
 }
 
 // ── Cosmetics: outer layers to wear over any skin ──
@@ -110,14 +117,18 @@ pub async fn rename_cosmetic(id: String, name: String, paths: State<'_, Paths>) 
 }
 
 #[tauri::command]
-pub async fn delete_cosmetic(id: String, paths: State<'_, Paths>) -> Result<(), String> {
-    paths.skins().remove_cosmetic(&id).map_err(|error| error.to_string())
+pub async fn delete_cosmetic(id: String, app: AppHandle, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().remove_cosmetic(&id).map_err(|error| error.to_string())?;
+    crate::social::skin_changed(&app);
+    Ok(())
 }
 
 /// Wears a cosmetic over the worn skin, in Wisp and in game (none takes it off).
 #[tauri::command]
-pub async fn wear_cosmetic(id: Option<String>, paths: State<'_, Paths>) -> Result<(), String> {
-    paths.skins().wear_cosmetic(id.as_deref()).map_err(|error| error.to_string())
+pub async fn wear_cosmetic(id: Option<String>, app: AppHandle, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().wear_cosmetic(id.as_deref()).map_err(|error| error.to_string())?;
+    crate::social::skin_changed(&app);
+    Ok(())
 }
 
 /// Any Minecraft player's current skin, by name (from Mojang's public API).

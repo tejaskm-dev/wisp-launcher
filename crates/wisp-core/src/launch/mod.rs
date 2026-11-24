@@ -247,12 +247,32 @@ pub struct Prepared {
     hook_env: Vec<(&'static str, String)>,
     /// Where the game goes as soon as it opens, when one was asked for and the version can.
     quick_play: Option<QuickPlay>,
+    /// Told the address each time the game connects to a server.
+    on_connect: ConnectHook,
+}
+
+/// Called with a server's address (`host` or `host:port`) as the game connects to it, from its
+/// own server list or by address.
+pub type OnConnect = Arc<dyn Fn(String) + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct ConnectHook(Option<OnConnect>);
+
+impl std::fmt::Debug for ConnectHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "ConnectHook(set)" } else { "ConnectHook(none)" })
+    }
 }
 
 impl Prepared {
     /// Where the game will go as soon as it opens, if anywhere.
     pub fn quick_play(&self) -> Option<&QuickPlay> {
         self.quick_play.as_ref()
+    }
+
+    /// Tells `hook` each time the game connects to a server.
+    pub fn on_connect(&mut self, hook: OnConnect) {
+        self.on_connect = ConnectHook(Some(hook));
     }
 }
 
@@ -578,6 +598,7 @@ pub async fn prepare(
         hooks: options.hooks.clone(),
         hook_env,
         quick_play,
+        on_connect: ConnectHook::default(),
     })
 }
 
@@ -968,6 +989,7 @@ pub async fn run(
             stdout,
             tail.clone(),
             window_tx.clone(),
+            prepared.on_connect.0.clone(),
         )));
     }
     if let Some(stderr) = child.stderr.take() {
@@ -975,6 +997,7 @@ pub async fn run(
             stderr,
             tail.clone(),
             window_tx.clone(),
+            prepared.on_connect.0.clone(),
         )));
     }
     drop(window_tx);
@@ -1081,6 +1104,7 @@ async fn collect_lines(
     stream: impl AsyncRead + Unpin,
     tail: Arc<Mutex<VecDeque<String>>>,
     window: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    on_connect: Option<OnConnect>,
 ) {
     let mut reader = BufReader::new(stream);
     let mut buffer = Vec::new();
@@ -1091,6 +1115,11 @@ async fn collect_lines(
             Ok(_) => {}
         }
         let line = String::from_utf8_lossy(&buffer).trim_end().to_string();
+        if let Some(hook) = &on_connect
+            && let Some(address) = crate::servers::connecting_to(&line)
+        {
+            hook(address);
+        }
         if WINDOW_UP_MARKERS.iter().any(|marker| line.contains(marker))
             && let Some(sender) = window.lock().ok().and_then(|mut slot| slot.take())
         {
@@ -1413,6 +1442,7 @@ mod tests {
             hooks: Hooks::default(),
             hook_env: Vec::new(),
             quick_play: None,
+            on_connect: ConnectHook::default(),
         };
         let (_keep_running, stop) = oneshot::channel();
         let exit = run(prepared, &|_| {}, stop, || 0).await.unwrap();

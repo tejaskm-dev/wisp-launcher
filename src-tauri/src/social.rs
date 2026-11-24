@@ -38,6 +38,8 @@ pub struct Social {
     net: Mutex<Option<Arc<Net>>>,
     tasks: SyncMutex<Vec<JoinHandle<()>>>,
     presence: SyncMutex<HashMap<String, Seen>>,
+    /// When each friend last got our presence (Unix ms), so hellos don't echo.
+    greeted: SyncMutex<HashMap<String, i64>>,
     chat_store: ChatStore,
     chat: SyncMutex<ChatLog>,
 }
@@ -54,6 +56,7 @@ impl Social {
             net: Mutex::new(None),
             tasks: SyncMutex::new(Vec::new()),
             presence: SyncMutex::new(HashMap::new()),
+            greeted: SyncMutex::new(HashMap::new()),
             chat_store,
             chat: SyncMutex::new(chat),
         }
@@ -155,6 +158,11 @@ fn my_status(app: &AppHandle, share: bool) -> Status {
 
 /// Tells every friend what we're up to, and which of our servers they can join.
 pub async fn announce(app: &AppHandle) {
+    announce_with(app, false).await;
+}
+
+/// `hello` asks friends to answer with theirs at once (we've just come online).
+async fn announce_with(app: &AppHandle, hello: bool) {
     let Some(net) = net(app).await else {
         return;
     };
@@ -168,8 +176,68 @@ pub async fn announce(app: &AppHandle) {
     for code in friends {
         let hosting = crate::hosting::cards_for(app, &code);
         if let Ok(to) = social::parse_code(&code) {
-            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: status.clone(), hosting }).await;
+            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: status.clone(), hosting, hello }).await;
+            app.state::<Social>().greeted.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code, now_ms());
         }
+    }
+}
+
+/// Answers a friend who's just come online with our presence, so each sees the other at once.
+/// Not if they had it in the last minute (their hello and our heartbeat can cross).
+fn greet(app: &AppHandle, code: &str) {
+    let now = now_ms();
+    {
+        let social = app.state::<Social>();
+        let mut greeted = social.greeted.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if greeted.get(code).is_some_and(|at| now - at < 60_000) {
+            return;
+        }
+        greeted.insert(code.to_string(), now);
+    }
+    let (app, code) = (app.clone(), code.to_string());
+    tauri::async_runtime::spawn(async move {
+        let (profile, status) = {
+            let social = app.state::<Social>();
+            let data = social.data();
+            (profile(&app, &data), my_status(&app, data.share_activity))
+        };
+        let hosting = crate::hosting::cards_for(&app, &code);
+        let _ = send(&app, &code, &Message::Presence { profile, status, hosting, hello: false }).await;
+    });
+}
+
+/// The face of the skin worn now (with any worn cosmetic), as friends see it.
+fn worn_face(app: &AppHandle) -> Option<String> {
+    use base64::Engine;
+    let paths = app.try_state::<Paths>()?;
+    let worn = crate::worn_skin(&paths.data)?;
+    let face = wisp_core::skins::face_png(&worn.png)?;
+    Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(face)))
+}
+
+/// Puts the worn skin's face on our profile; true if it changed.
+fn refresh_face(app: &AppHandle) -> bool {
+    let Some(face) = worn_face(app) else {
+        return false;
+    };
+    let social = app.state::<Social>();
+    social.change(|data| {
+        if data.profile.face.as_deref() == Some(face.as_str()) {
+            return false;
+        }
+        data.profile.face = Some(face);
+        true
+    })
+}
+
+/// After the worn skin or cosmetic changes: friends see the new face straight away.
+pub fn skin_changed(app: &AppHandle) {
+    if !app.state::<Social>().data().enabled {
+        return;
+    }
+    if refresh_face(app) {
+        notify(app, None);
+        announce_soon(app);
     }
 }
 
@@ -241,10 +309,13 @@ async fn handle(app: &AppHandle, received: Received) {
             social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&code);
             None
         }
-        Applied::Presence { code, status } => {
+        Applied::Presence { code, status, hello } => {
             // Old news (a message that sat on a relay) still updates "last seen", not the status.
             if now - at < social::PRESENCE_TTL_MS {
-                social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code, (status, hosting, at));
+                social.presence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(code.clone(), (status, hosting, at));
+                if hello {
+                    greet(app, &code);
+                }
             }
             None
         }
@@ -261,8 +332,8 @@ async fn handle(app: &AppHandle, received: Received) {
             tauri::async_runtime::spawn(async move { crate::hosting::answer_join(&app, from, server_id, session, offer, player).await });
             None
         }
-        Applied::JoinAnswered { session, offer, server, error, .. } => {
-            crate::hosting::answered(app, &session, crate::hosting::Answer { offer, server, error });
+        Applied::JoinAnswered { session, offer, server, error, starting, .. } => {
+            crate::hosting::answered(app, &session, crate::hosting::Answer { offer, server, error, starting });
             None
         }
         Applied::Chat { from, conversation, text } => {
@@ -284,6 +355,8 @@ pub async fn start(app: &AppHandle) -> Result<(), String> {
     if social.net.lock().await.is_some() {
         return Ok(());
     }
+    // The skin may have changed while Friends was off.
+    refresh_face(app);
     let (keys, relays) = social.change(|data| (data.keys(), data.relays.clone()));
     let (net, mut events) = Net::connect(keys.clone(), &relays).await.map_err(|error| error.to_string())?;
     let net = Arc::new(net);
@@ -310,8 +383,11 @@ pub async fn start(app: &AppHandle) -> Result<(), String> {
         tauri::async_runtime::spawn(async move {
             // Give the relays a moment to connect before the first hello.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            // The first says hello: friends answer at once, so who's on shows straight away.
+            let mut hello = true;
             loop {
-                announce(&app).await;
+                announce_with(&app, hello).await;
+                hello = false;
                 notify(&app, None);
                 tokio::time::sleep(social::PRESENCE_EVERY).await;
             }
@@ -346,7 +422,7 @@ pub async fn stop(app: &AppHandle) {
     };
     for code in friends {
         if let Ok(to) = social::parse_code(&code) {
-            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: Status::Offline, hosting: Vec::new() }).await;
+            let _ = net.send(&to, &Message::Presence { profile: profile.clone(), status: Status::Offline, hosting: Vec::new(), hello: false }).await;
         }
     }
     for task in social.tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain(..) {

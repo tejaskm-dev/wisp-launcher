@@ -33,6 +33,8 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = ["
 rsa = { version = "0.9", features = ["sha1"] }
 sha1_10 = { package = "sha1", version = "0.10", features = ["oid"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# The skin key tester builds share, made the same way from their build secret (skin_server::shared_key).
+rand_chacha = "0.3"
 # The link between friends' Wisps (tunnel/): QUIC over a hole-punched UDP socket, each side's
 # self-made certificate pinned by its SHA-256, and the router asked to let it through (UPnP).
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }

@@ -93,6 +93,8 @@ pub struct Answer {
     pub offer: Option<Offer>,
     pub server: Option<ServerCard>,
     pub error: Option<String>,
+    /// Still starting: ask again in a moment.
+    pub starting: bool,
 }
 
 #[derive(Default)]
@@ -101,6 +103,8 @@ pub struct Hosting {
     last_exit: SyncMutex<HashMap<String, (Exit, Option<String>)>>,
     /// Asks to join waiting for the host's answer, by session.
     asks: SyncMutex<HashMap<String, oneshot::Sender<Answer>>>,
+    /// How many times each server's code has been announced: a retry gives way to anything newer.
+    code_said: SyncMutex<HashMap<String, u64>>,
     /// Friends' servers being played, by the instance playing them.
     joined: SyncMutex<HashMap<String, Joined>>,
     /// One link set up at a time.
@@ -718,7 +722,7 @@ pub async fn update_hosted_server(id: String, changes: ServerChanges, app: AppHa
     // Friends see what they can join, and the code says where it is now.
     social::announce_soon(&app);
     if is_live(&app, &id) {
-        announce_code(&app, &id, true);
+        announce_code(&app, &id, code_says_now(&app, &id));
     }
     emit(&app, &id, Change::Changed);
     Ok(view(&app, server))
@@ -1012,6 +1016,9 @@ async fn open_port(app: &AppHandle, id: &str) {
 /// Follows a running server until it ends, then cleans up after it: the link, the router's
 /// openings, and a restore point of its world.
 async fn watch(app: AppHandle, id: String, running: Arc<ServerProcess>) {
+    // Whoever has its code, or is a friend, sees it's on its way up (and joining waits for it).
+    announce_code(&app, &id, CodeSays::Starting);
+    social::announce_soon(&app);
     // Friends see it once it's up. The link and the mod list are made ready then too, so a
     // friend who asks to join is answered at once.
     {
@@ -1107,7 +1114,7 @@ async fn watch(app: AppHandle, id: String, running: Arc<ServerProcess>) {
         _ => None,
     };
     lock(&app.state::<Hosting>().last_exit).insert(id.clone(), (exit, failure));
-    announce_code(&app, &id, false);
+    announce_code(&app, &id, CodeSays::Stopped);
     if lock(&app.state::<Hosting>().live).is_empty() {
         crate::playit::servers_stopped(&app).await;
     }
@@ -1122,11 +1129,13 @@ pub async fn set_up_server_address(id: String, app: AppHandle) -> Result<HostedV
     let store = store(&app.state::<Paths>());
     let server = store.get(&id).ok_or(GONE)?;
     let port = store.port_of(&id).unwrap_or(core_hosting::DEFAULT_PORT);
-    let address = crate::playit::tunnel_for(&app, &server.name, port).await?;
+    // The other servers' ports here: their tunnels are theirs, even when the account is full.
+    let keep_ports: Vec<u16> = store.list().iter().filter(|other| other.id != id).filter_map(|other| store.port_of(&other.id)).collect();
+    let address = crate::playit::tunnel_for(&app, &server.name, port, &keep_ports).await?;
     let server = store.update(&id, |server| server.address = Some(address.clone())).map_err(|error| error.to_string())?;
     if is_live(&app, &id) {
         crate::playit::server_starting(&app).await?;
-        announce_code(&app, &id, true);
+        announce_code(&app, &id, code_says_now(&app, &id));
     }
     emit(&app, &id, Change::Changed);
     Ok(view(&app, server))
@@ -1623,6 +1632,7 @@ fn card(app: &AppHandle, server: &HostedServer) -> ServerCard {
         loader: server.loader.as_str().to_string(),
         loader_version: server.loader_version.clone(),
         online: process.as_ref().is_some_and(|process| process.state() == RunState::Running),
+        starting: process.as_ref().is_some_and(|process| process.state() == RunState::Starting),
         players: process.as_ref().map_or(0, |process| process.players().len() as u32),
         max_players: properties.get("max-players").and_then(|value| value.trim().parse().ok()).unwrap_or(20),
         mods: core_hosting::mod_count(&dir) as u32,
@@ -1630,12 +1640,16 @@ fn card(app: &AppHandle, server: &HostedServer) -> ServerCard {
     }
 }
 
-/// The servers a friend can join right now, for their presence.
+/// The servers a friend can join, up or on their way up, for their presence.
 pub fn cards_for(app: &AppHandle, friend: &str) -> Vec<ServerCard> {
     let Some(paths) = app.try_state::<Paths>() else {
         return Vec::new();
     };
-    let running: Vec<String> = lock(&app.state::<Hosting>().live).iter().filter(|(_, live)| live.process.as_ref().is_some_and(|process| process.state() == RunState::Running)).map(|(id, _)| id.clone()).collect();
+    let running: Vec<String> = lock(&app.state::<Hosting>().live)
+        .iter()
+        .filter(|(_, live)| live.process.as_ref().is_some_and(|process| matches!(process.state(), RunState::Running | RunState::Starting)))
+        .map(|(id, _)| id.clone())
+        .collect();
     let store = store(&paths);
     running
         .iter()
@@ -1664,11 +1678,35 @@ pub async fn invite_to_server(id: String, code: String, app: AppHandle) -> Resul
 /// The host's side of an ask to join: checks the friend may, lets them in, and answers with the
 /// way to reach this computer.
 pub async fn answer_join(app: &AppHandle, from: String, server_id: String, session: String, offer: Offer, player: Option<Player>) {
+    // Still starting: wait for it a little (the asker waits ANSWER_WITHIN), then tell them it's on
+    // its way, and their Wisp asks again until it's up.
+    if !up_within(app, &server_id, STARTING_WAIT).await {
+        let name = store(&app.state::<Paths>()).get(&server_id).map_or_else(|| "The server".to_string(), |server| server.name);
+        let answer = Message::JoinAnswer { session, offer: None, server: None, error: Some(format!("{name} is still starting. Try again in a minute.")), starting: true };
+        let _ = social::send(app, &from, &answer).await;
+        return;
+    }
     let answer = match let_in(app, &from, &server_id, &offer, player.as_ref()).await {
-        Ok((offer, server)) => Message::JoinAnswer { session, offer: Some(offer), server: Some(server), error: None },
-        Err(error) => Message::JoinAnswer { session, offer: None, server: None, error: Some(error) },
+        Ok((offer, server)) => Message::JoinAnswer { session, offer: Some(offer), server: Some(server), error: None, starting: false },
+        Err(error) => Message::JoinAnswer { session, offer: None, server: None, error: Some(error), starting: false },
     };
     let _ = social::send(app, &from, &answer).await;
+}
+
+/// How long the host holds an ask for a server that's starting before saying so.
+const STARTING_WAIT: Duration = Duration::from_secs(25);
+/// How long a friend's Wisp keeps asking while a server starts.
+const STARTING_PATIENCE: Duration = Duration::from_secs(5 * 60);
+
+/// False while the server is still starting after `wait`; true once it's up, or if it isn't
+/// starting at all (then joining says why).
+async fn up_within(app: &AppHandle, server_id: &str, wait: Duration) -> bool {
+    let Some(process) = process_of(app, server_id) else {
+        return true;
+    };
+    let mut state = process.watch_state();
+    let up = tokio::time::timeout(wait, state.wait_for(|state| *state != RunState::Starting)).await;
+    up.is_ok()
 }
 
 async fn let_in(app: &AppHandle, from: &str, server_id: &str, offer: &Offer, player: Option<&Player>) -> Result<(Offer, ServerCard), String> {
@@ -1754,6 +1792,7 @@ async fn ready_for_joins(app: &AppHandle, server: &HostedServer) -> Result<(), S
     {
         skin_port = Some(skins.port);
         *service.skins.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), skins.port));
+        *service.skin_key.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(skins.public_key.clone());
         let guests = app.state::<crate::SkinServerState>().1.clone();
         *service.on_player.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(move |upload: Upload| {
             if !wisp_core::accounts::valid_username(&upload.name) {
@@ -1959,22 +1998,36 @@ async fn join(app: &AppHandle, code: &str, server_id: &str, progress: &(dyn Fn(&
     let (answer_tx, answer_rx) = oneshot::channel();
     lock(&app.state::<Hosting>().asks).insert(session.clone(), answer_tx);
     let player = paths.accounts().active().map(|account| Player { name: account.name, uuid: account.uuid });
-    let asked = social::send(app, code, &Message::JoinRequest { server_id: server_id.to_string(), session: session.clone(), offer: endpoint.offer(), player }).await;
-    let answer = match asked {
-        Ok(()) => tokio::time::timeout(ANSWER_WITHIN, answer_rx).await,
-        Err(error) => {
-            lock(&app.state::<Hosting>().asks).remove(&session);
-            endpoint.close().await;
-            return Err(error);
+    // A server that's starting answers "starting": ask again until it's up.
+    let patience = tokio::time::Instant::now() + STARTING_PATIENCE;
+    let (mut session, mut answer_rx) = (session, answer_rx);
+    let answer = loop {
+        let asked = social::send(app, code, &Message::JoinRequest { server_id: server_id.to_string(), session: session.clone(), offer: endpoint.offer(), player: player.clone() }).await;
+        let answer = match asked {
+            Ok(()) => tokio::time::timeout(ANSWER_WITHIN, answer_rx).await,
+            Err(error) => {
+                lock(&app.state::<Hosting>().asks).remove(&session);
+                endpoint.close().await;
+                return Err(error);
+            }
+        };
+        lock(&app.state::<Hosting>().asks).remove(&session);
+        let answer = match answer {
+            Ok(Ok(answer)) => answer,
+            _ => {
+                endpoint.close().await;
+                return Err("They didn't answer. Their Wisp may be closed, or have Friends turned off.".into());
+            }
+        };
+        if !answer.starting || tokio::time::Instant::now() >= patience {
+            break answer;
         }
-    };
-    lock(&app.state::<Hosting>().asks).remove(&session);
-    let answer = match answer {
-        Ok(Ok(answer)) => answer,
-        _ => {
-            endpoint.close().await;
-            return Err("They didn't answer. Their Wisp may be closed, or have Friends turned off.".into());
-        }
+        progress("waiting", 0, 0, None);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        session = wisp_core::journal::new_id(now_ms());
+        let (next_tx, next_rx) = oneshot::channel();
+        lock(&app.state::<Hosting>().asks).insert(session.clone(), next_tx);
+        answer_rx = next_rx;
     };
     if let Some(error) = answer.error {
         endpoint.close().await;
@@ -2084,7 +2137,7 @@ async fn join_through_doors(
         return Ok(AddressJoin::Plain);
     };
     if !allow_host_files {
-        let manifest = link.manifest().await.map_err(|error| error.to_string())?;
+        let manifest = ready_manifest(&link, progress).await?;
         let pack: Pack = serde_json::from_slice::<Pack>(&manifest).map_err(|_| "The server sent a list this Wisp can't read. Update Wisp.".to_string())?.cleaned();
         let host_only: Vec<String> = pack.files.iter().filter(|file| file.url.is_none()).map(|file| file.path.trim_start_matches("mods/").to_string()).collect();
         if !host_only.is_empty() {
@@ -2121,7 +2174,24 @@ fn code_of(dir: &std::path::Path) -> Option<String> {
 }
 
 /// What a server's code says about it right now.
-fn code_card(app: &AppHandle, server: &HostedServer, online: bool) -> wisp_core::codes::CodeCard {
+/// What a server's code says about it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CodeSays {
+    Starting,
+    Up,
+    Stopped,
+}
+
+/// What the code should say now, from the server's state.
+fn code_says_now(app: &AppHandle, id: &str) -> CodeSays {
+    match process_of(app, id).map(|process| process.state()) {
+        Some(RunState::Running) => CodeSays::Up,
+        Some(RunState::Starting) => CodeSays::Starting,
+        _ => CodeSays::Stopped,
+    }
+}
+
+fn code_card(app: &AppHandle, server: &HostedServer, says: CodeSays) -> wisp_core::codes::CodeCard {
     let dir = store(&app.state::<Paths>()).root().join(&server.id);
     let properties = Properties::read(&dir);
     let process = process_of(app, &server.id);
@@ -2131,7 +2201,8 @@ fn code_card(app: &AppHandle, server: &HostedServer, online: bool) -> wisp_core:
         loader: server.loader.as_str().to_string(),
         software: server.software.map(|software| software.as_str().to_string()),
         addresses: doors_of(app, server),
-        online,
+        online: says == CodeSays::Up,
+        starting: says == CodeSays::Starting,
         players: process.as_ref().map_or(0, |process| process.players().len() as u32),
         max_players: properties.get("max-players").and_then(|value| value.trim().parse().ok()).unwrap_or(20),
         mods: core_hosting::mod_count(&dir) as u32,
@@ -2139,27 +2210,44 @@ fn code_card(app: &AppHandle, server: &HostedServer, online: bool) -> wisp_core:
     }
 }
 
-/// Says where the server is now, for whoever has its code (in the background).
-fn announce_code(app: &AppHandle, id: &str, online: bool) {
+/// Says where the server is now, for whoever has its code (in the background). If no relay takes
+/// it, tries again a few times (otherwise a stale word could stand until the next one, half an
+/// hour away), unless something newer has been said by then.
+fn announce_code(app: &AppHandle, id: &str, says: CodeSays) {
     let app = app.clone();
     let id = id.to_string();
+    let turn = {
+        let hosting = app.state::<Hosting>();
+        let mut said = lock(&hosting.code_said);
+        let turn = said.get(&id).copied().unwrap_or(0) + 1;
+        said.insert(id.clone(), turn);
+        turn
+    };
     tauri::async_runtime::spawn(async move {
-        let store = store(&app.state::<Paths>());
-        let (Some(server), Some(dir)) = (store.get(&id), store.dir_of(&id)) else {
-            return;
-        };
-        let Ok(code) = wisp_core::codes::ServerCode::load_or_make(&dir.join(CODE_FILE)) else {
-            return;
-        };
-        let card = code_card(&app, &server, online);
-        let _ = code.publish(&card, &relays()).await;
+        for wait in [0, 5, 20, 60] {
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            if lock(&app.state::<Hosting>().code_said).get(&id) != Some(&turn) {
+                return;
+            }
+            let store = store(&app.state::<Paths>());
+            let (Some(server), Some(dir)) = (store.get(&id), store.dir_of(&id)) else {
+                return;
+            };
+            let Ok(code) = wisp_core::codes::ServerCode::load_or_make(&dir.join(CODE_FILE)) else {
+                return;
+            };
+            let card = code_card(&app, &server, says);
+            if code.publish(&card, &relays()).await.is_ok() {
+                return;
+            }
+        }
     });
 }
 
 /// Keeps a running server's word fresh on the relays (its players, and in case one forgot).
 async fn keep_announcing(app: AppHandle, id: String) {
     loop {
-        announce_code(&app, &id, true);
+        announce_code(&app, &id, CodeSays::Up);
         tokio::time::sleep(Duration::from_secs(30 * 60)).await;
     }
 }
@@ -2191,9 +2279,18 @@ pub async fn join_server_code(code: String, allow_host_files: bool, app: AppHand
     };
     progress("asking", 0, 0, None);
     let found = wisp_core::codes::resolve(&code, &relays()).await.map_err(|error| format!("Couldn't look the code up: {error}"));
+    // On its way up: wait for it to say it's up.
+    let found = match found {
+        Ok(Some(server)) if server.starting && !server.online => {
+            progress("waiting", 0, 0, None);
+            Ok(Some(wait_while_starting(&code, server).await))
+        }
+        other => other,
+    };
     let outcome = match found {
         Err(error) => Err(error),
         Ok(None) => Err(format!("No server has {code}. Check it, or ask whoever runs it to start the server.")),
+        Ok(Some(server)) if server.starting && !server.online => Err(format!("{} is taking a long time to start. Try again in a minute.", server.name)),
         Ok(Some(server)) if !server.online => Err(format!("{} isn't running right now.", server.name)),
         Ok(Some(server)) => {
             // Joins by code share an instance per code, wherever the server moves.
@@ -2211,6 +2308,37 @@ pub async fn join_server_code(code: String, allow_host_files: bool, app: AppHand
     outcome
 }
 
+/// The host's mod list. A host whose server is still starting (or just up and still listing its
+/// mods) sends an empty one: wait and ask again, rather than calling it unreadable.
+async fn ready_manifest(link: &Link, progress: &(dyn Fn(&'static str, u64, u64, Option<String>) + Send + Sync)) -> Result<Vec<u8>, String> {
+    let patience = tokio::time::Instant::now() + STARTING_PATIENCE;
+    loop {
+        let manifest = link.manifest().await.map_err(|error| error.to_string())?;
+        if !manifest.is_empty() {
+            return Ok(manifest);
+        }
+        if tokio::time::Instant::now() >= patience {
+            return Err("The server is taking a long time to start. Try again in a minute.".into());
+        }
+        progress("waiting", 0, 0, None);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+/// Asks the relays again every few seconds until a starting server says it's up (or gives up).
+async fn wait_while_starting(code: &str, mut server: wisp_core::codes::CodeCard) -> wisp_core::codes::CodeCard {
+    let patience = tokio::time::Instant::now() + STARTING_PATIENCE;
+    while server.starting && !server.online && tokio::time::Instant::now() < patience {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        if let Ok(Some(newer)) = wisp_core::codes::resolve(code, &relays()).await
+            && newer.at >= server.at
+        {
+            server = newer;
+        }
+    }
+    server
+}
+
 /// Makes or updates the instance that matches the host's, fetches what it's missing, and starts
 /// the game straight into the server through the link.
 #[allow(clippy::type_complexity)]
@@ -2224,7 +2352,7 @@ async fn set_up_and_play(
     let paths = app.state::<Paths>();
     let network = app.state::<Network>();
     progress("mods", 0, 0, None);
-    let manifest = link.manifest().await.map_err(|error| error.to_string())?;
+    let manifest = ready_manifest(link, progress).await?;
     let pack: Pack = serde_json::from_slice::<Pack>(&manifest).map_err(|_| "Their Wisp sent a list this one can't read. Update both to the newest Wisp.".to_string())?.cleaned();
     let loader: Loader = serde_json::from_value(serde_json::Value::String(pack.loader.clone())).map_err(|_| format!("Their server runs {}, which this Wisp doesn't know.", pack.loader))?;
     let host_name = host.name.clone();
@@ -2347,7 +2475,7 @@ async fn host_skins(app: &AppHandle, link: &Link, host_port: u16, instance_id: &
         task.abort();
         return Err("Their Wisp's skin service didn't answer.".into());
     };
-    let host = wisp_core::skin_server::SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata, port };
+    let host = wisp_core::skin_server::SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata, port, public_key: String::new() };
     lock(&app.state::<crate::SkinServerState>().2).insert(instance_id.to_string(), host);
     Ok(task)
 }
@@ -2383,6 +2511,102 @@ fn watch_joined_game(app: AppHandle, instance_id: String) {
             }
         }
     });
+}
+
+// ── Skins when joining from Minecraft's own server list ──
+
+/// The game connected to `address` from inside Minecraft (its server list, or by address). When
+/// that's somebody's server hosted with Wisp, this hands its host the player and their skin over
+/// Wisp's link, and opens the way to its skin server here. The host waits a few seconds for that
+/// before letting the player in, so they arrive with their skin, and (with the skin key testers
+/// share) everyone sees everyone's.
+pub fn bring_skin(app: &AppHandle, instance_id: &str, address: String) {
+    if !signs_in_through_wisp() {
+        return;
+    }
+    let (app, instance_id) = (app.clone(), instance_id.to_string());
+    tauri::async_runtime::spawn(async move {
+        let _ = bring(&app, &instance_id, &address).await;
+    });
+}
+
+async fn bring(app: &AppHandle, instance_id: &str, address: &str) -> Result<(), String> {
+    // A server hosted here: this computer's own skin server answers for it already.
+    if hosted_here(app, address) {
+        return Ok(());
+    }
+    // Only Wisp's doors (their server list answer carries its mark): nobody else's server is
+    // knocked on.
+    let status = wisp_core::servers::status(address).await;
+    if !status.online || !status.wisp {
+        return Ok(());
+    }
+    if let Some(key) = &status.wisp_skin_key {
+        crate::trust_skin_key(app, key);
+    }
+    // Whatever this game had open for the server before (it left, or is joining again) goes
+    // first, so its skin server's port here is free again.
+    if let Some(previous) = lock(&app.state::<Hosting>().joined).remove(instance_id) {
+        previous.forwarding.abort();
+        if let Some(skins) = previous.skins {
+            skins.abort();
+        }
+        previous.link.close();
+    }
+    let paths = app.state::<Paths>();
+    let account = paths.accounts().active().ok_or("No account")?;
+    let keys = Keys::new().map_err(|error| error.to_string())?;
+    let ask = tunnel::Ask { name: account.name.clone(), uuid: account.uuid.replace('-', "").to_ascii_lowercase() };
+    let (link, _) = tunnel::ask_door(address, &keys, &ask).await.map_err(|error| error.to_string())?;
+    // Its skin server's port is in its list, which is ready by the time anyone can join.
+    let manifest = link.manifest().await.map_err(|error| error.to_string())?;
+    let Some(host_port) = serde_json::from_slice::<Pack>(&manifest).ok().and_then(|pack| pack.skin_port) else {
+        link.close();
+        return Ok(());
+    };
+    use base64::Engine;
+    let worn = crate::worn_skin(&paths.data);
+    let upload = Upload {
+        name: account.name.clone(),
+        uuid: account.uuid.replace('-', "").to_ascii_lowercase(),
+        slim: worn.as_ref().is_some_and(|skin| skin.slim),
+        png: worn.map(|skin| base64::engine::general_purpose::STANDARD.encode(skin.png)),
+    };
+    if let Err(error) = link.hand_in(&upload).await {
+        link.close();
+        return Err(error.to_string());
+    }
+    // Skin addresses in the host's answers name its own port on 127.0.0.1: the same port here
+    // leads to it, through the link.
+    let forwarding = match link.forward_skins(host_port).await {
+        Ok((_, task)) => task,
+        Err(error) => {
+            link.close();
+            return Err(error.to_string());
+        }
+    };
+    remember_join(app, instance_id.to_string(), Joined { link, endpoint: None, forwarding, skins: None }).await;
+    watch_joined_game(app.clone(), instance_id.to_string());
+    Ok(())
+}
+
+/// Whether `address` is one of the servers running here (playing on your own server).
+fn hosted_here(app: &AppHandle, address: &str) -> bool {
+    let wanted = address.trim().to_ascii_lowercase();
+    let ids: Vec<String> = lock(&app.state::<Hosting>().live).keys().cloned().collect();
+    let store = store(&app.state::<Paths>());
+    ids.iter().any(|id| {
+        let Some(server) = store.get(id) else {
+            return false;
+        };
+        let port = store.port_of(id).unwrap_or(core_hosting::DEFAULT_PORT);
+        let mut ours = doors_of(app, &server);
+        ours.extend([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
+        if port == core_hosting::DEFAULT_PORT {
+            ours.extend(["127.0.0.1".to_string(), "localhost".to_string()]);
+        }
+        ours.iter().any(|door| door.to_ascii_lowercase() == wanted)
+    })
 }
 
 /// Keeps what playing a joined server needs until its game closes (replacing an earlier join of

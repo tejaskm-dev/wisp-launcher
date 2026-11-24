@@ -18,6 +18,7 @@ async fn main() {
         software: None,
         addresses: vec!["example.invalid:25565".into()],
         online: true,
+        starting: false,
         players: 0,
         max_players: 10,
         mods: 0,

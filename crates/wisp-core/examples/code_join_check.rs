@@ -31,6 +31,7 @@ async fn main() {
         software: None,
         addresses: vec!["192.0.2.1:25565".into(), format!("127.0.0.1:{}", door.port())],
         online: true,
+        starting: false,
         players: 0,
         max_players: 10,
         mods: 1,

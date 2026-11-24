@@ -292,6 +292,9 @@ pub struct ServerStatus {
     /// Hosted with Wisp: joining from Wisp brings its mods and your skin along.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub wisp: bool,
+    /// The key a Wisp host signs skin data with (base64 DER), when its server list answer says.
+    #[serde(skip)]
+    pub wisp_skin_key: Option<String>,
 }
 
 /// A run of the MOTD in one style.
@@ -502,6 +505,7 @@ fn read_status(address: &str, answer: &Value, ping: u32) -> ServerStatus {
         ping_ms: Some(ping),
         error: None,
         wisp: answer.get("wisp").is_some_and(Value::is_object),
+        wisp_skin_key: answer.pointer("/wisp/skinKey").and_then(Value::as_str).filter(|key| key.len() < 4096).map(str::to_string),
     }
 }
 
@@ -723,23 +727,24 @@ fn read_varint_slice(cursor: &mut &[u8]) -> Option<i32> {
 
 // ── Sessions ──
 
+/// The server a log line says the game is connecting to (`Connecting to host, port`).
+pub fn connecting_to(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("Connecting to ")?;
+    let (host, port) = rest.trim().rsplit_once(", ")?;
+    let (host, port) = (host.trim(), port.trim().parse::<u16>().ok()?);
+    if host.is_empty() || host.contains(' ') {
+        return None;
+    }
+    Some(if port == DEFAULT_PORT { host.to_string() } else { format!("{host}:{port}") })
+}
+
 /// Servers the game connected to, from its log (`Connecting to host, port`), in order.
 pub fn joined_in_log(log: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for line in log.lines() {
-        let Some((_, rest)) = line.split_once("Connecting to ") else {
+        let Some(address) = connecting_to(line) else {
             continue;
         };
-        let Some((host, port)) = rest.trim().rsplit_once(", ") else {
-            continue;
-        };
-        let (host, Ok(port)) = (host.trim(), port.trim().parse::<u16>()) else {
-            continue;
-        };
-        if host.is_empty() || host.contains(' ') {
-            continue;
-        }
-        let address = if port == DEFAULT_PORT { host.to_string() } else { format!("{host}:{port}") };
         if !found.contains(&address) {
             found.push(address);
         }
