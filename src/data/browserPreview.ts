@@ -19,6 +19,7 @@ import type {
   JournalQuery,
   Skin,
   SkinLibrary,
+  Cosmetic,
   SkinModel,
   Loader,
   LoaderTag,
@@ -684,7 +685,7 @@ export async function addSkin(name: string, model: SkinModel | null, png: string
     throw new Error("The browser preview ran out of storage for skins.");
   }
   const library = readSkins();
-  writeStorage("wisp.preview.skins", { skins: [skin, ...library.skins], active: library.active ?? skin.id });
+  writeStorage("wisp.preview.skins", { ...library, skins: [skin, ...library.skins], active: library.active ?? skin.id });
   return skin;
 }
 
@@ -700,12 +701,43 @@ export async function updateSkin(id: string, patch: { name?: string; model?: Ski
 
 export async function deleteSkin(id: string): Promise<void> {
   const library = readSkins();
-  writeStorage("wisp.preview.skins", { skins: library.skins.filter((skin) => skin.id !== id), active: library.active === id ? null : library.active });
+  writeStorage("wisp.preview.skins", { ...library, skins: library.skins.filter((skin) => skin.id !== id), active: library.active === id ? null : library.active });
   try {
     localStorage.removeItem(`wisp.preview.skin.${id}`);
   } catch {
     // Nothing to clean up.
   }
+}
+
+export async function addCosmetic(name: string, png: string): Promise<Cosmetic> {
+  const now = Date.now();
+  const cosmetic: Cosmetic = { id: `cosmetic-${now.toString(16)}`, name: name.trim().slice(0, 48) || "Untitled cosmetic", added: now };
+  localStorage.setItem(`wisp.preview.cosmetic.${cosmetic.id}`, asDataUrl(png));
+  const library = readSkins();
+  writeStorage("wisp.preview.skins", { ...library, cosmetics: [...(library.cosmetics ?? []), cosmetic] });
+  return cosmetic;
+}
+
+export async function cosmeticDataUrl(id: string): Promise<string> {
+  const stored = localStorage.getItem(`wisp.preview.cosmetic.${id}`);
+  if (!stored) throw new Error("That cosmetic is gone.");
+  return stored;
+}
+
+export async function renameCosmetic(id: string, name: string): Promise<void> {
+  const library = readSkins();
+  writeStorage("wisp.preview.skins", { ...library, cosmetics: (library.cosmetics ?? []).map((cosmetic) => (cosmetic.id === id ? { ...cosmetic, name: name.trim().slice(0, 48) || cosmetic.name } : cosmetic)) });
+}
+
+export async function deleteCosmetic(id: string): Promise<void> {
+  const library = readSkins();
+  writeStorage("wisp.preview.skins", { ...library, cosmetics: (library.cosmetics ?? []).filter((cosmetic) => cosmetic.id !== id), wornCosmetic: library.wornCosmetic === id ? null : library.wornCosmetic });
+  localStorage.removeItem(`wisp.preview.cosmetic.${id}`);
+}
+
+export async function wearCosmetic(id: string | null): Promise<void> {
+  const library = readSkins();
+  writeStorage("wisp.preview.skins", { ...library, wornCosmetic: id });
 }
 
 export async function skinLayers(id: string): Promise<SkinLayerData[] | null> {

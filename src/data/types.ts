@@ -266,6 +266,14 @@ export interface JournalQuery {
 
 export type SkinModel = "classic" | "slim";
 
+/** The template an image tool paints (base64 PNG) and the prompt that goes with it. */
+export interface SkinTemplate {
+  png: string;
+  prompt: string;
+  /** The follow-up for the outer layer: the same painting with only what sits on top. */
+  outerPrompt: string;
+}
+
 export interface Skin {
   id: string;
   name: string;
@@ -279,6 +287,17 @@ export interface Skin {
 export interface SkinLibrary {
   skins: Skin[];
   active: string | null;
+  /** Outer layers kept to wear over any skin. */
+  cosmetics?: Cosmetic[];
+  /** The cosmetic worn over the skin, if any. */
+  wornCosmetic?: string | null;
+}
+
+/** A skin's outer layer kept on its own, to wear over any skin. */
+export interface Cosmetic {
+  id: string;
+  name: string;
+  added: number;
 }
 
 /** A player's current skin from Mojang. */

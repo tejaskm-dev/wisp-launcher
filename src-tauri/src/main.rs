@@ -1541,10 +1541,9 @@ struct SkinServerState(
 
 /// The skin worn in Wisp, read fresh.
 fn worn_skin(data: &Path) -> Option<wisp_core::skin_server::Skin> {
-    let store = SkinStore::new(data.join("skins"));
-    let library = store.library();
-    let worn = library.active.as_ref().and_then(|id| library.skins.iter().find(|skin| &skin.id == id))?;
-    Some(wisp_core::skin_server::Skin { png: std::fs::read(store.png_path(&worn.id)).ok()?, slim: worn.model == wisp_core::skins::SkinModel::Slim })
+    // The worn skin with the worn cosmetic over it, as players see it.
+    let (png, slim) = SkinStore::new(data.join("skins")).worn_png()?;
+    Some(wisp_core::skin_server::Skin { png, slim })
 }
 
 /// The skin server, started if it isn't yet.
@@ -1779,10 +1778,18 @@ fn main() {
             skins::update_skin,
             skins::delete_skin,
             skins::set_active_skin,
+            skins::add_cosmetic,
+            skins::get_cosmetic_png,
+            skins::rename_cosmetic,
+            skins::delete_cosmetic,
+            skins::wear_cosmetic,
             skins::fetch_player_skin,
             skins::pick_skin_files,
             skins::import_skin_paths,
             skins::export_skin,
+            skins::get_skin_template,
+            skins::save_skin_template,
+            skins::skin_from_painting,
             social::get_social,
             social::set_social_enabled,
             social::set_social_profile,

@@ -1,10 +1,11 @@
-import { Check, ChevronsDown, Crown, Download, FolderInput, Info, LocateFixed, MoreHorizontal, MoveHorizontal, Music2, Orbit, Pencil, PersonStanding, Plus, Rotate3d, Shirt, Trash2, Type, Upload, UserRound, Zap, type LucideIcon } from "lucide-react";
+import { Check, ChevronsDown, Crown, Download, FolderInput, Info, LocateFixed, MoreHorizontal, MoveHorizontal, Music2, Orbit, Pencil, PersonStanding, Plus, Rotate3d, Shirt, Trash2, Type, Upload, UserRound, Wand2, Zap, type LucideIcon } from "lucide-react";
 import { AnimatePresence, m } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Ghost } from "../components/brand/Ghost";
 import { EMOTES, type EmoteId } from "../components/skins/emotes";
 import type { SavedLayer } from "../components/skins/layers";
 import { SkinEditor, type StartLayer } from "../components/skins/SkinEditor";
+import { SkinMakerDialog } from "../components/skins/SkinMakerDialog";
 import { SkinDoll, announceSkinsChanged, loadSkinImage } from "../components/skins/SkinDoll";
 import { skinSource, useSkinSource } from "../components/skins/skinSource";
 import { SkinStage } from "../components/skins/SkinStage";
@@ -15,7 +16,9 @@ import { Page } from "../components/ui/Page";
 import { PageHeader } from "../components/ui/PageHeader";
 import { MenuItem, Popover } from "../components/ui/Popover";
 import { Loading, Skeleton } from "../components/ui/Skeleton";
-import { addSkin, deleteSkin, exportSkin, fetchPlayerSkin, getSkinLayers, getSkins, importSkinPaths, isDesktop, onFileDrop, pickSkinFiles, setActiveSkin, setSkinLayers, updateSkin } from "../data/api";
+import { CosmeticsShelf } from "../components/skins/CosmeticsShelf";
+import { useWorn } from "../components/skins/cosmetics";
+import { addCosmetic, addSkin, deleteSkin, exportSkin, fetchPlayerSkin, getSkinLayers, getSkins, importSkinPaths, isDesktop, onFileDrop, pickSkinFiles, setActiveSkin, setSkinLayers, updateSkin } from "../data/api";
 import type { PlayerSkin, Skin, SkinImport, SkinLibrary, SkinModel } from "../data/types";
 import { cn } from "../lib/cn";
 import { fadeUp } from "../lib/motion";
@@ -73,6 +76,7 @@ export function SkinsPage() {
   const [recenter, setRecenter] = useState(0);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [lookup, setLookup] = useState(false);
+  const [maker, setMaker] = useState(false);
   const [dragging, setDragging] = useState(false);
   const defaultSkin = useMemo(() => makeDefaultSkin(false), []);
 
@@ -116,7 +120,8 @@ export function SkinsPage() {
   useEffect(
     () =>
       onFileDrop((drop) => {
-        if (editing) return;
+        // The skin maker takes pictures through its own button; a drop there isn't an import.
+        if (editing || maker) return;
         if (drop.type === "over") setDragging(true);
         else if (drop.type === "leave") setDragging(false);
         else {
@@ -125,7 +130,7 @@ export function SkinsPage() {
           if (pngs.length) importSkinPaths(pngs).then(reportImport, fail("Couldn't import those"));
         }
       }),
-    [editing, reportImport, fail],
+    [editing, maker, reportImport, fail],
   );
 
   const skins = library?.skins ?? [];
@@ -151,6 +156,9 @@ export function SkinsPage() {
     };
     // The id and version cover which picture to show.
   }, [library, selected?.id, selected?.updated, defaultSkin]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The skin wearing the chosen cosmetic, as the stage (and the game) shows it.
+  const shownSkin = useWorn(stageSkin, library?.wornCosmetic ?? null);
 
   // In the browser preview there's no file picker from Rust: read the file here.
   const browserInput = useRef<HTMLInputElement>(null);
@@ -218,7 +226,24 @@ export function SkinsPage() {
   if (editing) {
     return (
       <Page>
-        <SkinEditor name={editing.name} model={editing.model} source={editing.source} layers={editing.layers} isNew={editing.skin === null} onSave={saveEdit} onCancel={() => setEditing(null)} />
+        <SkinEditor
+          name={editing.name}
+          model={editing.model}
+          source={editing.source}
+          layers={editing.layers}
+          isNew={editing.skin === null}
+          onSave={saveEdit}
+          onKeepOuterLayer={(png, name) =>
+            addCosmetic(name, png).then(
+              async (made) => {
+                await reload();
+                notify({ tone: "success", title: "Kept as a cosmetic", body: `Wear “${made.name}” over any skin from the Skins page.` });
+              },
+              fail("Couldn't keep it"),
+            )
+          }
+          onCancel={() => setEditing(null)}
+        />
       </Page>
     );
   }
@@ -236,6 +261,9 @@ export function SkinsPage() {
             <Button variant="secondary" icon={Upload} onClick={importFiles}>
               Import
             </Button>
+            <Button variant="secondary" icon={Wand2} onClick={() => setMaker(true)}>
+              Make a skin
+            </Button>
             <Button icon={Plus} onClick={() => void startEditing(null)}>
               New skin
             </Button>
@@ -248,9 +276,9 @@ export function SkinsPage() {
         <section aria-label="Preview" className="flex min-w-0 flex-col gap-3">
           <div aria-busy={!stageReady} className="relative aspect-[3/2] w-full overflow-hidden rounded-[26px] border border-cream/8 bg-[#0c0b14]">
             <StageLoading done={stageReady} />
-            {stageSkin && (
+            {shownSkin && (
               <SkinStage
-                skin={stageSkin}
+                skin={shownSkin}
                 model={selected?.model ?? "classic"}
                 emote={prefs.emote}
                 autoRotate={prefs.spin}
@@ -296,6 +324,7 @@ export function SkinsPage() {
             ))}
             <p className="ml-auto text-xs text-mute-2">Drag to turn, scroll to zoom</p>
           </div>
+          {library && <CosmeticsShelf library={library} skin={stageSkin} skinName={selected?.name ?? "Wisp"} slim={selected?.model === "slim"} onChanged={() => reload().then(() => announceSkinsChanged())} />}
         </section>
 
         <aside aria-label="Your skins" className="flex flex-col gap-3">
@@ -371,6 +400,23 @@ export function SkinsPage() {
           </p>
         </aside>
       </m.div>
+
+      <SkinMakerDialog
+        open={maker}
+        onClose={() => setMaker(false)}
+        onKeep={async (png, model, name) => {
+          try {
+            const skin = await addSkin(name, model, png, "made");
+            await reload();
+            announceSkinsChanged();
+            setSelectedId(skin.id);
+            notify({ tone: "success", title: `Kept ${name}`, body: "Wear it, or open it in the editor to touch it up." });
+          } catch (failure: unknown) {
+            fail("Couldn't keep it")(failure);
+            throw failure;
+          }
+        }}
+      />
 
       <PlayerSkinDialog
         open={lookup}

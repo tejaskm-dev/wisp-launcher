@@ -32,7 +32,11 @@ import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
 import { MenuItem, Popover } from "../ui/Popover";
 import { Segmented } from "../ui/Segmented";
+import { Slider } from "../ui/Slider";
 import { PIECES, blankCanvas, composite, jitter, makeLayer, outlineLayer, pen, pieceLayer, saveLayers, shadingLayer, textureLayer, tint, type PaintLayer, type Piece, type SavedLayer } from "./layers";
+import { NO_ADJUSTMENT, adjust, recolor, skinColors, type Adjustment } from "./color";
+import { ColorPicker } from "./ColorPicker";
+import { outerOnly } from "./cosmetics";
 import { SkinStage } from "./SkinStage";
 import { PALETTE, SIZE, faceOutlines, floodFill, hexToRgba, isOverlay, makeDefaultSkin, mirrorPixel, rgbaToHex } from "./skinTexture";
 
@@ -62,6 +66,8 @@ interface SkinEditorProps {
   isNew: boolean;
   /** `layers` is null when there's only one: then the skin is all there is to keep. */
   onSave: (png: string, name: string, model: SkinModel, asNew: boolean, layers: SavedLayer[] | null) => Promise<void>;
+  /** Keeps the skin's outer layer (as it looks now) as a cosmetic to wear over any skin. */
+  onKeepOuterLayer?: (png: string, name: string) => Promise<void>;
   onCancel: () => void;
 }
 
@@ -71,7 +77,7 @@ interface Snapshot {
 }
 
 /** Paint a skin on the 3D model or on its flat texture, in layers. */
-export function SkinEditor({ name: initialName, model: initialModel, source, layers: startLayers, isNew, onSave, onCancel }: SkinEditorProps) {
+export function SkinEditor({ name: initialName, model: initialModel, source, layers: startLayers, isNew, onSave, onKeepOuterLayer, onCancel }: SkinEditorProps) {
   // The skin as everything shows it: the visible layers stacked.
   const doc = useMemo(() => blankCanvas(), []);
   const [layers, setLayerState] = useState<PaintLayer[]>(() =>
@@ -87,6 +93,12 @@ export function SkinEditor({ name: initialName, model: initialModel, source, lay
   const [tool, setTool] = useState<Tool>("pencil");
   const [color, setColor] = useState("#e5484d");
   const [recent, setRecent] = useState<string[]>([]);
+  // Recolouring: the skin's colour being changed, and how near a shade counts as it.
+  const [recolorFrom, setRecolorFrom] = useState<string | null>(null);
+  const [tolerance, setTolerance] = useState(0.12);
+  // Adjusting a layer's colours: its pixels before, and the sliders.
+  const [adjusting, setAdjusting] = useState<{ id: string; base: ImageData } | null>(null);
+  const [adjustment, setAdjustment] = useState<Adjustment>(NO_ADJUSTMENT);
   const [mirror, setMirror] = useState(false);
   const [surface, setSurface] = useState<Surface>("base");
   const [showOverlay, setShowOverlay] = useState(true);
@@ -165,6 +177,58 @@ export function SkinEditor({ name: initialName, model: initialModel, source, lay
   }, [capture, restore]);
 
   const remember = (hex: string) => setRecent((current) => [hex, ...current.filter((known) => known !== hex)].slice(0, 10));
+
+  // ── Colour: the skin's own, recolouring, adjusting a layer ──
+  const inSkin = useMemo(
+    () => skinColors(pen(doc).getImageData(0, 0, SIZE, SIZE), 28).map((entry) => entry.hex),
+    // Recounted whenever the skin changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [doc, version],
+  );
+  /** Changes the picked skin colour (and shades near it) to the current colour, on every visible layer. */
+  const applyRecolor = () => {
+    if (!recolorFrom || recolorFrom === color) return;
+    snapshot();
+    for (const layer of layersRef.current) {
+      if (!layer.visible) continue;
+      const context = pen(layer.canvas);
+      const image = context.getImageData(0, 0, SIZE, SIZE);
+      if (recolor(image, recolorFrom, color, tolerance) > 0) context.putImageData(image, 0, 0);
+    }
+    changed();
+    remember(color);
+    setRecolorFrom(color);
+  };
+  const startAdjusting = () => {
+    setAdjusting({ id: active.id, base: pen(active.canvas).getImageData(0, 0, SIZE, SIZE) });
+    setAdjustment(NO_ADJUSTMENT);
+  };
+  const previewAdjustment = (next: Adjustment) => {
+    setAdjustment(next);
+    const layer = adjusting && layersRef.current.find((candidate) => candidate.id === adjusting.id);
+    if (!adjusting || !layer) return;
+    const context = pen(layer.canvas);
+    const out = context.createImageData(SIZE, SIZE);
+    adjust(adjusting.base, out, next);
+    context.putImageData(out, 0, 0);
+    changed();
+  };
+  const finishAdjusting = (keep: boolean) => {
+    const layer = adjusting && layersRef.current.find((candidate) => candidate.id === adjusting.id);
+    if (adjusting && layer) {
+      const context = pen(layer.canvas);
+      const adjusted = context.getImageData(0, 0, SIZE, SIZE);
+      // History keeps the layer as it was before.
+      context.putImageData(adjusting.base, 0, 0);
+      if (keep) {
+        snapshot();
+        context.putImageData(adjusted, 0, 0);
+      }
+      changed();
+    }
+    setAdjusting(null);
+    setAdjustment(NO_ADJUSTMENT);
+  };
 
   /** The skin's colour at a pixel (what you see, all layers together), or null where it's clear. */
   const seen = (x: number, y: number): string | null => {
@@ -539,6 +603,11 @@ export function SkinEditor({ name: initialName, model: initialModel, source, lay
               Save as new
             </Button>
           )}
+          {onKeepOuterLayer && (
+            <Button variant="secondary" icon={Shirt} disabled={saving} onClick={() => void onKeepOuterLayer(outerOnly(doc), `${name.trim() || "My"} outfit`)} title="Keep the outer layer as a cosmetic, to wear over any skin">
+              Keep outer layer
+            </Button>
+          )}
           <Button onClick={() => void save(false)} disabled={saving}>
             {saving ? "Saving…" : "Save"}
           </Button>
@@ -630,25 +699,77 @@ export function SkinEditor({ name: initialName, model: initialModel, source, lay
             onRemove={removeLayer}
           />
 
-          <div className="flex flex-col gap-3 rounded-[22px] border border-cream/8 bg-ink-800 p-4">
-            <div className="flex items-center gap-3">
-              <label className="relative size-11 shrink-0 overflow-hidden rounded-xl ring-2 ring-cream/20" style={{ background: color }}>
-                <span className="sr-only">Colour</span>
-                <input type="color" value={color} onChange={(event) => setColor(event.target.value)} className="absolute inset-0 size-full cursor-pointer opacity-0" />
-              </label>
-              <input
-                value={color}
-                onChange={(event) => /^#[0-9a-f]{6}$/i.test(event.target.value) && setColor(event.target.value.toLowerCase())}
-                spellCheck={false}
-                aria-label="Colour as hex"
-                className="h-10 w-[110px] rounded-xl border border-cream/12 bg-ink-900/60 px-3 font-mono text-sm uppercase text-cream outline-none focus:border-cream/35"
-              />
+          <div className="flex flex-col gap-4 rounded-[22px] border border-cream/8 bg-ink-800 p-4">
+            <div className="flex items-center gap-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">Colour</h3>
               <button type="button" onClick={startOver} className="ml-auto rounded-full px-3 py-1.5 text-xs font-bold text-cream-300 hover:bg-cream/8 hover:text-cream">
                 Start from Wisp's skin
               </button>
             </div>
+            <ColorPicker color={color} onChange={setColor} />
+            <div>
+              <div className="mb-1.5 flex items-center gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-[0.13em] text-mute-2">In this skin</p>
+                <span className="text-[11px] text-mute-2">{recolorFrom ? "Pick a new colour above, then change it" : "Click one to change it everywhere"}</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {inSkin.map((hex) => (
+                  <button
+                    key={hex}
+                    type="button"
+                    aria-label={`Change ${hex} everywhere`}
+                    aria-pressed={hex === recolorFrom}
+                    onClick={() => setRecolorFrom((current) => (current === hex ? null : hex))}
+                    className={cn("size-7 rounded-lg ring-1 ring-cream/10 transition-transform hover:scale-110", hex === recolorFrom && "scale-110 ring-2 ring-ember")}
+                    style={{ background: hex }}
+                  />
+                ))}
+              </div>
+              {recolorFrom && (
+                <div className="mt-3 flex flex-col gap-2.5 rounded-xl bg-ink-900/60 p-3">
+                  <p className="flex items-center gap-2 text-xs text-cream-300">
+                    <span className="size-4 rounded ring-1 ring-cream/20" style={{ background: recolorFrom }} aria-hidden="true" />
+                    to
+                    <span className="size-4 rounded ring-1 ring-cream/20" style={{ background: color }} aria-hidden="true" />
+                    <span className="text-mute">keeping its shading</span>
+                  </p>
+                  <Slider label="Similar shades too" value={Math.round(tolerance * 100)} min={0} max={40} step={1} onChange={(value) => setTolerance(value / 100)} format={(value) => (value === 0 ? "Only this one" : `${value}%`)} />
+                  <div className="flex gap-2">
+                    <Button className="h-9 px-4 text-xs" disabled={recolorFrom === color} onClick={applyRecolor}>
+                      Change it
+                    </Button>
+                    <Button variant="secondary" className="h-9 px-4 text-xs" onClick={() => setRecolorFrom(null)}>
+                      Done
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
             <Swatches title="Palette" colors={PALETTE} current={color} onPick={setColor} />
             {recent.length > 0 && <Swatches title="Recent" colors={recent} current={color} onPick={setColor} />}
+            <div className="border-t border-cream/7 pt-3">
+              {adjusting ? (
+                <div className="flex flex-col gap-2.5">
+                  <p className="text-xs font-bold text-cream-300">Adjusting “{layersRef.current.find((layer) => layer.id === adjusting.id)?.name ?? "layer"}”</p>
+                  <Slider label="Hue" value={adjustment.hue} min={-180} max={180} step={2} onChange={(hue) => previewAdjustment({ ...adjustment, hue })} format={(value) => `${value > 0 ? "+" : ""}${value}°`} />
+                  <Slider label="Colour strength" value={Math.round(adjustment.saturation * 100)} min={-100} max={100} step={2} onChange={(value) => previewAdjustment({ ...adjustment, saturation: value / 100 })} format={(value) => `${value > 0 ? "+" : ""}${value}%`} />
+                  <Slider label="Brightness" value={Math.round(adjustment.brightness * 100)} min={-100} max={100} step={2} onChange={(value) => previewAdjustment({ ...adjustment, brightness: value / 100 })} format={(value) => `${value > 0 ? "+" : ""}${value}%`} />
+                  <div className="flex gap-2">
+                    <Button className="h-9 px-4 text-xs" onClick={() => finishAdjusting(true)}>
+                      Keep
+                    </Button>
+                    <Button variant="secondary" className="h-9 px-4 text-xs" onClick={() => finishAdjusting(false)}>
+                      Undo it
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" onClick={startAdjusting} className="flex items-center gap-2 text-xs font-bold text-cream-300 hover:text-cream">
+                  <Sun size={14} aria-hidden="true" />
+                  Adjust hue, strength and brightness of “{active.name}”
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
