@@ -13,6 +13,8 @@ tauri-build = { version = "2", features = [] }
 # features, so nothing new compiles.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.22"
+# Pictures given to the skin maker (decoded here, read by wisp-core).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1.0.229", features = ["derive"] }
 # The release config (with the updater's settings) makes generate_context! embed JSON.
 serde_json = "1"

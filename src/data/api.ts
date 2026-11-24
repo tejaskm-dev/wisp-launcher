@@ -49,7 +49,9 @@ import type {
   SkinImport,
   SkinLayerData,
   SkinLibrary,
+  Cosmetic,
   SkinModel,
+  SkinTemplate,
   SocialNotice,
   SocialView,
   StorageUsage,
@@ -247,10 +249,26 @@ export const updateSkin = (id: string, patch: { name?: string; model?: SkinModel
   call<Skin>("update_skin", { id, ...patch }, (p) => p.updateSkin(id, patch));
 export const deleteSkin = (id: string) => call<void>("delete_skin", { id }, (p) => p.deleteSkin(id));
 export const setActiveSkin = (id: string | null) => call<void>("set_active_skin", { id }, (p) => p.setActiveSkin(id));
+/** Keeps the outer layer of a skin picture (base64 or a data URL) as a cosmetic. */
+export const addCosmetic = (name: string, png: string) => call<Cosmetic>("add_cosmetic", { name, png }, (p) => p.addCosmetic(name, png));
+export const getCosmeticDataUrl = (id: string) =>
+  call<string>("get_cosmetic_png", { id }, (p) => p.cosmeticDataUrl(id)).then((png) => (png.startsWith("data:") ? png : `data:image/png;base64,${png}`));
+export const renameCosmetic = (id: string, name: string) => call<void>("rename_cosmetic", { id, name }, (p) => p.renameCosmetic(id, name));
+export const deleteCosmetic = (id: string) => call<void>("delete_cosmetic", { id }, (p) => p.deleteCosmetic(id));
+/** Wears a cosmetic over the worn skin, in Wisp and in game (null takes it off). */
+export const wearCosmetic = (id: string | null) => call<void>("wear_cosmetic", { id }, (p) => p.wearCosmetic(id));
 export const fetchPlayerSkin = (username: string) =>
   call<PlayerSkin>("fetch_player_skin", { username }, () => Promise.reject(new Error("Looking up players needs the desktop app.")));
 export const pickSkinFiles = () => call<SkinImport>("pick_skin_files", undefined, (p) => p.needsDesktop("Importing skin files"));
 export const importSkinPaths = (files: string[]) => call<SkinImport>("import_skin_paths", { files }, (p) => p.needsDesktop("Importing skin files"));
+/** The template an image tool paints, and its prompt. */
+export const getSkinTemplate = (model: SkinModel) => call<SkinTemplate>("get_skin_template", { model }, (p) => p.needsDesktop("The skin template"));
+/** Saves the template where the player picks; resolves with where (null if cancelled). */
+export const saveSkinTemplate = (model: SkinModel) => call<string | null>("save_skin_template", { model }, (p) => p.needsDesktop("Saving the template"));
+/** A skin from the image tool's painting; with `outer`, its follow-up painting of what sits on top, as the outer layer. */
+export const skinFromPainting = (picture: string, model: SkinModel, outer?: string) =>
+  call<string>("skin_from_painting", { picture, model, outer: outer ?? null }, (p) => p.needsDesktop("Reading paintings"));
+
 export const exportSkin = (id: string) => call<string | null>("export_skin", { id }, (p) => p.needsDesktop("Exporting skins"));
 
 // ── Friends (src-tauri/src/social.rs) ──

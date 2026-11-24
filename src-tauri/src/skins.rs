@@ -7,7 +7,7 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
-use wisp_core::skins::{self, PlayerSkin, Skin, SkinLayer, SkinLibrary, SkinModel};
+use wisp_core::skins::{self, Cosmetic, PlayerSkin, Skin, SkinLayer, SkinLibrary, SkinModel};
 
 use crate::{Network, Paths, now_ms};
 
@@ -88,6 +88,38 @@ pub async fn set_active_skin(id: Option<String>, paths: State<'_, Paths>) -> Res
     paths.skins().set_active(id.as_deref()).map_err(|error| error.to_string())
 }
 
+// ── Cosmetics: outer layers to wear over any skin ──
+
+/// Keeps the outer layer of a skin picture (base64) as a cosmetic.
+#[tauri::command]
+pub async fn add_cosmetic(name: String, png: String, paths: State<'_, Paths>) -> Result<Cosmetic, String> {
+    let bytes = decode(&png)?;
+    paths.skins().add_cosmetic(&name, &bytes, now_ms()).map_err(|error| error.to_string())
+}
+
+/// A cosmetic's picture (a 64×64 skin with only its outer layer), as base64.
+#[tauri::command]
+pub async fn get_cosmetic_png(id: String, paths: State<'_, Paths>) -> Result<String, String> {
+    let bytes = std::fs::read(paths.skins().cosmetic_path(&id)).map_err(|_| "That cosmetic is gone.".to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[tauri::command]
+pub async fn rename_cosmetic(id: String, name: String, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().rename_cosmetic(&id, &name).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_cosmetic(id: String, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().remove_cosmetic(&id).map_err(|error| error.to_string())
+}
+
+/// Wears a cosmetic over the worn skin, in Wisp and in game (none takes it off).
+#[tauri::command]
+pub async fn wear_cosmetic(id: Option<String>, paths: State<'_, Paths>) -> Result<(), String> {
+    paths.skins().wear_cosmetic(id.as_deref()).map_err(|error| error.to_string())
+}
+
 /// Any Minecraft player's current skin, by name (from Mojang's public API).
 #[tauri::command]
 pub async fn fetch_player_skin(username: String, network: State<'_, Network>) -> Result<PlayerSkin, String> {
@@ -159,4 +191,59 @@ pub async fn export_skin(id: String, app: AppHandle, paths: State<'_, Paths>) ->
     };
     std::fs::copy(store.png_path(&id), &target).map_err(|error| format!("Couldn't save it: {error}"))?;
     Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+/// The template an image tool paints (four views of a blank character), as base64 PNG, the
+/// prompt that goes with it, and the follow-up prompt for the outer layer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkinTemplate {
+    png: String,
+    prompt: String,
+    outer_prompt: String,
+}
+
+fn template_png(model: SkinModel) -> Result<Vec<u8>, String> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    wisp_core::turnaround::template(model).write_to(&mut bytes, image::ImageFormat::Png).map_err(|error| error.to_string())?;
+    Ok(bytes.into_inner())
+}
+
+#[tauri::command]
+pub async fn get_skin_template(model: SkinModel) -> Result<SkinTemplate, String> {
+    Ok(SkinTemplate {
+        png: base64::engine::general_purpose::STANDARD.encode(template_png(model)?),
+        prompt: wisp_core::turnaround::PROMPT.to_string(),
+        outer_prompt: wisp_core::turnaround::OUTER_PROMPT.to_string(),
+    })
+}
+
+/// Saves the template where the player picks, to attach in their image tool.
+#[tauri::command]
+pub async fn save_skin_template(model: SkinModel, app: AppHandle) -> Result<Option<String>, String> {
+    let picked = app.dialog().file().set_title("Save the template").set_file_name("Wisp skin template.png").add_filter("PNG picture", &["png"]).blocking_save_file();
+    let Some(target) = picked.and_then(|file| file.into_path().ok()) else {
+        return Ok(None);
+    };
+    std::fs::write(&target, template_png(model)?).map_err(|error| format!("Couldn't save it: {error}"))?;
+    Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+/// Reads a painted template (what the image tool made) back into a skin, as base64 PNG; with
+/// `outer`, the follow-up painting of what sits on top, its outer layer from that.
+#[tauri::command]
+pub async fn skin_from_painting(picture: String, model: SkinModel, outer: Option<String>) -> Result<String, String> {
+    let open = |data: &str| -> Result<image::RgbaImage, String> {
+        let bytes = decode(data)?;
+        Ok(image::load_from_memory(&bytes).map_err(|_| "Wisp can't read that picture. Try a PNG, JPEG or WebP.".to_string())?.to_rgba8())
+    };
+    let painting = open(&picture)?;
+    let skin = match outer {
+        Some(outer) => wisp_core::turnaround::read_layers(&painting, &open(&outer)?, model),
+        None => wisp_core::turnaround::read(&painting, model),
+    }
+    .map_err(|error| error.to_string())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    skin.write_to(&mut png, image::ImageFormat::Png).map_err(|error| error.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(png.into_inner()))
 }

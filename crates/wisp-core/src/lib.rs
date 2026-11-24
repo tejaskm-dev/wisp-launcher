@@ -26,6 +26,8 @@ pub mod playit;
 pub mod screenshots;
 pub mod servers;
 pub mod settings;
+pub mod skin_depth;
+pub mod skin_tidy;
 pub mod skin_server;
 pub mod skins;
 pub mod social;
@@ -33,6 +35,7 @@ pub mod snapshots;
 pub mod storage;
 pub mod sync;
 pub mod tunnel;
+pub mod turnaround;
 pub mod versions;
 pub mod worlds;
 

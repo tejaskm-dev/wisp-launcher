@@ -58,6 +58,59 @@ pub struct SkinLibrary {
     pub skins: Vec<Skin>,
     /// The skin you've picked to wear.
     pub active: Option<String>,
+    /// Outer layers kept to wear over any skin: a suit, a hoodie, armour.
+    pub cosmetics: Vec<Cosmetic>,
+    /// The cosmetic worn over the skin, if any (its outer layer replaces the skin's own).
+    pub worn_cosmetic: Option<String>,
+}
+
+/// A skin's outer layer (hat, jacket, sleeves, trousers) kept on its own, to wear over any skin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cosmetic {
+    pub id: String,
+    pub name: String,
+    /// Unix milliseconds.
+    pub added: i64,
+}
+
+/// The outer layer's parts on a 64×64 skin: hat, jacket, right sleeve, left sleeve, right and
+/// left trouser legs.
+const OUTER: [(u32, u32, u32, u32); 6] = [(32, 0, 32, 16), (16, 32, 24, 16), (40, 32, 16, 16), (48, 48, 16, 16), (0, 32, 16, 16), (0, 48, 16, 16)];
+
+/// Whether a pixel of a 64×64 skin is on its outer layer.
+pub fn is_outer(x: u32, y: u32) -> bool {
+    OUTER.iter().any(|&(left, top, width, height)| x >= left && x < left + width && y >= top && y < top + height)
+}
+
+/// The outer layer of a skin, alone: everything else clear.
+pub fn outer_layer(png: &[u8]) -> Result<Vec<u8>, SkinError> {
+    let mut picture = image::load_from_memory_with_format(&normalize_png(png)?, image::ImageFormat::Png).map_err(|_| SkinError::NotPng)?.to_rgba8();
+    for (x, y, pixel) in picture.enumerate_pixels_mut() {
+        if !is_outer(x, y) {
+            *pixel = image::Rgba([0, 0, 0, 0]);
+        }
+    }
+    let mut out = Vec::new();
+    picture.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|error| SkinError::NotASkin(error.to_string()))?;
+    Ok(out)
+}
+
+/// A skin wearing a cosmetic: its own outer layer replaced by the cosmetic's.
+pub fn wear(skin_png: &[u8], cosmetic_png: &[u8]) -> Result<Vec<u8>, SkinError> {
+    let mut skin = image::load_from_memory_with_format(&normalize_png(skin_png)?, image::ImageFormat::Png).map_err(|_| SkinError::NotPng)?.to_rgba8();
+    let cosmetic = image::load_from_memory_with_format(cosmetic_png, image::ImageFormat::Png).map_err(|_| SkinError::NotPng)?.to_rgba8();
+    if cosmetic.dimensions() != (64, 64) {
+        return Err(SkinError::NotASkin("a cosmetic is 64 by 64".into()));
+    }
+    for (x, y, pixel) in skin.enumerate_pixels_mut() {
+        if is_outer(x, y) {
+            *pixel = *cosmetic.get_pixel(x, y);
+        }
+    }
+    let mut out = Vec::new();
+    skin.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).map_err(|error| SkinError::NotASkin(error.to_string()))?;
+    Ok(out)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -219,6 +272,71 @@ impl SkinStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Where a cosmetic's picture is.
+    pub fn cosmetic_path(&self, id: &str) -> PathBuf {
+        let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        self.dir.join("cosmetics").join(format!("{safe}.png"))
+    }
+
+    /// Keeps a skin's outer layer as a cosmetic (only the outer layer of `png` is kept).
+    pub fn add_cosmetic(&self, name: &str, png: &[u8], now: i64) -> Result<Cosmetic, SkinError> {
+        let outer = outer_layer(png)?;
+        let mut library = self.library();
+        let cosmetic = Cosmetic { id: format!("cosmetic-{}", crate::journal::new_id(now)), name: clean_name(name).replace("Untitled skin", "Untitled cosmetic"), added: now };
+        let path = self.cosmetic_path(&cosmetic.id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, outer)?;
+        library.cosmetics.push(cosmetic.clone());
+        self.save(&library)?;
+        Ok(cosmetic)
+    }
+
+    pub fn rename_cosmetic(&self, id: &str, name: &str) -> Result<(), SkinError> {
+        let mut library = self.library();
+        let cosmetic = library.cosmetics.iter_mut().find(|cosmetic| cosmetic.id == id).ok_or(SkinError::Missing)?;
+        cosmetic.name = clean_name(name);
+        self.save(&library)?;
+        Ok(())
+    }
+
+    pub fn remove_cosmetic(&self, id: &str) -> Result<(), SkinError> {
+        let mut library = self.library();
+        library.cosmetics.retain(|cosmetic| cosmetic.id != id);
+        if library.worn_cosmetic.as_deref() == Some(id) {
+            library.worn_cosmetic = None;
+        }
+        self.save(&library)?;
+        let _ = std::fs::remove_file(self.cosmetic_path(id));
+        Ok(())
+    }
+
+    /// Wears a cosmetic over whatever skin is worn (none takes it off).
+    pub fn wear_cosmetic(&self, id: Option<&str>) -> Result<(), SkinError> {
+        let mut library = self.library();
+        if let Some(id) = id
+            && !library.cosmetics.iter().any(|cosmetic| cosmetic.id == id)
+        {
+            return Err(SkinError::Missing);
+        }
+        library.worn_cosmetic = id.map(str::to_string);
+        self.save(&library)?;
+        Ok(())
+    }
+
+    /// The worn skin as the game gets it (with the worn cosmetic over it), and whether it has slim arms.
+    pub fn worn_png(&self) -> Option<(Vec<u8>, bool)> {
+        let library = self.library();
+        let skin = library.active.as_ref().and_then(|id| library.skins.iter().find(|skin| &skin.id == id))?;
+        let png = std::fs::read(self.png_path(&skin.id)).ok()?;
+        let png = match library.worn_cosmetic.as_deref().and_then(|id| std::fs::read(self.cosmetic_path(id)).ok()) {
+            Some(cosmetic) => wear(&png, &cosmetic).unwrap_or(png),
+            None => png,
+        };
+        Some((png, skin.model == SkinModel::Slim))
     }
 }
 
@@ -396,6 +514,37 @@ pub async fn fetch_player_skin(client: &HttpClient, username: &str) -> Result<Pl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filled(color: [u8; 4]) -> Vec<u8> {
+        let picture = image::RgbaImage::from_pixel(64, 64, image::Rgba(color));
+        let mut out = Vec::new();
+        picture.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    #[test]
+    fn cosmetics_keep_only_the_outer_layer_and_go_over_any_skin() {
+        let dir = std::env::temp_dir().join(format!("wisp-cosmetics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SkinStore::new(&dir);
+        let skin = store.add("Me", SkinModel::Classic, &filled([200, 150, 120, 255]), None, 1).unwrap();
+        store.set_active(Some(&skin.id)).unwrap();
+        // A "suit": a whole skin in navy, of which only the outer layer is kept.
+        let suit = store.add_cosmetic("Suit", &filled([20, 30, 70, 255]), 2).unwrap();
+        let kept = image::load_from_memory(&std::fs::read(store.cosmetic_path(&suit.id)).unwrap()).unwrap().to_rgba8();
+        assert_eq!(kept.get_pixel(40, 8).0, [20, 30, 70, 255], "hat");
+        assert_eq!(kept.get_pixel(8, 8).0[3], 0, "the face isn't part of it");
+        store.wear_cosmetic(Some(&suit.id)).unwrap();
+        let (worn, slim) = store.worn_png().unwrap();
+        let worn = image::load_from_memory(&worn).unwrap().to_rgba8();
+        assert!(!slim);
+        assert_eq!(worn.get_pixel(8, 8).0, [200, 150, 120, 255], "the skin's own face");
+        assert_eq!(worn.get_pixel(20, 36).0, [20, 30, 70, 255], "the suit's jacket");
+        assert_eq!(worn.get_pixel(20, 20).0, [200, 150, 120, 255], "the skin's own body underneath");
+        store.remove_cosmetic(&suit.id).unwrap();
+        assert_eq!(store.library().worn_cosmetic, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let picture = image::RgbaImage::from_fn(width, height, |x, y| image::Rgba([(x * 4 % 256) as u8, (y * 4 % 256) as u8, 128, 255]));
