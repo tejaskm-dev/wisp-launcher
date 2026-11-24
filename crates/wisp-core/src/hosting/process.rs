@@ -329,6 +329,11 @@ impl ServerProcess {
         *self.state.borrow()
     }
 
+    /// The state as it changes (to wait for the server to come up, say).
+    pub fn watch_state(&self) -> watch::Receiver<RunState> {
+        self.state.subscribe()
+    }
+
     pub fn players(&self) -> Vec<String> {
         lock(&self.players).clone()
     }

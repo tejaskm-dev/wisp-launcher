@@ -3,9 +3,6 @@ import { m } from "motion/react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Ghost } from "../components/brand/Ghost";
 import { ChatPanel } from "../components/friends/ChatPanel";
-import { loadSkinImage } from "../components/skins/SkinDoll";
-import { skinSource } from "../components/skins/skinSource";
-import { drawFace } from "../components/skins/skinTexture";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Page, Panel } from "../components/ui/Page";
@@ -19,7 +16,6 @@ import {
   declineFriend,
   declineParty,
   declineServerInvite,
-  getSkins,
   getSocial,
   inviteToParty,
   isDesktop,
@@ -42,20 +38,6 @@ import { useApp } from "../state/AppContext";
 
 /** "npub1abc…wxyz" */
 const shortCode = (code: string) => (code.length > 16 ? `${code.slice(0, 9)}…${code.slice(-4)}` : code);
-
-/** The worn skin's face as a tiny PNG, for friends to see. */
-async function wornFace(): Promise<string | null> {
-  try {
-    const library = await getSkins();
-    const worn = library.skins.find((skin) => skin.id === library.active);
-    if (!worn) return null;
-    const canvas = document.createElement("canvas");
-    drawFace(await loadSkinImage(await skinSource(worn)), canvas);
-    return canvas.toDataURL("image/png");
-  } catch {
-    return null;
-  }
-}
 
 export function FriendsPage() {
   const { notify, now } = useApp();
@@ -104,21 +86,6 @@ export function FriendsPage() {
       window.clearInterval(timer);
     };
   }, [reload]);
-
-  // Keep the face friends see in step with the skin you wear.
-  const enabled = social?.enabled ?? false;
-  const profileName = social?.profile.name;
-  const profileFace = social?.profile.face;
-  useEffect(() => {
-    if (!enabled || profileName === undefined) return;
-    let active = true;
-    void wornFace().then((face) => {
-      if (active && face && face !== profileFace) setSocialProfile(profileName, face).then(setSocial, () => {});
-    });
-    return () => {
-      active = false;
-    };
-  }, [enabled, profileName, profileFace]);
 
   /** Runs an action that returns the new state, with a spinner and a toast if it fails. */
   const act = async (label: string, work: () => Promise<SocialView>, failTitle: string) => {
@@ -169,7 +136,7 @@ export function FriendsPage() {
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-bold">{invite.server.name}</p>
                           <p className="truncate text-xs text-mute">
-                            {host?.profile.name ?? shortCode(invite.from)} · {serverLine(live ?? invite.server)} · {live?.online ? "Up now" : "Not running right now"}
+                            {host?.profile.name ?? shortCode(invite.from)} · {serverLine(live ?? invite.server)} · {live?.online ? "Up now" : live?.starting ? "Starting up" : "Not running right now"}
                           </p>
                         </div>
                         <button
@@ -424,6 +391,7 @@ function serverLine(server: ServerCard): string {
 
 const JOIN_STEPS: Record<JoinProgress["step"], string> = {
   asking: "Asking their Wisp…",
+  waiting: "Waiting for the server to start…",
   connecting: "Connecting to their computer…",
   mods: "Getting the server's mods…",
   launching: "Starting Minecraft…",
@@ -543,7 +511,7 @@ function FriendRow({
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-bold">{server.name}</p>
             <p className="truncate text-xs text-mute">
-              {serverLine(server)} · {server.players} of {server.maxPlayers} on
+              {serverLine(server)} · {server.starting && !server.online ? "starting up" : `${server.players} of ${server.maxPlayers} on`}
             </p>
           </div>
           <button

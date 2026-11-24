@@ -64,6 +64,16 @@ function codeFromSecret() {
   return Buffer.from(hkdfSync("sha256", secret, "wisp-launcher", "tester code v1", 15));
 }
 
+/**
+ * The seed tester builds make their shared skin key from (hex), so every tester's game trusts every
+ * tester's server: wisp_core::skin_server::shared_key. Not in the source, like the code.
+ */
+function skinSeed() {
+  const secret = (process.env.TAURI_SIGNING_PRIVATE_KEY ?? "").trim();
+  if (!secret) fail("TAURI_SIGNING_PRIVATE_KEY isn't set");
+  return Buffer.from(hkdfSync("sha256", secret, "wisp-launcher", "skin key v1", 32)).toString("hex");
+}
+
 /** WISP- and six groups of four. */
 function formatCode(code) {
   let bits = BigInt(`0x${code.toString("hex")}`);
@@ -154,7 +164,8 @@ function feed(folder, version, base, notesFile) {
 
 const [command, ...rest] = process.argv.slice(2);
 if (command === "code") console.log(formatCode(codeFromSecret()));
+else if (command === "skin-seed") console.log(skinSeed());
 else if (command === "code-test") codeTest();
 else if (command === "pack" && rest.length === 4) pack(...rest);
 else if (command === "feed" && rest.length === 4) feed(...rest);
-else fail("Use: code | pack <bundles> <out> <system> <run> | feed <folder> <version> <base url> <notes file>");
+else fail("Use: code | skin-seed | pack <bundles> <out> <system> <run> | feed <folder> <version> <base url> <notes file>");

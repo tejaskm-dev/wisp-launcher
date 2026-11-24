@@ -19,7 +19,7 @@ pub struct StatusCache(Mutex<HashMap<String, (Instant, ServerStatus)>>);
 /// Each server's status, in the order asked. Ones asked for in the last minute come from memory
 /// unless `refresh` is set.
 #[tauri::command]
-pub async fn get_server_statuses(addresses: Vec<String>, refresh: Option<bool>, cache: State<'_, StatusCache>) -> Result<Vec<ServerStatus>, String> {
+pub async fn get_server_statuses(addresses: Vec<String>, refresh: Option<bool>, cache: State<'_, StatusCache>, app: tauri::AppHandle) -> Result<Vec<ServerStatus>, String> {
     let mut known: HashMap<String, ServerStatus> = HashMap::new();
     if !refresh.unwrap_or(false) {
         let cached = cache.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -37,6 +37,11 @@ pub async fn get_server_statuses(addresses: Vec<String>, refresh: Option<bool>, 
         let answers = servers::statuses(missing).await;
         let mut cached = cache.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for status in answers {
+            // A server hosted with Wisp says which key its skins are signed with: trust it, so
+            // joining it from the game's own list shows everyone's skins.
+            if let Some(key) = &status.wisp_skin_key {
+                crate::trust_skin_key(&app, key);
+            }
             cached.insert(status.address.clone(), (Instant::now(), status.clone()));
             known.insert(status.address.clone(), status);
         }

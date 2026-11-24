@@ -8,6 +8,8 @@
 //! through playit's API with that secret, and the agent carries players from the tunnel's address
 //! to the server while it runs.
 
+use std::future::Future;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,7 +20,7 @@ use playit_agent_core::playit_agent::{PlayitAgent, PlayitAgentSettings};
 use playit_api_client::PlayitApi;
 use playit_api_client::api::{
     AccountTunnelOriginCreate, AgentOrigin, AgentRunDataV1, AgentTunnelAttr, AgentTunnelConfig, AgentTunnelV1, ApiError, ClaimAgentType, ClaimExchangeError, ClaimSetupError, ClaimSetupResponse, ReqClaimExchange, ReqClaimSetup, ReqTunnelsCreateV1,
-    TunnelPortDetails, TunnelType,
+    ReqTunnelsUpdate, TunnelCreateErrorV1, TunnelPortDetails, TunnelType,
 };
 
 const API: &str = "https://api.playit.gg";
@@ -26,6 +28,16 @@ const API: &str = "https://api.playit.gg";
 const CLAIM_WITHIN: Duration = Duration::from_secs(15 * 60);
 /// How often the agent rereads which tunnels it carries.
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
+/// How long one question to playit.gg may take before it counts as unanswered (nothing waits on
+/// it for ever).
+const ANSWER_WITHIN: Duration = Duration::from_secs(20);
+/// Once the player has approved, how long playit.gg may take to hand over the agent's key.
+const KEY_WITHIN: Duration = Duration::from_secs(60);
+
+/// `future`, or Unreachable if playit.gg takes too long to answer.
+async fn within<T>(future: impl Future<Output = T>) -> Result<T, PlayitError> {
+    tokio::time::timeout(ANSWER_WITHIN, future).await.map_err(|_| PlayitError::Unreachable("it took too long to answer".into()))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlayitError {
@@ -37,6 +49,14 @@ pub enum PlayitError {
     Expired,
     #[error("playit.gg wouldn't make the tunnel: {0}.")]
     Tunnel(String),
+    #[error("playit.gg approved Wisp but didn't hand over its key. If your playit account has no room for another agent, remove an old one on playit.gg (Agents), then link again.")]
+    NoKey,
+    #[error("Your playit account has no free Minecraft tunnel left, and none of Wisp's own was free to reuse. Delete a tunnel you don't use on playit.gg (Tunnels), then try again.")]
+    Full,
+    #[error("playit.gg wants your account verified before it makes tunnels. Confirm your email on playit.gg, then try again.")]
+    Unverified,
+    #[error("playit.gg says this copy of its agent is too old. Update Wisp, then try again.")]
+    TooOld,
     #[error("playit.gg doesn't know this Wisp any more. Link it again.")]
     NotLinked,
     #[error("The tunnel didn't come up on playit.gg in time. Try again in a minute.")]
@@ -78,14 +98,15 @@ pub async fn claim(code: &str, version: &str, step: &(dyn Fn(ClaimStep) + Send +
         if Instant::now() > deadline {
             return Err(PlayitError::Expired);
         }
-        let now = match api.claim_setup(ReqClaimSetup { code: code.to_string(), agent_type: ClaimAgentType::SelfManaged, version: version.to_string() }).await {
-            Ok(ClaimSetupResponse::WaitingForUserVisit) => ClaimStep::Visit,
-            Ok(ClaimSetupResponse::WaitingForUser) => ClaimStep::Approve,
-            Ok(ClaimSetupResponse::UserAccepted) => break,
-            Ok(ClaimSetupResponse::UserRejected) => return Err(PlayitError::Rejected),
-            Err(ApiError::Fail(ClaimSetupError::CodeExpired | ClaimSetupError::InvalidCode)) => return Err(PlayitError::Expired),
-            // Offline for a moment: keep waiting.
-            Err(_) => said.unwrap_or(ClaimStep::Visit),
+        let asked = within(api.claim_setup(ReqClaimSetup { code: code.to_string(), agent_type: ClaimAgentType::SelfManaged, version: version.to_string() })).await;
+        let now = match asked {
+            Ok(Ok(ClaimSetupResponse::WaitingForUserVisit)) => ClaimStep::Visit,
+            Ok(Ok(ClaimSetupResponse::WaitingForUser)) => ClaimStep::Approve,
+            Ok(Ok(ClaimSetupResponse::UserAccepted)) => break,
+            Ok(Ok(ClaimSetupResponse::UserRejected)) => return Err(PlayitError::Rejected),
+            Ok(Err(ApiError::Fail(ClaimSetupError::CodeExpired | ClaimSetupError::InvalidCode))) => return Err(PlayitError::Expired),
+            // Offline or slow for a moment: keep waiting.
+            _ => said.unwrap_or(ClaimStep::Visit),
         };
         if said != Some(now) {
             step(now);
@@ -94,13 +115,17 @@ pub async fn claim(code: &str, version: &str, step: &(dyn Fn(ClaimStep) + Send +
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     step(ClaimStep::Approved);
+    // Approved: the key should follow at once. If it doesn't within a minute, something on
+    // playit's side stopped it (an account with no room for another agent, say): say so, rather
+    // than waiting out the quarter of an hour.
+    let key_deadline = Instant::now() + KEY_WITHIN;
     loop {
-        match api.claim_exchange(ReqClaimExchange { code: code.to_string() }).await {
-            Ok(key) => return Ok(key.secret_key),
-            Err(ApiError::Fail(ClaimExchangeError::UserRejected)) => return Err(PlayitError::Rejected),
-            Err(ApiError::Fail(ClaimExchangeError::CodeExpired | ClaimExchangeError::CodeNotFound)) => return Err(PlayitError::Expired),
-            Err(_) if Instant::now() > deadline => return Err(PlayitError::Expired),
-            Err(_) => tokio::time::sleep(Duration::from_secs(2)).await,
+        match within(api.claim_exchange(ReqClaimExchange { code: code.to_string() })).await {
+            Ok(Ok(key)) => return Ok(key.secret_key),
+            Ok(Err(ApiError::Fail(ClaimExchangeError::UserRejected))) => return Err(PlayitError::Rejected),
+            Ok(Err(ApiError::Fail(ClaimExchangeError::CodeExpired | ClaimExchangeError::CodeNotFound))) => return Err(PlayitError::Expired),
+            _ if Instant::now() > key_deadline => return Err(PlayitError::NoKey),
+            _ => tokio::time::sleep(Duration::from_secs(2)).await,
         }
     }
 }
@@ -136,10 +161,35 @@ fn tunnels_in(data: &AgentRunDataV1) -> Vec<Tunnel> {
 }
 
 async fn run_data(api: &PlayitApi) -> Result<AgentRunDataV1, PlayitError> {
-    api.v1_agents_rundata().await.map_err(|error| match error {
+    within(api.v1_agents_rundata()).await?.map_err(|error| match error {
         playit_api_client::api::ApiErrorNoFail::ApiError(_) => PlayitError::NotLinked,
         other => PlayitError::Unreachable(other.to_string()),
     })
+}
+
+/// Whether playit.gg still knows this computer's agent (it may have been removed there, or a
+/// guest account ended). Unreachable when it can't be asked.
+pub async fn check(secret: &str) -> Result<(), PlayitError> {
+    run_data(&PlayitApi::create(API.into(), Some(secret.to_string()))).await.map(|_| ())
+}
+
+/// What a refusal to make a tunnel means for the player.
+fn refused(reason: &TunnelCreateErrorV1) -> PlayitError {
+    match reason {
+        TunnelCreateErrorV1::RequiresPlayitPremium | TunnelCreateErrorV1::PublicPortRequiresPlayitPremium | TunnelCreateErrorV1::RegionRequiresPlayitPremium => PlayitError::Full,
+        TunnelCreateErrorV1::RequiresVerifiedAccount => PlayitError::Unverified,
+        TunnelCreateErrorV1::AgentNotFound | TunnelCreateErrorV1::InvalidAgentId => PlayitError::NotLinked,
+        TunnelCreateErrorV1::AgentVersionTooOld => PlayitError::TooOld,
+        other => PlayitError::Tunnel(format!("{other:?}")),
+    }
+}
+
+/// One of Wisp's own Minecraft tunnels on this computer that no server in `keep_ports` uses.
+fn spare_tunnel<'a>(data: &'a AgentRunDataV1, keep_ports: &[u16]) -> Option<&'a AgentTunnelV1> {
+    data.tunnels
+        .iter()
+        .filter(|tunnel| tunnel.tunnel_type.as_deref() == Some("minecraft-java") && tunnel.name.starts_with("Wisp "))
+        .find(|tunnel| local_port_of(tunnel).is_none_or(|port| !keep_ports.contains(&port)))
 }
 
 /// The Minecraft tunnels this computer's agent carries.
@@ -148,8 +198,10 @@ pub async fn tunnels(secret: &str) -> Result<Vec<Tunnel>, PlayitError> {
     Ok(tunnels_in(&run_data(&api).await?))
 }
 
-/// The tunnel to `local_port` on this computer, made (named `name`) if there isn't one yet.
-pub async fn tunnel_to(secret: &str, name: &str, local_port: u16) -> Result<Tunnel, PlayitError> {
+/// The tunnel to `local_port` on this computer, made (named `name`) if there isn't one yet. When
+/// the account has no room for another, one of Wisp's own tunnels that no server in `keep_ports`
+/// uses is pointed here instead.
+pub async fn tunnel_to(secret: &str, name: &str, local_port: u16, keep_ports: &[u16]) -> Result<Tunnel, PlayitError> {
     let api = PlayitApi::create(API.into(), Some(secret.to_string()));
     let data = run_data(&api).await?;
     if let Some(tunnel) = tunnels_in(&data).into_iter().find(|tunnel| tunnel.local_port == local_port) {
@@ -169,11 +221,24 @@ pub async fn tunnel_to(secret: &str, name: &str, local_port: u16) -> Result<Tunn
         name: Some(format!("Wisp {}", name.trim())),
         firewall_id: None,
     };
-    api.v1_tunnels_create(request).await.map_err(|error| match error {
-        ApiError::Fail(reason) => PlayitError::Tunnel(format!("{reason:?}")),
-        ApiError::ApiError(_) => PlayitError::NotLinked,
-        ApiError::ClientError(error) => PlayitError::Unreachable(format!("{error:?}")),
-    })?;
+    match within(api.v1_tunnels_create(request)).await? {
+        Ok(_) => {}
+        Err(ApiError::Fail(reason)) => {
+            let error = refused(&reason);
+            let spare = matches!(error, PlayitError::Full).then(|| spare_tunnel(&data, keep_ports)).flatten();
+            let Some(spare) = spare else {
+                return Err(error);
+            };
+            let moved = within(api.tunnels_update(ReqTunnelsUpdate { tunnel_id: spare.id, local_ip: Ipv4Addr::LOCALHOST.into(), local_port: Some(local_port), agent_id: Some(data.agent_id), enabled: true })).await?;
+            moved.map_err(|error| match error {
+                ApiError::Fail(reason) => PlayitError::Tunnel(format!("{reason:?}")),
+                ApiError::ApiError(_) => PlayitError::NotLinked,
+                ApiError::ClientError(error) => PlayitError::Unreachable(format!("{error:?}")),
+            })?;
+        }
+        Err(ApiError::ApiError(_)) => return Err(PlayitError::NotLinked),
+        Err(ApiError::ClientError(error)) => return Err(PlayitError::Unreachable(format!("{error:?}"))),
+    }
     // It takes playit a moment to give the new tunnel an address.
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
@@ -214,7 +279,7 @@ impl Agent {
                         _ = cancel.cancelled() => return,
                         _ = tokio::time::sleep(REFRESH_EVERY) => {}
                     }
-                    if let Ok(data) = api.v1_agents_rundata().await {
+                    if let Ok(Ok(data)) = within(api.v1_agents_rundata()).await {
                         lookup.update_from_run_data(&data).await;
                     }
                 }

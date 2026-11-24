@@ -535,12 +535,14 @@ async fn launch_instance(
     // theirs from Mojang). WISP_SKIN_SERVER=0 leaves it out, to rule it out when a game won't start.
     // A game joining a friend's server signs in through the host's skin server instead (over the
     // link), so everyone there sees everyone's skin.
+    // Otherwise, joining a server from Minecraft's own list brings this player's skin to it when
+    // it's hosted with Wisp (see hosting::bring_skin).
     let skin_server = match account.kind {
         wisp_core::accounts::AccountKind::Offline if std::env::var_os("WISP_SKIN_SERVER").is_none_or(|value| value != "0") => {
             let joined = skins_state.2.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&id).cloned();
             match joined {
                 Some(host) => Some(host),
-                None => skins_state.0.get_or_init(|| start_skin_server(paths.data.clone(), skins_state.1.clone())).await.clone(),
+                None => skins_state.0.get_or_init(|| start_skin_server(paths.data.clone(), skins_state.1.clone(), skins_state.3.clone())).await.clone(),
             }
         }
         _ => None,
@@ -695,6 +697,10 @@ async fn play(
     stop_requested: oneshot::Receiver<()>,
 ) {
     let while_playing = settings.while_playing;
+    // Joining a server from the game's own list brings this player's skin (hosting::bring_skin),
+    // unless this game signs in through a friend's server already (joined through Wisp).
+    let brings_skin = options.skin_server.is_some()
+        && !app.state::<SkinServerState>().2.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains_key(&id);
     // When the game window came up (0 until it does), for the journal.
     let started_at = AtomicI64::new(0);
     let report = |update: LaunchUpdate| {
@@ -789,10 +795,14 @@ async fn play(
                 let _ = app.emit(FIXED_EVENT, FixedEvent { instance_id: id.clone(), report: fixes });
             }
         }
-        let prepared = match prepared {
+        let mut prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => break Err(error),
         };
+        if brings_skin {
+            let (app, id) = (app.clone(), id.clone());
+            prepared.on_connect(std::sync::Arc::new(move |address| hosting::bring_skin(&app, &id, address)));
+        }
         if let Some(launches) = app.try_state::<Launches>()
             && let Some(slot) = launches
                 .0
@@ -1537,7 +1547,43 @@ struct SkinServerState(
     tokio::sync::OnceCell<Option<wisp_core::skin_server::SkinServer>>,
     wisp_core::skin_server::Guests,
     SyncMutex<HashMap<String, wisp_core::skin_server::SkinServer>>,
+    /// Other Wisp hosts' skin keys the game trusts (learned from their servers' list answers).
+    wisp_core::skin_server::Trusted,
 );
+
+/// The seed tester builds make their shared skin key from (a build secret; see
+/// scripts/tester-updates.mjs). WISP_SKIN_SEED in the environment stands in, for trying it out.
+const SKIN_SEED: Option<&str> = option_env!("WISP_SKIN_SEED");
+
+fn skin_seed() -> Option<String> {
+    std::env::var("WISP_SKIN_SEED").ok().or_else(|| SKIN_SEED.map(str::to_string)).map(|seed| seed.trim().to_string()).filter(|seed| !seed.is_empty())
+}
+
+/// Where the skin keys learned from other Wisp hosts are kept.
+fn trusted_keys_path(data: &Path) -> PathBuf {
+    data.join("skins").join("trusted-keys.json")
+}
+
+/// Trusts another Wisp host's skin key from now on (kept for next time; the newest 64).
+pub(crate) fn trust_skin_key(app: &AppHandle, key: &str) {
+    if key.is_empty() || key.len() > 4096 {
+        return;
+    }
+    let trusted = app.state::<SkinServerState>().3.clone();
+    let list = {
+        let mut list = trusted.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if list.iter().any(|known| known == key) {
+            return;
+        }
+        list.push(key.to_string());
+        let extra = list.len().saturating_sub(64);
+        list.drain(..extra);
+        list.clone()
+    };
+    if let Ok(text) = serde_json::to_string(&list) {
+        let _ = std::fs::write(trusted_keys_path(&app.state::<Paths>().data), text);
+    }
+}
 
 /// The skin worn in Wisp, read fresh.
 fn worn_skin(data: &Path) -> Option<wisp_core::skin_server::Skin> {
@@ -1550,22 +1596,37 @@ fn worn_skin(data: &Path) -> Option<wisp_core::skin_server::Skin> {
 async fn skin_server(app: &AppHandle) -> Option<wisp_core::skin_server::SkinServer> {
     let state = app.state::<SkinServerState>();
     let data = app.state::<Paths>().data.clone();
-    state.0.get_or_init(|| start_skin_server(data, state.1.clone())).await.clone()
+    state.0.get_or_init(|| start_skin_server(data, state.1.clone(), state.3.clone())).await.clone()
 }
 
 /// Starts the skin server: it answers for the account playing, wearing the skin worn in Wisp, and
 /// for friends playing on a server hosted here. Anyone else asked for by name is an offline
 /// player (a server looks names up to put them on its whitelist).
-async fn start_skin_server(data: PathBuf, guests: wisp_core::skin_server::Guests) -> Option<wisp_core::skin_server::SkinServer> {
+async fn start_skin_server(data: PathBuf, guests: wisp_core::skin_server::Guests, trusted: wisp_core::skin_server::Trusted) -> Option<wisp_core::skin_server::SkinServer> {
     use wisp_core::skin_server::{self, Player, Who};
+    // Tester builds sign with the key they all share (so every tester's game trusts every
+    // tester's server); others with this computer's own.
     let key_path = data.join("skins").join("signing-key.der");
-    let key = tauri::async_runtime::spawn_blocking(move || skin_server::load_or_make_key(&key_path)).await.ok()?.ok()?;
+    let key = tauri::async_runtime::spawn_blocking(move || match skin_seed() {
+        Some(seed) => skin_server::shared_key(seed.as_bytes()),
+        None => skin_server::load_or_make_key(&key_path),
+    })
+    .await
+    .ok()?
+    .ok()?;
+    // The keys learned from other Wisp hosts, and the shared one (for builds that sign with their
+    // own but meet testers' servers).
+    if let Ok(text) = std::fs::read_to_string(trusted_keys_path(&data))
+        && let Ok(known) = serde_json::from_str::<Vec<String>>(&text)
+    {
+        trusted.write().unwrap_or_else(|poisoned| poisoned.into_inner()).extend(known);
+    }
     let lookup: skin_server::Lookup = std::sync::Arc::new(move |who| {
         if let Some(account) = AccountStore::new(data.join("accounts.json")).active() {
             let uuid = account.uuid.replace('-', "").to_lowercase();
             let matches = match who {
                 Who::Uuid(asked) => asked.replace('-', "").eq_ignore_ascii_case(&uuid),
-                Who::Name(asked) => asked.eq_ignore_ascii_case(&account.name),
+                Who::Name(asked) | Who::Joining(asked) => asked.eq_ignore_ascii_case(&account.name),
             };
             if matches {
                 return Some(Player { uuid, name: account.name, skin: worn_skin(&data) });
@@ -1575,18 +1636,20 @@ async fn start_skin_server(data: PathBuf, guests: wisp_core::skin_server::Guests
             let guests = guests.read().unwrap_or_else(|poisoned| poisoned.into_inner());
             match who {
                 Who::Uuid(asked) => guests.get(&asked.replace('-', "").to_lowercase()).cloned(),
-                Who::Name(asked) => guests.values().find(|guest| guest.name.eq_ignore_ascii_case(asked)).cloned(),
+                Who::Name(asked) | Who::Joining(asked) => guests.values().find(|guest| guest.name.eq_ignore_ascii_case(asked)).cloned(),
             }
         };
         if found.is_some() {
             return found;
         }
+        // Anyone else asked for by name is an offline player (a server looks names up for its
+        // whitelist). Not someone logging in: the skin server waits a moment for their skin.
         match who {
             Who::Name(name) if wisp_core::accounts::valid_username(name) => Some(Player { uuid: wisp_core::accounts::offline_uuid(name), name: name.to_string(), skin: None }),
             _ => None,
         }
     });
-    skin_server::start(key, lookup).await.ok()
+    skin_server::start_with(key, lookup, None, Some(trusted), skin_server::HAND_IN_WAIT).await.ok()
 }
 
 /// Whether this build can update itself (see `main`).
@@ -1651,6 +1714,20 @@ fn main() {
         .and_then(|key| key.as_str())
         .is_some_and(|key| !key.trim().is_empty());
     let builder = tauri::Builder::default()
+        // First, so a second launch stops before anything starts: two copies would share one data
+        // folder, each think only its own servers run, and both answer friends (one saying a
+        // server isn't running). Opening Wisp again brings up the one already running instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            match app.get_webview_window(away::MAIN) {
+                Some(window) => {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                // Closed for a game or a server: open it again, as the tray does.
+                None => away::come_back(app),
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())

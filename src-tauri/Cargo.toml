@@ -22,6 +22,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
+# Opening Wisp again brings up the copy already running (two would share one data folder).
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tokio = { version = "1.54.1", features = ["sync", "macros", "time"] }
 trash = "5"

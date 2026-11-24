@@ -408,6 +408,8 @@ export interface ServerCard {
   loaderVersion: string | null;
   /** Up and taking players right now. */
   online: boolean;
+  /** On its way up: joining waits for it. */
+  starting?: boolean;
   players: number;
   maxPlayers: number;
   /** How many mods joining brings along. */
@@ -449,6 +451,8 @@ export interface CodeCard {
   software?: string | null;
   addresses: string[];
   online: boolean;
+  /** On its way up: joining waits for it. */
+  starting?: boolean;
   players: number;
   maxPlayers: number;
   mods: number;
@@ -470,7 +474,7 @@ export type AddressJoin =
 export interface JoinProgress {
   code: string;
   serverId: string;
-  step: "asking" | "connecting" | "mods" | "launching" | "done" | "failed";
+  step: "asking" | "waiting" | "connecting" | "mods" | "launching" | "done" | "failed";
   doneBytes: number;
   totalBytes: number;
   message: string | null;
@@ -608,11 +612,16 @@ export interface PlayitView {
   /** The claim page, while Wisp waits for you to approve it. */
   linking: string | null;
   running: boolean;
+  /** Something wrong with the link to show (playit.gg forgot this computer), if anything. */
+  problem: string | null;
   /** playit's licence, shown in About by builds that carry its agent. */
   notice: string | null;
 }
 
-export type PlayitEvent = { kind: "linked" } | { kind: "failed"; message: string };
+export type PlayitEvent =
+  | { kind: "step"; step: "visit" | "approve" | "approved" }
+  | { kind: "linked" }
+  | { kind: "failed"; message: string };
 
 export interface AddressCheck {
   reachable: boolean;

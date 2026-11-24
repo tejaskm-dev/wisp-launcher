@@ -799,7 +799,8 @@ export async function setInstanceMemory(id: string, memoryMb: number | null): Pr
 // Add ?hosting=running, ?hosting=stopped, ?hosting=preparing or ?hosting=crashed to the URL to see
 // a hosted server in that state. Without it there are none, as on a computer that hasn't hosted.
 // &address=1 gives it a playit address, &aside=1 a mod Wisp set aside, and &playit=built-in (or
-// linked) shows the tester builds' own playit instead of the guide public builds show.
+// linked) shows the tester builds' own playit instead of the guide public builds show (forgotten:
+// linked, but playit.gg no longer knows the computer).
 const hostingState = new URLSearchParams(window.location.search).get("hosting");
 const previewParams = new URLSearchParams(window.location.search);
 let previewAddress: string | undefined = previewParams.get("address") === "1" ? "salmon-crop.gl.joinmc.link" : undefined;
@@ -876,9 +877,21 @@ export const checkServerAddress = () =>
     return hostingState === "running" ? { reachable: true, hint: null } : { reachable: false, hint: "Start the server, then check again: the address only answers while it runs." };
   });
 const playitMode = previewParams.get("playit");
-let playitLinked = playitMode === "linked";
+let playitLinked = playitMode === "linked" || playitMode === "forgotten";
 export const playit = () =>
-  simulate(() => Promise.resolve({ builtIn: playitMode === "built-in" || playitMode === "linked", linked: playitLinked, linking: null, running: playitLinked && hostingState === "running", notice: null }));
+  simulate(() =>
+    Promise.resolve({
+      builtIn: playitMode === "built-in" || playitLinked,
+      linked: playitLinked,
+      linking: null,
+      running: playitLinked && hostingState === "running",
+      problem:
+        playitMode === "forgotten"
+          ? "playit.gg doesn't know this computer any more: it was removed there, or the guest account it was linked with ended. Link it again (signing in to playit keeps it)."
+          : null,
+      notice: null,
+    }),
+  );
 export const linkPlayit = () =>
   simulate(() => {
     playitLinked = true;

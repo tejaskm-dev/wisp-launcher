@@ -697,6 +697,9 @@ pub struct Service {
     pub files: RwLock<HashMap<String, PathBuf>>,
     /// The host's skin server, where friends' games sign in and fetch skins.
     pub skins: RwLock<Option<SocketAddr>>,
+    /// The key its skin data is signed with (base64 DER), shown in the server list's answer so
+    /// players' Wisps can trust it.
+    pub skin_key: RwLock<Option<String>>,
     /// Which player each friend may hand in: their certificate's fingerprint → their UUID.
     pub players: RwLock<HashMap<String, String>>,
     pub on_player: RwLock<Option<OnPlayer>>,

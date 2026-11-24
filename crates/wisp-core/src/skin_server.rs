@@ -7,9 +7,15 @@
 //!
 //! It answers what the game asks of Mojang's session server and services (profiles, skins, the
 //! keys skin data is signed with, which features a player may use) and nothing else.
+//!
+//! On a server hosted here it answers for everyone who joins. A player whose Wisp hands in their
+//! skin as their game connects (even when they joined from Minecraft's own server list) is waited
+//! for a moment, so they arrive with it. Tester builds all sign with one key made from a build
+//! secret, and every game trusts it, so players see each other's skins on any Wisp-hosted server.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -43,7 +49,18 @@ pub struct Skin {
 pub enum Who<'a> {
     Uuid(&'a str),
     Name(&'a str),
+    /// A player logging in to a server hosted here, by name: only someone this Wisp really knows
+    /// (its own account, or a guest who handed in a skin), never a stand-in.
+    Joining(&'a str),
 }
+
+/// How long a server's login waits for a player's Wisp to hand in their skin (it does as their
+/// game connects, a second or two through a tunnel), before letting them in without one.
+pub const HAND_IN_WAIT: Duration = Duration::from_secs(6);
+
+/// Keys besides its own whose skin data the game should trust (base64 DER public keys): servers
+/// hosted with Wisp that sign with their own.
+pub type Trusted = Arc<std::sync::RwLock<Vec<String>>>;
 
 /// Finds a player, read fresh for each question (so a skin changed in Wisp shows next time the
 /// game asks).
@@ -66,6 +83,8 @@ pub struct SkinServer {
     pub metadata: String,
     /// Its port on 127.0.0.1 (skin addresses in its answers name it).
     pub port: u16,
+    /// The public key its answers are signed with (base64 DER), for others to trust.
+    pub public_key: String,
 }
 
 /// Whether bytes are a skin the game can wear: a PNG, 64 by 64 or 64 by 32, and small.
@@ -81,6 +100,24 @@ struct Inner {
     metadata: String,
     lookup: Lookup,
     observe: Option<Observe>,
+    trusted: Option<Trusted>,
+    hand_in_wait: Duration,
+}
+
+/// The key every tester build signs skin data with, made from a secret the build carries (so the
+/// same everywhere, and not in the source). Made the same way each time: a seeded generator
+/// drives the key maker. A change to the `rsa` crate could change the key it makes from the same
+/// seed, which `the_shared_key_is_the_same_every_time` catches.
+pub fn shared_key(seed: &[u8]) -> std::io::Result<RsaPrivateKey> {
+    use rand_chacha::rand_core::SeedableRng;
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(<sha2::Sha256 as sha2::Digest>::digest(seed).into());
+    RsaPrivateKey::new(&mut rng, 2048).map_err(std::io::Error::other)
+}
+
+/// A key's public half as the game takes it (base64 DER).
+pub fn public_der(key: &RsaPrivateKey) -> std::io::Result<String> {
+    let der = RsaPublicKey::from(key).to_public_key_der().map_err(std::io::Error::other)?;
+    Ok(STANDARD.encode(der.as_bytes()))
 }
 
 /// The key skin data is signed with: loaded from `key_path`, or made (and kept there) the first time.
@@ -106,6 +143,12 @@ pub async fn start(key: RsaPrivateKey, lookup: Lookup) -> std::io::Result<SkinSe
 
 /// `start`, telling `observe` about every question the game asks.
 pub async fn start_observed(key: RsaPrivateKey, lookup: Lookup, observe: Option<Observe>) -> std::io::Result<SkinServer> {
+    start_with(key, lookup, observe, None, HAND_IN_WAIT).await
+}
+
+/// `start_observed`, also trusting `trusted` keys (read each time the game asks), and waiting up
+/// to `hand_in_wait` for a player logging in whose skin hasn't been handed in yet.
+pub async fn start_with(key: RsaPrivateKey, lookup: Lookup, observe: Option<Observe>, trusted: Option<Trusted>, hand_in_wait: Duration) -> std::io::Result<SkinServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let public = RsaPublicKey::from(&key);
@@ -121,7 +164,7 @@ pub async fn start_observed(key: RsaPrivateKey, lookup: Lookup, observe: Option<
         "signaturePublickey": public_pem,
     })
     .to_string();
-    let inner = Arc::new(Inner { port, signer: SigningKey::<sha1_10::Sha1>::new(key), public_der, metadata: metadata.clone(), lookup, observe });
+    let inner = Arc::new(Inner { port, signer: SigningKey::<sha1_10::Sha1>::new(key), public_der: public_der.clone(), metadata: metadata.clone(), lookup, observe, trusted, hand_in_wait });
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let inner = inner.clone();
@@ -130,7 +173,7 @@ pub async fn start_observed(key: RsaPrivateKey, lookup: Lookup, observe: Option<
             });
         }
     });
-    Ok(SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata, port })
+    Ok(SkinServer { api_root: format!("http://127.0.0.1:{port}/"), metadata, port, public_key: public_der })
 }
 
 struct Response {
@@ -179,6 +222,17 @@ async fn serve(stream: TcpStream, inner: &Inner) -> std::io::Result<()> {
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await?;
 
+    // Someone logging in whom this Wisp doesn't know yet: their Wisp may be handing in their skin
+    // right now (it does as their game connects), so give it a moment.
+    if method == "GET"
+        && let Some(name) = joining_name(target)
+        && wisp_name(&name)
+    {
+        let deadline = tokio::time::Instant::now() + inner.hand_in_wait;
+        while (inner.lookup)(Who::Joining(&name)).is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
     let response = answer(inner, method, target, &body);
     if let Some(observe) = &inner.observe {
         observe(method, target, response.status);
@@ -198,6 +252,20 @@ async fn serve(stream: TcpStream, inner: &Inner) -> std::io::Result<()> {
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(&response.body).await?;
     writer.shutdown().await
+}
+
+/// The name a login check (hasJoined) asks about.
+fn joining_name(target: &str) -> Option<String> {
+    let (path, query) = target.split_once('?')?;
+    if path.trim_matches('/') != "sessionserver/session/minecraft/hasJoined" {
+        return None;
+    }
+    query.split('&').find_map(|pair| pair.strip_prefix("username=")).map(str::to_string)
+}
+
+/// A name Minecraft would take (worth waiting for).
+fn wisp_name(name: &str) -> bool {
+    (1..=16).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn answer(inner: &Inner, method: &str, target: &str, body: &[u8]) -> Response {
@@ -234,10 +302,23 @@ fn answer(inner: &Inner, method: &str, target: &str, body: &[u8]) -> Response {
             _ => Response::empty(404),
         },
         // The game checks skin data against these keys (Minecraft 1.19 and later).
-        ("GET", ["minecraftservices", "publickeys"]) => Response::json(json!({
-            "profilePropertyKeys": [{ "publicKey": inner.public_der }],
-            "playerCertificateKeys": [{ "publicKey": inner.public_der }],
-        })),
+        // Its own, and any others it was told to trust (servers hosted with Wisp that sign with
+        // their own key): the game takes skin data signed by any of them.
+        ("GET", ["minecraftservices", "publickeys"]) => {
+            let mut keys = vec![inner.public_der.clone()];
+            if let Some(trusted) = &inner.trusted {
+                for key in trusted.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter() {
+                    if !keys.contains(key) {
+                        keys.push(key.clone());
+                    }
+                }
+            }
+            let listed: Vec<Value> = keys.iter().map(|key| json!({ "publicKey": key })).collect();
+            Response::json(json!({
+                "profilePropertyKeys": listed,
+                "playerCertificateKeys": [{ "publicKey": inner.public_der }],
+            }))
+        }
         ("GET", ["minecraftservices", "player", "attributes"]) => Response::json(json!({
             "privileges": {
                 "onlineChat": { "enabled": true },
@@ -324,7 +405,7 @@ mod tests {
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
         let skin = png.clone();
         let lookup: Lookup = Arc::new(move |who| match who {
-            Who::Uuid("0123456789abcdef0123456789abcdef") | Who::Name("Wisp") => Some(Player { uuid: "0123456789abcdef0123456789abcdef".into(), name: "Wisp".into(), skin: Some(Skin { png: skin.clone(), slim: true }) }),
+            Who::Uuid("0123456789abcdef0123456789abcdef") | Who::Name("Wisp") | Who::Joining("Wisp") => Some(Player { uuid: "0123456789abcdef0123456789abcdef".into(), name: "Wisp".into(), skin: Some(Skin { png: skin.clone(), slim: true }) }),
             _ => None,
         });
         let server = start(key, lookup).await.unwrap();
@@ -354,5 +435,66 @@ mod tests {
         assert_eq!(get(port, "GET", "/minecraftservices/player/attributes", "").await.0, 200);
         assert_eq!(get(port, "GET", "/somewhere/else", "").await.0, 404);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_login_waits_for_the_players_skin_to_be_handed_in() {
+        let guests: Guests = Arc::default();
+        let known = guests.clone();
+        let lookup: Lookup = Arc::new(move |who| {
+            let guests = known.read().unwrap();
+            match who {
+                Who::Joining(name) => guests.values().find(|guest| guest.name == name).cloned(),
+                // Anyone else asked for by name is a stand-in without a skin.
+                Who::Name(name) => Some(guests.values().find(|guest| guest.name == name).cloned().unwrap_or(Player { uuid: "f".repeat(32), name: name.into(), skin: None })),
+                Who::Uuid(uuid) => guests.get(uuid).cloned(),
+            }
+        });
+        let key = RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
+        let server = start_with(key, lookup, None, None, Duration::from_secs(3)).await.unwrap();
+        // Their Wisp hands the skin in a moment after the login check starts.
+        let handing_in = {
+            let guests = guests.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let skin = Skin { png: vec![1, 2, 3], slim: false };
+                guests.write().unwrap().insert("a".repeat(32), Player { uuid: "a".repeat(32), name: "Friend".into(), skin: Some(skin) });
+            })
+        };
+        let started = std::time::Instant::now();
+        let (status, body) = get(server.port, "GET", "/sessionserver/session/minecraft/hasJoined?username=Friend&serverId=x", "").await;
+        handing_in.await.unwrap();
+        assert_eq!(status, 200);
+        let profile: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(profile["id"], "a".repeat(32), "the handed-in player, not a stand-in");
+        assert!(started.elapsed() >= Duration::from_millis(500) && started.elapsed() < Duration::from_secs(3));
+        // Nobody hands one in: after the wait, a stand-in without a skin.
+        let (status, body) = get(server.port, "GET", "/sessionserver/session/minecraft/hasJoined?username=Stranger&serverId=x", "").await;
+        assert_eq!(status, 200);
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["id"], "f".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn the_game_trusts_the_keys_it_is_told_to() {
+        let key = RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
+        let other = RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
+        let trusted: Trusted = Arc::default();
+        let lookup: Lookup = Arc::new(|_| None);
+        let server = start_with(key, lookup, None, Some(trusted.clone()), HAND_IN_WAIT).await.unwrap();
+        trusted.write().unwrap().push(public_der(&other).unwrap());
+        let (_, body) = get(server.port, "GET", "/minecraftservices/publickeys", "").await;
+        let keys: Value = serde_json::from_slice(&body).unwrap();
+        let listed: Vec<&str> = keys["profilePropertyKeys"].as_array().unwrap().iter().map(|key| key["publicKey"].as_str().unwrap()).collect();
+        assert_eq!(listed, vec![server.public_key.as_str(), public_der(&other).unwrap().as_str()]);
+    }
+
+    #[test]
+    fn the_shared_key_is_the_same_every_time() {
+        // Pinned (made in another run): if this changes, testers on builds either side of the
+        // change stop trusting each other's skins when joining from Minecraft's own list, until
+        // both update.
+        let key = shared_key(b"wisp test seed").unwrap();
+        let fingerprint = crate::launch::hex(&<sha2::Sha256 as sha2::Digest>::digest(public_der(&key).unwrap().as_bytes())[..8]);
+        assert_eq!(fingerprint, "fd031b11b57909f3");
     }
 }

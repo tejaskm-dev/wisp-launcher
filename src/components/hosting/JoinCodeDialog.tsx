@@ -70,6 +70,8 @@ export function JoinCodeDialog({ open, onClose }: { open: boolean; onClose: () =
       ? `Getting mods ${Math.round((joining.doneBytes / joining.totalBytes) * 100)}%`
       : joining?.step === "launching"
         ? "Starting the game"
+        : joining?.step === "waiting"
+          ? "Waiting for it to start"
         : joining
           ? "Connecting"
           : null;
@@ -86,7 +88,7 @@ export function JoinCodeDialog({ open, onClose }: { open: boolean; onClose: () =
             Cancel
           </Button>
           {server && (
-            <Button icon={progressLabel ? undefined : Users} disabled={!server.online || joining !== null} onClick={() => void join(consent !== null)}>
+            <Button icon={progressLabel ? undefined : Users} disabled={!(server.online || server.starting) || joining !== null} onClick={() => void join(consent !== null)}>
               {progressLabel ?? (consent ? "Install and join" : "Join")}
             </Button>
           )}
@@ -113,13 +115,13 @@ export function JoinCodeDialog({ open, onClose }: { open: boolean; onClose: () =
         </div>
         {server && (
           <div className="flex items-center gap-3 rounded-[18px] bg-cream/5 p-4">
-            <span className={`size-2.5 shrink-0 rounded-full ${server.online ? "bg-moss" : "bg-mute-2"}`} aria-hidden="true" />
+            <span className={`size-2.5 shrink-0 rounded-full ${server.online ? "bg-moss" : server.starting ? "bg-ember-soft" : "bg-mute-2"}`} aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <p className="truncate font-bold">{server.name}</p>
               <p className="truncate text-xs text-mute">
                 {runsName(server.loader, server.software)} {server.gameVersion}
                 {server.mods > 0 ? ` · ${server.mods} mods` : ""}
-                {server.online ? ` · ${server.players} of ${server.maxPlayers} on` : " · not running right now"}
+                {server.online ? ` · ${server.players} of ${server.maxPlayers} on` : server.starting ? " · starting up" : " · not running right now"}
               </p>
             </div>
             {joining && <LoaderCircle size={16} className="animate-spin text-mute" aria-label="Joining" />}
